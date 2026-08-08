@@ -235,4 +235,4 @@ Este documento não redefine decisões anteriores. Em caso de dúvida ou conflit
 
 ## Próximos passos
 
-O próximo documento definido na estrutura do repositório é [03-REQUISITOS-MVP.md](03-REQUISITOS-MVP.md). Ele deverá detalhar os requisitos do MVP sem ampliar o escopo estabelecido pelo Manifesto, pela Visão Geral e por esta Proposta de Valor.
+O próximo documento definido na estrutura do repositório é [03-ARQUITETURA.md](03-ARQUITETURA.md). Ele deverá detalhar a arquitetura conceitual do MVP sem ampliar o escopo estabelecido pelo Manifesto, pela Visão Geral e por esta Proposta de Valor.

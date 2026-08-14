@@ -3,10 +3,10 @@
 ## Identidade do projeto
 
 - **Nome:** Maestro Router.
-- **Estágio atual:** definição e especificação do MVP, com preparação para implementação.
+- **Estágio atual:** implementação incremental do MVP a partir da especificação normativa.
 - **Objetivo:** oferecer uma camada open source que escolha uma rota de modelo de IA
   de forma econômica, neutra entre provedores, controlável e explicável.
-- O repositório ainda não contém a implementação do produto.
+- O repositório contém as primeiras fatias da implementação do produto.
 
 Este arquivo é um mapa operacional. Ele não substitui a documentação normativa.
 Use [docs/INDEX.md](docs/INDEX.md) para rotear o contexto da tarefa.
@@ -79,6 +79,6 @@ interrompa a decisão local e reporte a necessidade de decisão humana.
 - A documentação normativa está em `docs/`.
 - `README.md` e `ARCHITECTURE.md` são apenas pontos de entrada; não são fontes normativas.
 - `PRODUCT.md`, `ROADMAP.md`, `CONTRIBUTING.md` e `LICENSE` são placeholders vazios.
-- Não há, neste estágio, código do produto, dependências ou ferramentas de teste configuradas.
+- Há código inicial do produto em `src/`, dependências declaradas e testes com pytest em `tests/`.
 - Não existe estrutura persistente de planos. Tarefas pequenas não precisam dela;
   mudanças maiores só devem introduzi-la quando houver utilidade concreta.

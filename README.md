@@ -2,9 +2,22 @@
 
 Maestro Router é uma plataforma open source para roteamento econômico,
 controlável e explicável entre modelos de inteligência artificial. O repositório
-contém a primeira fatia executável do MVP: validação de `POST /v1/executions` e
-recusa normativa quando nenhuma rota configurada é admissível. Integrações e
-execução de modelos ainda não estão implementadas.
+contém uma implementação incremental do MVP.
+
+O estado executável atual cobre:
+
+- validação pública de `POST /v1/executions`;
+- elegibilidade não econômica;
+- avaliação econômica anterior à seleção;
+- recusas normativas `NO_ELIGIBLE_ROUTE` e
+  `INSUFFICIENT_ECONOMIC_INFORMATION`.
+
+Ainda não estão implementados:
+
+- seleção final `lowest-estimated-cost`;
+- execução com provedores;
+- `usage`;
+- `calculated_cost`.
 
 Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
 [docs/INDEX.md](docs/INDEX.md) para localizar a fonte normativa de cada assunto.

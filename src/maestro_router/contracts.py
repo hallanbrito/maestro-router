@@ -142,7 +142,9 @@ class RefusedDecision(ClosedModel):
 
 
 class PublicError(ClosedModel):
-    code: Literal["NO_ELIGIBLE_ROUTE"]
+    code: Literal[
+        "NO_ELIGIBLE_ROUTE", "INSUFFICIENT_ECONOMIC_INFORMATION"
+    ]
     message: str
 
 

@@ -14,7 +14,17 @@ from .contracts import (
     InvalidRequestResponse,
     RefusalResponse,
 )
-from .routing import RouteCatalog, refuse_when_no_route
+from .routing import RouteCatalog, SelectedDecision, route_request
+
+
+class ExternalExecutionNotImplementedError(RuntimeError):
+    """A validated selection reached the unimplemented provider boundary."""
+
+    def __init__(self, decision: SelectedDecision) -> None:
+        self.decision = decision
+        super().__init__(
+            "Provider execution is intentionally outside the current MVP slice."
+        )
 
 
 class DuplicateMemberError(ValueError):
@@ -74,10 +84,12 @@ def create_app(catalog: RouteCatalog | None = None) -> FastAPI:
         except ValidationError as error:
             return _invalid_request(_validation_issues(error))
 
-        refusal = refuse_when_no_route(execution_request, route_catalog)
+        routing_result = route_request(execution_request, route_catalog)
+        if isinstance(routing_result, SelectedDecision):
+            raise ExternalExecutionNotImplementedError(routing_result)
         return JSONResponse(
             status_code=422,
-            content=refusal.model_dump(exclude_none=True),
+            content=routing_result.model_dump(exclude_none=True),
             media_type="application/json",
         )
 

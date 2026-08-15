@@ -41,8 +41,8 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Validação pública de `POST /v1/executions` | Schema fechado, JSON UTF-8 e erros de entrada. |
 | ✅ Implementado | Elegibilidade não econômica | Filtros atuais, ordem normativa e recusa `NO_ELIGIBLE_ROUTE`. |
 | ✅ Implementado | Avaliação econômica anterior à seleção | Estados de estimativa, tetos, comparabilidade e recusas `NO_ELIGIBLE_ROUTE` e `INSUFFICIENT_ECONOMIC_INFORMATION`. |
-| 🟡 Próxima etapa | Seleção determinística | Seleção final `lowest-estimated-cost` ainda não implementada. |
-| ⚪ Futuro | Execução com provedores | Adaptadores e chamada externa ainda não implementados. |
+| ✅ Implementado | Seleção determinística | Estratégia `lowest-estimated-cost`, candidato único, comparação decimal, desempate por `route.id` e validação interna. |
+| 🟡 Próxima etapa | Execução com provedores | Adaptadores e chamada externa ainda não implementados. |
 | ⚪ Futuro | Uso e custo calculado | `usage` e `calculated_cost` posteriores à execução ainda não implementados. |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.

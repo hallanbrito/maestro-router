@@ -9,12 +9,12 @@ O estado executável atual cobre:
 - validação pública de `POST /v1/executions`;
 - elegibilidade não econômica;
 - avaliação econômica anterior à seleção;
+- seleção determinística e validada pela estratégia `lowest-estimated-cost`;
 - recusas normativas `NO_ELIGIBLE_ROUTE` e
   `INSUFFICIENT_ECONOMIC_INFORMATION`.
 
 Ainda não estão implementados:
 
-- seleção final `lowest-estimated-cost`;
 - execução com provedores;
 - `usage`;
 - `calculated_cost`.

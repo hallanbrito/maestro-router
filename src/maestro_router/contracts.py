@@ -158,6 +158,87 @@ class ErrorIssue(ClosedModel):
     message: str
 
 
+class SelectedRoute(ClosedModel):
+    id: str
+    provider: str
+    model: str
+
+
+class SelectedStrategy(ClosedModel):
+    id: Literal["lowest-estimated-cost"] = "lowest-estimated-cost"
+    applied: Literal[True] = True
+
+
+class SelectedPublicDecision(ClosedModel):
+    outcome: Literal["selected"] = "selected"
+    route: SelectedRoute
+    strategy: SelectedStrategy
+    applied_constraints: list[AppliedConstraint]
+    reason: str
+    factors: list[DecisionFactor]
+
+
+class ExecutionResult(ClosedModel):
+    content: str
+
+
+class AvailableEconomicValue(ClosedModel):
+    status: Literal["available"] = "available"
+    amount: str
+    currency: str
+    price_reference: str
+    assumptions: list[str]
+
+
+class UncertainEconomicValue(AvailableEconomicValue):
+    status: Literal["uncertain"] = "uncertain"
+    reason: str
+
+
+class UnavailableEconomicValue(ClosedModel):
+    status: Literal["unavailable"] = "unavailable"
+    reason: str
+
+
+class ExecutionEconomics(ClosedModel):
+    estimate: (
+        AvailableEconomicValue
+        | UncertainEconomicValue
+        | UnavailableEconomicValue
+    )
+    usage: UnavailableEconomicValue
+    calculated_cost: UnavailableEconomicValue
+
+
+class ExecutionSuccessResponse(ClosedModel):
+    result: ExecutionResult
+    decision: SelectedPublicDecision
+    economics: ExecutionEconomics
+
+
+class ExecutionPublicError(ClosedModel):
+    code: Literal[
+        "EXECUTION_FAILED", "EXECUTION_UNAVAILABLE", "EXECUTION_TIMEOUT"
+    ]
+    message: str
+
+
+class ExecutionErrorResponse(ClosedModel):
+    error: ExecutionPublicError
+    decision: SelectedPublicDecision
+    economics: ExecutionEconomics
+
+
+class InternalPublicError(ClosedModel):
+    code: Literal["INVALID_CONFIGURATION", "INVALID_DECISION"]
+    message: str
+    issues: list[ErrorIssue]
+
+
+class InternalErrorResponse(ClosedModel):
+    error: InternalPublicError
+
+
 class InvalidRequestError(ClosedModel):
     code: Literal["INVALID_REQUEST"] = "INVALID_REQUEST"
     message: str = "A solicitação é inválida."

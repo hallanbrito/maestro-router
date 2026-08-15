@@ -98,6 +98,9 @@ def _non_blank(value: str | None) -> bool:
 @dataclass(frozen=True, slots=True)
 class Route:
     id: str
+    provider: str
+    model: str
+    adapter_id: str
     enabled: bool = True
     capabilities: frozenset[str] = field(default_factory=frozenset)
     quality_criteria: frozenset[str] = field(default_factory=frozenset)
@@ -105,17 +108,26 @@ class Route:
     estimate: EconomicEstimate = field(default_factory=_default_estimate)
 
     def __post_init__(self) -> None:
-        if not self.id or not any(not character.isspace() for character in self.id):
-            raise ValueError("Route IDs must contain a non-whitespace character.")
+        for field_name, value in (
+            ("Route IDs", self.id),
+            ("Provider IDs", self.provider),
+            ("Model IDs", self.model),
+            ("Adapter IDs", self.adapter_id),
+        ):
+            if not _non_blank(value):
+                raise ValueError(
+                    f"{field_name} must contain a non-whitespace character."
+                )
         if any(0xD800 <= ord(character) <= 0xDFFF for character in self.id):
             raise ValueError("Route IDs must be well-formed Unicode scalar sequences.")
 
 
 class RouteCatalog:
-    """In-memory snapshot whose routes are assumed sufficiently locally valid.
+    """In-memory route snapshot used by the routing decision.
 
-    The ``invalid_route`` and ``INVALID_CONFIGURATION`` semantics are outside
-    this slice and must not be inferred from the filters implemented below.
+    This slice classifies only the execution-adapter association as a minimal
+    local-validity concern. Other ``invalid_route`` and
+    ``INVALID_CONFIGURATION`` semantics remain outside this implementation.
     """
 
     def __init__(self, routes: Iterable[Route] = ()) -> None:
@@ -158,6 +170,10 @@ class SelectedDecision:
         return self.selected_routes[0]
 
 
+class InvalidDecisionError(ValueError):
+    """Internal selection validation rejected a routing decision."""
+
+
 @dataclass(frozen=True, slots=True)
 class _SelectionContext:
     """Authoritative facts frozen before the routing strategy is applied."""
@@ -172,15 +188,20 @@ class _SelectionContext:
     required_capabilities: frozenset[str]
     required_quality: frozenset[str]
     max_estimated_cost: tuple[str, str] | None
+    locally_invalid_route_ids: frozenset[str]
 
 
 def route_request(
-    request: ExecutionRequest, catalog: RouteCatalog
+    request: ExecutionRequest,
+    catalog: RouteCatalog,
+    *,
+    locally_invalid_route_ids: frozenset[str] = frozenset(),
 ) -> RefusalResponse | SelectedDecision:
     """Evaluate routing and return a refusal or one validated selection.
 
-    Local validity is an upstream precondition in this slice; this function
-    does not implement the normative ``invalid_route`` phase.
+    Execution-association validity is supplied from the request snapshot and
+    classified as ``invalid_route``. Other local-validity semantics remain an
+    upstream precondition in this slice.
     """
     constraints = request.constraints
     allowed_route_ids = (
@@ -200,6 +221,7 @@ def route_request(
     for route in sorted(catalog.snapshot(), key=lambda item: item.id):
         exclusion = _first_implemented_exclusion(
             route,
+            locally_invalid_route_ids,
             allowed_route_ids,
             required_capabilities,
             required_quality,
@@ -443,6 +465,11 @@ def _selection_context(
         max_estimated_cost=(
             (limit.amount, limit.currency) if limit is not None else None
         ),
+        locally_invalid_route_ids=frozenset(
+            exclusion.route_id
+            for exclusion in exclusions
+            if exclusion.reason == "invalid_route"
+        ),
     )
 
 
@@ -517,36 +544,49 @@ def _validate_selection(
     context: _SelectionContext, decision: SelectedDecision
 ) -> SelectedDecision:
     if len(decision.selected_routes) != 1:
-        raise ValueError("Selection must contain exactly one route.")
+        raise InvalidDecisionError("Selection must contain exactly one route.")
     selected = decision.selected_routes[0]
     if selected not in context.selectable_routes:
-        raise ValueError("Selected route is outside the selectable set.")
+        raise InvalidDecisionError("Selected route is outside the selectable set.")
     if decision.selectable_routes != context.selectable_routes:
-        raise ValueError("Decision changed the authoritative selectable set.")
+        raise InvalidDecisionError(
+            "Decision changed the authoritative selectable set."
+        )
     if decision.compared_routes != context.compared_routes:
-        raise ValueError("Decision changed the authoritative comparison set.")
+        raise InvalidDecisionError(
+            "Decision changed the authoritative comparison set."
+        )
     if decision.evaluated_estimates != context.evaluated_estimates:
-        raise ValueError("Decision changed the authoritative economic evaluations.")
+        raise InvalidDecisionError(
+            "Decision changed the authoritative economic evaluations."
+        )
     if decision.applied_constraints != context.applied_constraints:
-        raise ValueError("Decision changed the authoritative applied constraints.")
+        raise InvalidDecisionError(
+            "Decision changed the authoritative applied constraints."
+        )
     if decision.strategy_id != "lowest-estimated-cost":
-        raise ValueError("Selection used an unsupported strategy.")
+        raise InvalidDecisionError("Selection used an unsupported strategy.")
     if not decision.strategy_applied:
-        raise ValueError("Selection must mark the strategy as applied.")
+        raise InvalidDecisionError("Selection must mark the strategy as applied.")
     if (
         not _non_blank(decision.reason)
         or not decision.factors
         or any(not _non_blank(factor.description) for factor in decision.factors)
     ):
-        raise ValueError("Selection requires a reason and determining factors.")
+        raise InvalidDecisionError(
+            "Selection requires a reason and determining factors."
+        )
 
     if _first_implemented_exclusion(
         selected,
+        context.locally_invalid_route_ids,
         context.allowed_route_ids,
         context.required_capabilities,
         context.required_quality,
     ) is not None:
-        raise ValueError("Selected route violates an applicable constraint.")
+        raise InvalidDecisionError(
+            "Selected route violates an applicable constraint."
+        )
     if context.max_estimated_cost is not None:
         ceiling, currency = context.max_estimated_cost
         estimate = selected.estimate
@@ -556,7 +596,9 @@ def _validate_selection(
             or estimate.currency != currency
             or estimate.decimal_amount() > Decimal(ceiling)
         ):
-            raise ValueError("Selected route did not prove ceiling compliance.")
+            raise InvalidDecisionError(
+                "Selected route did not prove ceiling compliance."
+            )
 
     tie_factors = [
         factor for factor in decision.factors if factor.category == "tie_breaker"
@@ -566,9 +608,11 @@ def _validate_selection(
             route.estimate.status != "available" or not route.estimate.comparable
             for route in context.compared_routes
         ):
-            raise ValueError("Compared routes must have available comparable estimates.")
+            raise InvalidDecisionError(
+                "Compared routes must have available comparable estimates."
+            )
         if len({route.estimate.currency for route in context.compared_routes}) != 1:
-            raise ValueError("Compared routes must use one currency.")
+            raise InvalidDecisionError("Compared routes must use one currency.")
         ordered = tuple(
             sorted(
                 context.compared_routes,
@@ -576,7 +620,9 @@ def _validate_selection(
             )
         )
         if context.compared_routes != ordered:
-            raise ValueError("Compared routes are not in deterministic order.")
+            raise InvalidDecisionError(
+                "Compared routes are not in deterministic order."
+            )
         minimum = context.compared_routes[0].estimate.decimal_amount()
         tied = [
             route
@@ -584,11 +630,17 @@ def _validate_selection(
             if route.estimate.decimal_amount() == minimum
         ]
         if selected.id != min(route.id for route in tied):
-            raise ValueError("Selection does not match the minimum and tie-break rule.")
+            raise InvalidDecisionError(
+                "Selection does not match the minimum and tie-break rule."
+            )
         if len(tie_factors) != (1 if len(tied) > 1 else 0):
-            raise ValueError("Tie-breaker factor does not match the comparison.")
+            raise InvalidDecisionError(
+                "Tie-breaker factor does not match the comparison."
+            )
     elif len(context.selectable_routes) != 1 or tie_factors:
-        raise ValueError("Single-candidate selection is internally inconsistent.")
+        raise InvalidDecisionError(
+            "Single-candidate selection is internally inconsistent."
+        )
 
     return decision
 
@@ -730,6 +782,7 @@ def _ceiling_violation_factor(route: Route, ceiling: str) -> DecisionFactor:
 
 def _first_implemented_exclusion(
     route: Route,
+    locally_invalid_route_ids: frozenset[str],
     allowed_route_ids: frozenset[str] | None,
     required_capabilities: frozenset[str],
     required_quality: frozenset[str],
@@ -740,6 +793,16 @@ def _first_implemented_exclusion(
             "disabled_route",
             "route",
             f"{route.id} estava desabilitada na configuração.",
+        )
+    if route.id in locally_invalid_route_ids:
+        return Exclusion(
+            route.id,
+            "invalid_route",
+            "configuration",
+            (
+                f"{route.id} foi excluída porque sua associação de execução "
+                "era inválida."
+            ),
         )
     if allowed_route_ids is not None and route.id not in allowed_route_ids:
         return Exclusion(
@@ -844,6 +907,17 @@ def _configuration_constraints(
                     source="configuration",
                     category="route",
                     description=f"{exclusion.route_id} estava desabilitada.",
+                )
+            )
+        elif exclusion.reason == "invalid_route":
+            constraints.append(
+                AppliedConstraint(
+                    source="configuration",
+                    category="route",
+                    description=(
+                        f"{exclusion.route_id} possuía associação de execução "
+                        "inválida."
+                    ),
                 )
             )
         elif exclusion.reason == "known_unavailability":

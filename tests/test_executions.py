@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from maestro_router.api import ExternalExecutionNotImplementedError, create_app
+from maestro_router.api import create_app
 from maestro_router.contracts import ExecutionRequest
+from maestro_router.execution import TextExecutionResult
 from maestro_router.routing import (
     EconomicEstimate,
     Route,
@@ -42,8 +44,24 @@ def uncertain(amount: str = "0.01") -> EconomicEstimate:
     )
 
 
+def configured_route(route_id: str, **changes: Any) -> Route:
+    return Route(
+        id=route_id,
+        provider=f"provider-{route_id}",
+        model=f"model-{route_id}",
+        adapter_id=f"adapter-{route_id}",
+        **changes,
+    )
+
+
+class UnexpectedCallAdapter:
+    async def execute(self, request: object, route: object) -> TextExecutionResult:
+        raise AssertionError("Routing refusal must not execute an adapter.")
+
+
 def client_for(*routes: Route) -> TestClient:
-    return TestClient(create_app(RouteCatalog(routes)))
+    adapters = {route.adapter_id: UnexpectedCallAdapter() for route in routes}
+    return TestClient(create_app(RouteCatalog(routes), adapters))
 
 
 def test_structurally_valid_request_reaches_routing() -> None:
@@ -126,20 +144,20 @@ def test_empty_catalog_produces_explainable_refusal() -> None:
 
 def test_all_routes_are_eliminated_by_normative_filter_order() -> None:
     routes = (
-        Route("route-a", enabled=False),
-        Route("route-b", capabilities=frozenset({"text_generation"})),
-        Route(
+        configured_route("route-a", enabled=False),
+        configured_route("route-b", capabilities=frozenset({"text_generation"})),
+        configured_route(
             "route-c",
             capabilities=frozenset({"document_analysis"}),
             quality_criteria=frozenset(),
         ),
-        Route(
+        configured_route(
             "route-d",
             capabilities=frozenset({"document_analysis"}),
             quality_criteria=frozenset({"quality-accepted"}),
             known_unavailable=True,
         ),
-        Route(
+        configured_route(
             "route-z",
             capabilities=frozenset({"document_analysis"}),
             quality_criteria=frozenset({"quality-accepted"}),
@@ -177,7 +195,7 @@ def test_all_routes_are_eliminated_by_normative_filter_order() -> None:
 
 def test_no_eligible_route_response_matches_public_contract() -> None:
     response = client_for(
-        Route("route-text-a", capabilities=frozenset({"text_generation"}))
+        configured_route("route-text-a", capabilities=frozenset({"text_generation"}))
     ).post(
         "/v1/executions",
         json={
@@ -211,8 +229,8 @@ def test_no_eligible_route_response_matches_public_contract() -> None:
 
 def test_decision_is_deterministic_for_same_request_and_catalog() -> None:
     routes = [
-        Route("route-b", capabilities=frozenset({"text_generation"})),
-        Route("route-a", known_unavailable=True),
+        configured_route("route-b", capabilities=frozenset({"text_generation"})),
+        configured_route("route-a", known_unavailable=True),
     ]
     payload = {
         "task": "Analise.",
@@ -228,7 +246,7 @@ def test_decision_is_deterministic_for_same_request_and_catalog() -> None:
 
 def test_surviving_route_is_selected_internally() -> None:
     request = ExecutionRequest(task="Execute a tarefa.")
-    route = Route("route-a")
+    route = configured_route("route-a")
 
     decision = route_request(request, RouteCatalog([route]))
 
@@ -253,7 +271,7 @@ def test_surviving_route_is_selected_internally() -> None:
 def test_ceiling_with_indeterminate_estimate_refuses_economically(
     estimate: EconomicEstimate,
 ) -> None:
-    response = client_for(Route("route-a", estimate=estimate)).post(
+    response = client_for(configured_route("route-a", estimate=estimate)).post(
         "/v1/executions",
         json={
             "task": "Execute.",
@@ -276,7 +294,7 @@ def test_ceiling_with_indeterminate_estimate_refuses_economically(
 
 def test_ceiling_with_available_estimate_above_limit_has_no_eligible_route() -> None:
     response = client_for(
-        Route("route-a", estimate=available("0.0100000000000001"))
+        configured_route("route-a", estimate=available("0.0100000000000001"))
     ).post(
         "/v1/executions",
         json={
@@ -300,7 +318,7 @@ def test_ceiling_with_available_estimate_within_limit_reaches_selection() -> Non
             },
         }
     )
-    route = Route("route-a", estimate=available("0.100000000000000000"))
+    route = configured_route("route-a", estimate=available("0.100000000000000000"))
 
     decision = route_request(request, RouteCatalog([route]))
 
@@ -312,8 +330,8 @@ def test_ceiling_with_available_estimate_within_limit_reaches_selection() -> Non
 
 def test_multiple_routes_without_available_estimate_refuse_economically() -> None:
     response = client_for(
-        Route("route-a"),
-        Route("route-b", estimate=uncertain()),
+        configured_route("route-a"),
+        configured_route("route-b", estimate=uncertain()),
     ).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 422
@@ -331,8 +349,8 @@ def test_available_but_non_comparable_estimates_do_not_reach_selection() -> None
         non_comparability_reason="Não representa o custo total da execução.",
     )
     response = client_for(
-        Route("route-a", estimate=non_comparable),
-        Route("route-b"),
+        configured_route("route-a", estimate=non_comparable),
+        configured_route("route-b"),
     ).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 422
@@ -341,8 +359,12 @@ def test_available_but_non_comparable_estimates_do_not_reach_selection() -> None
 
 def test_multiple_available_currencies_refuse_without_conversion() -> None:
     response = client_for(
-        Route("route-a", estimate=available("0.01", "USD", "pricing-usd")),
-        Route("route-b", estimate=available("0.01", "EUR", "pricing-eur")),
+        configured_route(
+            "route-a", estimate=available("0.01", "USD", "pricing-usd")
+        ),
+        configured_route(
+            "route-b", estimate=available("0.01", "EUR", "pricing-eur")
+        ),
     ).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 422
@@ -350,7 +372,7 @@ def test_multiple_available_currencies_refuse_without_conversion() -> None:
 
 
 def test_single_route_without_ceiling_does_not_require_cost() -> None:
-    route = Route("route-a")
+    route = configured_route("route-a")
 
     decision = route_request(
         ExecutionRequest(task="Execute."), RouteCatalog([route])
@@ -369,8 +391,10 @@ def test_only_routes_with_proven_ceiling_compliance_reach_selection() -> None:
             },
         }
     )
-    valid = Route("route-valid", estimate=available("0.01", reference="pricing-valid"))
-    expensive = Route(
+    valid = configured_route(
+        "route-valid", estimate=available("0.01", reference="pricing-valid")
+    )
+    expensive = configured_route(
         "route-expensive", estimate=available("0.02", reference="pricing-expensive")
     )
 
@@ -383,8 +407,8 @@ def test_only_routes_with_proven_ceiling_compliance_reach_selection() -> None:
 
 def test_economic_evaluation_is_deterministic_across_catalog_order() -> None:
     routes = [
-        Route("route-b", estimate=uncertain("0.02")),
-        Route("route-a"),
+        configured_route("route-b", estimate=uncertain("0.02")),
+        configured_route("route-a"),
     ]
     payload = {"task": "Execute."}
 
@@ -409,7 +433,7 @@ def test_economic_evaluation_is_deterministic_across_catalog_order() -> None:
 def test_single_candidate_without_ceiling_accepts_every_estimate_status(
     estimate: EconomicEstimate,
 ) -> None:
-    route = Route("route-only", estimate=estimate)
+    route = configured_route("route-only", estimate=estimate)
 
     decision = route_request(
         ExecutionRequest(task="Execute."), RouteCatalog([route])
@@ -424,8 +448,12 @@ def test_single_candidate_without_ceiling_accepts_every_estimate_status(
 
 
 def test_multiple_routes_select_unique_lowest_decimal_estimate() -> None:
-    cheaper = Route("route-b", estimate=available("0.0100000000000000001"))
-    expensive = Route("route-a", estimate=available("0.0100000000000000002"))
+    cheaper = configured_route(
+        "route-b", estimate=available("0.0100000000000000001")
+    )
+    expensive = configured_route(
+        "route-a", estimate=available("0.0100000000000000002")
+    )
 
     decision = route_request(
         ExecutionRequest(task="Execute."),
@@ -438,8 +466,12 @@ def test_multiple_routes_select_unique_lowest_decimal_estimate() -> None:
 
 
 def test_numeric_tie_uses_smallest_route_id_and_records_tie_breaker() -> None:
-    route_b = Route("route-b", estimate=available("0.1", reference="pricing-b"))
-    route_a = Route("route-a", estimate=available("0.10", reference="pricing-a"))
+    route_b = configured_route(
+        "route-b", estimate=available("0.1", reference="pricing-b")
+    )
+    route_a = configured_route(
+        "route-a", estimate=available("0.10", reference="pricing-a")
+    )
 
     decision = route_request(
         ExecutionRequest(task="Execute."),
@@ -456,15 +488,15 @@ def test_numeric_tie_uses_smallest_route_id_and_records_tie_breaker() -> None:
 
 
 def test_non_comparable_routes_remain_explainable_after_selection() -> None:
-    uncertain_route = Route("route-b", estimate=uncertain())
-    unavailable_route = Route(
+    uncertain_route = configured_route("route-b", estimate=uncertain())
+    unavailable_route = configured_route(
         "route-c",
         estimate=EconomicEstimate(
             status="unavailable",
             reason="A referência econômica não estava disponível.",
         ),
     )
-    comparable_route = Route("route-a", estimate=available("0.02"))
+    comparable_route = configured_route("route-a", estimate=available("0.02"))
 
     decision = route_request(
         ExecutionRequest(task="Execute."),
@@ -486,9 +518,13 @@ def test_non_comparable_routes_remain_explainable_after_selection() -> None:
 
 def test_selection_is_deterministic_across_catalog_order() -> None:
     routes = [
-        Route("route-b", estimate=available("0.1", reference="pricing-b")),
-        Route("route-a", estimate=available("0.10", reference="pricing-a")),
-        Route("route-c", estimate=uncertain()),
+        configured_route(
+            "route-b", estimate=available("0.1", reference="pricing-b")
+        ),
+        configured_route(
+            "route-a", estimate=available("0.10", reference="pricing-a")
+        ),
+        configured_route("route-c", estimate=uncertain()),
     ]
     request = ExecutionRequest(task="Execute.")
 
@@ -501,8 +537,8 @@ def test_selection_is_deterministic_across_catalog_order() -> None:
 
 
 def test_incoherent_selection_cannot_pass_validation() -> None:
-    route_a = Route("route-a", estimate=available("0.01"))
-    route_b = Route("route-b", estimate=available("0.02"))
+    route_a = configured_route("route-a", estimate=available("0.01"))
+    route_b = configured_route("route-b", estimate=available("0.02"))
     request = ExecutionRequest(task="Execute.")
     decision = route_request(request, RouteCatalog([route_a, route_b]))
     assert isinstance(decision, SelectedDecision)
@@ -533,8 +569,8 @@ def test_ceiling_selects_comparable_route_and_preserves_indeterminate_route() ->
             },
         }
     )
-    admissible = Route("route-a", estimate=available("0.01"))
-    indeterminate = Route("route-b", estimate=uncertain("0.015"))
+    admissible = configured_route("route-a", estimate=available("0.01"))
+    indeterminate = configured_route("route-b", estimate=uncertain("0.015"))
 
     decision = route_request(
         request, RouteCatalog([indeterminate, admissible])
@@ -561,8 +597,8 @@ def test_multiple_routes_within_ceiling_select_cheapest_in_economic_order() -> N
             },
         }
     )
-    expensive = Route("route-a", estimate=available("0.02"))
-    cheaper = Route("route-z", estimate=available("0.01"))
+    expensive = configured_route("route-a", estimate=available("0.02"))
+    cheaper = configured_route("route-z", estimate=available("0.01"))
 
     decision = route_request(request, RouteCatalog([expensive, cheaper]))
 
@@ -572,7 +608,7 @@ def test_multiple_routes_within_ceiling_select_cheapest_in_economic_order() -> N
 
 
 def test_available_non_comparable_route_is_excluded_when_another_is_comparable() -> None:
-    non_comparable = Route(
+    non_comparable = configured_route(
         "route-a",
         estimate=EconomicEstimate(
             status="available",
@@ -584,7 +620,7 @@ def test_available_non_comparable_route_is_excluded_when_another_is_comparable()
             non_comparability_reason="Não representa o custo total.",
         ),
     )
-    comparable = Route("route-b", estimate=available("0.02"))
+    comparable = configured_route("route-b", estimate=available("0.02"))
 
     decision = route_request(
         ExecutionRequest(task="Execute."),
@@ -600,13 +636,14 @@ def test_available_non_comparable_route_is_excluded_when_another_is_comparable()
     assert "Não representa o custo total." in descriptions
 
 
-def test_valid_selection_reaches_external_execution_boundary() -> None:
-    client = client_for(Route("route-a", estimate=available("0.01")))
+def test_valid_selection_without_adapter_is_invalid_configuration() -> None:
+    route = configured_route("route-a", estimate=available("0.01"))
+    client = TestClient(create_app(RouteCatalog([route])))
 
-    with pytest.raises(ExternalExecutionNotImplementedError) as error:
-        client.post("/v1/executions", json={"task": "Execute."})
+    response = client.post("/v1/executions", json={"task": "Execute."})
 
-    assert error.value.decision.route.id == "route-a"
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "INVALID_CONFIGURATION"
 
 
 def test_duplicate_json_member_is_rejected() -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import inspect
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -9,22 +11,40 @@ from pydantic import ValidationError
 
 from .contracts import (
     ErrorIssue,
+    AvailableEconomicValue,
+    ExecutionEconomics,
+    ExecutionErrorResponse,
+    ExecutionPublicError,
     ExecutionRequest,
+    ExecutionResult,
+    ExecutionSuccessResponse,
+    InternalErrorResponse,
+    InternalPublicError,
     InvalidRequestError,
     InvalidRequestResponse,
     RefusalResponse,
+    SelectedPublicDecision,
+    SelectedRoute,
+    SelectedStrategy,
+    UnavailableEconomicValue,
+    UncertainEconomicValue,
 )
-from .routing import RouteCatalog, SelectedDecision, route_request
-
-
-class ExternalExecutionNotImplementedError(RuntimeError):
-    """A validated selection reached the unimplemented provider boundary."""
-
-    def __init__(self, decision: SelectedDecision) -> None:
-        self.decision = decision
-        super().__init__(
-            "Provider execution is intentionally outside the current MVP slice."
-        )
+from .execution import (
+    ExecutionAdapter,
+    ExecutionFailedError,
+    ExecutionRoute,
+    ExecutionTimeoutError,
+    ExecutionUnavailableError,
+    TextExecutionRequest,
+    TextExecutionResult,
+)
+from .routing import (
+    EconomicEstimate,
+    InvalidDecisionError,
+    RouteCatalog,
+    SelectedDecision,
+    route_request,
+)
 
 
 class DuplicateMemberError(ValueError):
@@ -33,7 +53,10 @@ class DuplicateMemberError(ValueError):
         super().__init__(member)
 
 
-def create_app(catalog: RouteCatalog | None = None) -> FastAPI:
+def create_app(
+    catalog: RouteCatalog | None = None,
+    adapters: Mapping[str, ExecutionAdapter] | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="Maestro Router",
         version="0.1.0",
@@ -42,13 +65,19 @@ def create_app(catalog: RouteCatalog | None = None) -> FastAPI:
         openapi_url=None,
     )
     route_catalog = catalog if catalog is not None else RouteCatalog()
+    adapter_registry = adapters if adapters is not None else {}
 
     @app.post(
         "/v1/executions",
-        response_model=RefusalResponse,
+        response_model=ExecutionSuccessResponse,
         responses={
             400: {"model": InvalidRequestResponse},
             415: {"model": InvalidRequestResponse},
+            422: {"model": RefusalResponse},
+            500: {"model": InternalErrorResponse},
+            502: {"model": ExecutionErrorResponse},
+            503: {"model": ExecutionErrorResponse},
+            504: {"model": ExecutionErrorResponse},
         },
     )
     async def create_execution(request: Request) -> JSONResponse:
@@ -84,9 +113,46 @@ def create_app(catalog: RouteCatalog | None = None) -> FastAPI:
         except ValidationError as error:
             return _invalid_request(_validation_issues(error))
 
-        routing_result = route_request(execution_request, route_catalog)
+        try:
+            adapter_snapshot = _snapshot_adapters(
+                route_catalog, adapter_registry
+            )
+            enabled_routes = tuple(
+                route for route in route_catalog.snapshot() if route.enabled
+            )
+            locally_invalid_route_ids = frozenset(
+                route.id
+                for route in enabled_routes
+                if not _is_valid_adapter(
+                    adapter_snapshot.get(route.adapter_id)
+                )
+            )
+            if enabled_routes and len(locally_invalid_route_ids) == len(
+                enabled_routes
+            ):
+                return _internal_error(
+                    code="INVALID_CONFIGURATION",
+                    message="A configuração indispensável é inválida.",
+                    issue=(
+                        "Nenhuma rota habilitada possui uma associação "
+                        "de execução válida."
+                    ),
+                )
+            routing_result = route_request(
+                execution_request,
+                route_catalog,
+                locally_invalid_route_ids=locally_invalid_route_ids,
+            )
+        except InvalidDecisionError:
+            return _internal_error(
+                code="INVALID_DECISION",
+                message="A decisão interna é inválida.",
+                issue="A decisão não satisfez os invariantes obrigatórios.",
+            )
         if isinstance(routing_result, SelectedDecision):
-            raise ExternalExecutionNotImplementedError(routing_result)
+            return await _execute_selection(
+                execution_request, routing_result, adapter_snapshot
+            )
         return JSONResponse(
             status_code=422,
             content=routing_result.model_dump(exclude_none=True),
@@ -94,6 +160,195 @@ def create_app(catalog: RouteCatalog | None = None) -> FastAPI:
         )
 
     return app
+
+
+def _snapshot_adapters(
+    catalog: RouteCatalog,
+    adapters: Mapping[str, ExecutionAdapter],
+) -> Mapping[str, ExecutionAdapter | None]:
+    applicable_adapter_ids = {
+        route.adapter_id for route in catalog.snapshot() if route.enabled
+    }
+    snapshot = {
+        adapter_id: adapters.get(adapter_id)
+        for adapter_id in applicable_adapter_ids
+    }
+    return MappingProxyType(snapshot)
+
+
+def _is_valid_adapter(adapter: object | None) -> bool:
+    try:
+        execute = getattr(adapter, "execute", None)
+        return (
+            adapter is not None
+            and callable(execute)
+            and inspect.iscoroutinefunction(execute)
+        )
+    except Exception:
+        return False
+
+
+async def _execute_selection(
+    request: ExecutionRequest,
+    decision: SelectedDecision,
+    adapters: Mapping[str, ExecutionAdapter],
+) -> JSONResponse:
+    route = decision.route
+    adapter = adapters.get(route.adapter_id)
+    if not _is_valid_adapter(adapter):
+        return _internal_error(
+            code="INVALID_CONFIGURATION",
+            message="A configuração indispensável é inválida.",
+            issue="A rota selecionada não possui um adaptador assíncrono válido.",
+        )
+    execute = adapter.execute
+
+    public_decision = _public_decision(decision)
+    economics = _execution_economics(route.estimate)
+    try:
+        result = await execute(
+            TextExecutionRequest(task=request.task, context=request.context),
+            ExecutionRoute(
+                id=route.id,
+                provider=route.provider,
+                model=route.model,
+            ),
+        )
+    except ExecutionTimeoutError:
+        return _execution_error(
+            "EXECUTION_TIMEOUT",
+            "A execução da rota selecionada excedeu o timeout aplicável.",
+            public_decision,
+            economics,
+            504,
+        )
+    except ExecutionUnavailableError:
+        return _execution_error(
+            "EXECUTION_UNAVAILABLE",
+            "A rota selecionada estava indisponível durante a execução.",
+            public_decision,
+            economics,
+            503,
+        )
+    except ExecutionFailedError:
+        return _execution_error(
+            "EXECUTION_FAILED",
+            "A execução da rota selecionada falhou.",
+            public_decision,
+            economics,
+            502,
+        )
+    except Exception:
+        return _execution_error(
+            "EXECUTION_FAILED",
+            "A execução da rota selecionada falhou.",
+            public_decision,
+            economics,
+            502,
+        )
+
+    if not isinstance(result, TextExecutionResult):
+        return _execution_error(
+            "EXECUTION_FAILED",
+            "A execução da rota selecionada falhou.",
+            public_decision,
+            economics,
+            502,
+        )
+
+    response = ExecutionSuccessResponse(
+        result=ExecutionResult(content=result.content),
+        decision=public_decision,
+        economics=economics,
+    )
+    return JSONResponse(
+        status_code=200,
+        content=response.model_dump(exclude_none=True),
+        media_type="application/json",
+    )
+
+
+def _public_decision(decision: SelectedDecision) -> SelectedPublicDecision:
+    route = decision.route
+    return SelectedPublicDecision(
+        route=SelectedRoute(
+            id=route.id,
+            provider=route.provider,
+            model=route.model,
+        ),
+        strategy=SelectedStrategy(),
+        applied_constraints=list(decision.applied_constraints),
+        reason=decision.reason,
+        factors=list(decision.factors),
+    )
+
+
+def _execution_economics(estimate: EconomicEstimate) -> ExecutionEconomics:
+    if estimate.status == "unavailable":
+        assert estimate.reason is not None
+        public_estimate = UnavailableEconomicValue(reason=estimate.reason)
+    else:
+        assert estimate.amount is not None
+        assert estimate.currency is not None
+        assert estimate.price_reference is not None
+        assert estimate.assumptions is not None
+        estimate_fields = {
+            "amount": estimate.amount,
+            "currency": estimate.currency,
+            "price_reference": estimate.price_reference,
+            "assumptions": list(estimate.assumptions),
+        }
+        if estimate.status == "uncertain":
+            assert estimate.reason is not None
+            public_estimate = UncertainEconomicValue(
+                **estimate_fields, reason=estimate.reason
+            )
+        else:
+            public_estimate = AvailableEconomicValue(**estimate_fields)
+
+    return ExecutionEconomics(
+        estimate=public_estimate,
+        usage=UnavailableEconomicValue(
+            reason="O adaptador desta fatia não fornece uso normalizado."
+        ),
+        calculated_cost=UnavailableEconomicValue(
+            reason="Não é possível calcular custo sem uso normalizado suficiente."
+        ),
+    )
+
+
+def _execution_error(
+    code: str,
+    message: str,
+    decision: SelectedPublicDecision,
+    economics: ExecutionEconomics,
+    status_code: int,
+) -> JSONResponse:
+    response = ExecutionErrorResponse(
+        error=ExecutionPublicError(code=code, message=message),
+        decision=decision,
+        economics=economics,
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=response.model_dump(exclude_none=True),
+        media_type="application/json",
+    )
+
+
+def _internal_error(code: str, message: str, issue: str) -> JSONResponse:
+    response = InternalErrorResponse(
+        error=InternalPublicError(
+            code=code,
+            message=message,
+            issues=[ErrorIssue(message=issue)],
+        )
+    )
+    return JSONResponse(
+        status_code=500,
+        content=response.model_dump(exclude_none=True),
+        media_type="application/json",
+    )
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

@@ -10,14 +10,21 @@ O estado executável atual cobre:
 - elegibilidade não econômica;
 - avaliação econômica anterior à seleção;
 - seleção determinística e validada pela estratégia `lowest-estimated-cost`;
+- fronteira neutra de execução com adaptadores associados manualmente em memória;
+- projeção pública normalizada de sucesso e dos erros de execução;
 - recusas normativas `NO_ELIGIBLE_ROUTE` e
   `INSUFFICIENT_ECONOMIC_INFORMATION`.
 
 Ainda não estão implementados:
 
-- execução com provedores;
+- adaptador ou integração com qualquer provedor real;
+- gestão de credenciais, timeout concreto, retry ou fallback;
 - `usage`;
 - `calculated_cost`.
+
+O fluxo executável completo é provado somente por adaptadores controlados e
+injetados nos testes. Em sucesso, a estimativa usada na seleção é preservada;
+`usage` e `calculated_cost` permanecem explicitamente `unavailable`.
 
 Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
 [docs/INDEX.md](docs/INDEX.md) para localizar a fonte normativa de cada assunto.
@@ -37,8 +44,8 @@ python -m venv .venv
 .venv\Scripts\python -m uvicorn --app-dir src maestro_router.api:app
 ```
 
-O catálogo padrão em memória é vazio, portanto uma solicitação válida recebe a
-recusa normativa `NO_ELIGIBLE_ROUTE`.
+O catálogo e o registro de adaptadores padrão em memória são vazios, portanto
+uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
 
 ```shell
 .venv\Scripts\python -m pytest

@@ -12,7 +12,7 @@ fontes normativas; este arquivo não resume nem redefine seu conteúdo.
 | [04-CASOS-DE-USO.md](04-CASOS-DE-USO.md) | Casos de uso | Governa atores, fluxos observáveis, falhas e critérios de aceitação do MVP. | Ao implementar ou revisar comportamentos e cenários de usuário. |
 | [05-API.md](05-API.md) | API pública v1 | Contrato técnico normativo da fronteira pública, schemas e erros. | Em qualquer mudança de endpoint, entrada, saída, validação ou teste de contrato. |
 | [06-DECISAO-DE-ROTEAMENTO.md](06-DECISAO-DE-ROTEAMENTO.md) | Decisão de roteamento | Governa filtros, avaliação econômica, estratégia, desempate e invariantes internos. | Ao alterar seleção de rota, elegibilidade, custo, explicação ou determinismo. |
-| [decisions/](decisions/) | Decisões adicionais | Local reservado para decisões arquiteturais aprovadas além dos documentos principais. | Verifique antes de decisões arquiteturais; atualmente não há decisões registradas. |
+| [decisions/](decisions/) | Decisões adicionais | Decisões arquiteturais aprovadas além dos documentos principais, incluindo a fronteira neutra de execução e o primeiro adaptador externo. | Verifique antes de decisões arquiteturais; há decisões registradas em `0001` e `0002`. |
 | [maps/](maps/) | Mapas do produto e do sistema | Navegação visual **não normativa**; não altera a autoridade dos documentos acima. | Para orientação rápida sobre o produto, o fluxo técnico e o estado atual. |
 
 Em caso de conflito, aplique a precedência declarada nas próprias fontes. O

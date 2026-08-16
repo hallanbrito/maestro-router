@@ -11,20 +11,25 @@ O estado executável atual cobre:
 - avaliação econômica anterior à seleção;
 - seleção determinística e validada pela estratégia `lowest-estimated-cost`;
 - fronteira neutra de execução com adaptadores associados manualmente em memória;
+- primeiro adaptador externo para a OpenAI Responses API, construído e injetado
+  explicitamente;
 - projeção pública normalizada de sucesso e dos erros de execução;
 - recusas normativas `NO_ELIGIBLE_ROUTE` e
   `INSUFFICIENT_ECONOMIC_INFORMATION`.
 
-Ainda não estão implementados:
+Ainda não estão implementados ou configurados por padrão:
 
-- adaptador ou integração com qualquer provedor real;
-- gestão de credenciais, timeout concreto, retry ou fallback;
+- rota, provedora ou modelo padrão;
+- gestão de credenciais e configuração operacional padrão;
+- timeout concreto, retry ou fallback;
 - `usage`;
 - `calculated_cost`.
 
-O fluxo executável completo é provado somente por adaptadores controlados e
-injetados nos testes. Em sucesso, a estimativa usada na seleção é preservada;
-`usage` e `calculated_cost` permanecem explicitamente `unavailable`.
+O adaptador OpenAI precisa receber um cliente assíncrono oficial já construído e
+ser associado manualmente a uma rota configurada; ele não é registrado no
+aplicativo padrão. Os testes usam somente clientes controlados, sem chamada de
+rede. Em sucesso, a estimativa usada na seleção é preservada; `usage` e
+`calculated_cost` permanecem explicitamente `unavailable`.
 
 Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
 [docs/INDEX.md](docs/INDEX.md) para localizar a fonte normativa de cada assunto.

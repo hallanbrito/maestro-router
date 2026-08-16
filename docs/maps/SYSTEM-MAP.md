@@ -17,7 +17,7 @@ flowchart TD
     H -->|sim| I["Estratégia<br/>lowest-estimated-cost"]
     I --> J["Rota selecionada<br/>e decisão validada"]
     J --> K["Fronteira neutra de adaptador"]
-    K --> L["Adaptador injetado<br/>uma única rota"]
+    K --> L["Adaptador injetado<br/>controlado ou OpenAI Responses"]
     L --> M["Resultado normalizado"]
     M --> N["economics<br/>estimate preservada<br/>usage e custo indisponíveis"]
     N --> O["Resposta à aplicação<br/>resultado + decisão + economia"]
@@ -25,7 +25,7 @@ flowchart TD
 
 ## Fluxo principal
 
-A API valida a solicitação, consulta alternativas neutras, aplica elegibilidade antes da economia e usa a estratégia configurada para selecionar exatamente uma rota. Só uma decisão válida permite acionar o adaptador associado. Nesta fatia, esse fluxo é provado por adaptadores controlados e injetados nos testes; não existe integração com provedor real.
+A API valida a solicitação, consulta alternativas neutras, aplica elegibilidade antes da economia e usa a estratégia configurada para selecionar exatamente uma rota. Só uma decisão válida permite acionar o adaptador associado. Existe um primeiro adaptador externo para a OpenAI Responses API, além dos adaptadores controlados dos testes; todos precisam ser construídos e injetados explicitamente.
 
 ## Fluxo de recusa
 
@@ -43,7 +43,7 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Avaliação econômica anterior à seleção | Estados de estimativa, tetos, comparabilidade e recusas `NO_ELIGIBLE_ROUTE` e `INSUFFICIENT_ECONOMIC_INFORMATION`. |
 | ✅ Implementado | Seleção determinística | Estratégia `lowest-estimated-cost`, candidato único, comparação decimal, desempate por `route.id` e validação interna. |
 | ✅ Implementado | Fronteira neutra de execução | Contrato assíncrono, associação manual em memória, execução única da rota selecionada e normalização de sucesso ou erro, provados com adaptador controlado nos testes. |
-| 🟡 Próxima etapa | Primeiro adaptador externo | Nenhum adaptador de produção, SDK, credencial ou chamada de rede existe no repositório. |
+| ✅ Implementado | Primeiro adaptador externo | OpenAI Responses API por cliente assíncrono injetado, sem registro no aplicativo padrão e sem rota, modelo ou credencial padrão. |
 | ⚪ Futuro | Uso e custo calculado | `usage` e `calculated_cost` posteriores à execução ainda não implementados. |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.

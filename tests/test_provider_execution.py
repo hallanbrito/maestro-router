@@ -201,8 +201,6 @@ def test_public_usage_models_are_closed_and_strict() -> None:
                 ]
             },
         ),
-        (AvailableUsage, {"items": [{"unit": "unit", "quantity": "1.0"}]}),
-        (AvailableUsage, {"items": [{"unit": "unit", "quantity": 1}]}),
         (AvailableUsage, {"items": [{"unit": "   ", "quantity": "1"}]}),
         (AvailableUsage, {"items": [{"unit": "unit", "quantity": "1"}], "reason": "x"}),
         (UncertainUsage, {"items": [{"unit": "unit", "quantity": "1"}], "reason": " "}),
@@ -211,6 +209,28 @@ def test_public_usage_models_are_closed_and_strict() -> None:
     for model, payload in invalid_models:
         with pytest.raises(ValidationError):
             model.model_validate(payload)
+
+
+@pytest.mark.parametrize("quantity", ["0", "1", "1.0", "0.250"])
+def test_public_usage_quantity_accepts_normative_decimal_strings(
+    quantity: str,
+) -> None:
+    usage = AvailableUsage(items=[{"unit": "neutral_unit", "quantity": quantity}])
+
+    assert usage.items[0].quantity == quantity
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    [1, -1, 1.0, "-1", "+1", "01", ".5", "1.", "1e3", "", " "],
+)
+def test_public_usage_quantity_rejects_non_normative_values(
+    quantity: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        AvailableUsage.model_validate(
+            {"items": [{"unit": "neutral_unit", "quantity": quantity}]}
+        )
 
 
 def test_success_executes_only_selected_adapter_once_and_matches_closed_schema() -> None:

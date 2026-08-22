@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 DECIMAL_PATTERN = re.compile(r"^(0|[1-9][0-9]*)(\.[0-9]+)?$")
 CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
-USAGE_QUANTITY_PATTERN = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
 def _is_non_blank(value: str) -> bool:
@@ -215,7 +214,7 @@ class UsageItem(ClosedModel):
     @field_validator("quantity")
     @classmethod
     def validate_quantity(cls, value: str) -> str:
-        if not USAGE_QUANTITY_PATTERN.fullmatch(value):
+        if not DECIMAL_PATTERN.fullmatch(value):
             raise ValueError("A quantidade deve ser uma string decimal não negativa.")
         return value
 

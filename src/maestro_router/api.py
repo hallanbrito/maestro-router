@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from .contracts import (
     ErrorIssue,
     AvailableEconomicValue,
+    AvailableUsage,
     ExecutionEconomics,
     ExecutionErrorResponse,
     ExecutionPublicError,
@@ -26,8 +27,11 @@ from .contracts import (
     SelectedPublicDecision,
     SelectedRoute,
     SelectedStrategy,
+    UnavailableUsage,
     UnavailableEconomicValue,
+    UncertainUsage,
     UncertainEconomicValue,
+    UsageItem,
 )
 from .execution import (
     ExecutionAdapter,
@@ -35,6 +39,7 @@ from .execution import (
     ExecutionRoute,
     ExecutionTimeoutError,
     ExecutionUnavailableError,
+    NormalizedUsage,
     TextExecutionRequest,
     TextExecutionResult,
 )
@@ -259,7 +264,7 @@ async def _execute_selection(
     response = ExecutionSuccessResponse(
         result=ExecutionResult(content=result.content),
         decision=public_decision,
-        economics=economics,
+        economics=_execution_economics(route.estimate, result.usage),
     )
     return JSONResponse(
         status_code=200,
@@ -283,7 +288,10 @@ def _public_decision(decision: SelectedDecision) -> SelectedPublicDecision:
     )
 
 
-def _execution_economics(estimate: EconomicEstimate) -> ExecutionEconomics:
+def _execution_economics(
+    estimate: EconomicEstimate,
+    usage: NormalizedUsage | None = None,
+) -> ExecutionEconomics:
     if estimate.status == "unavailable":
         assert estimate.reason is not None
         public_estimate = UnavailableEconomicValue(reason=estimate.reason)
@@ -306,13 +314,37 @@ def _execution_economics(estimate: EconomicEstimate) -> ExecutionEconomics:
         else:
             public_estimate = AvailableEconomicValue(**estimate_fields)
 
+    if usage is None or usage.status == "unavailable":
+        public_usage = UnavailableUsage(
+            reason=(
+                usage.reason
+                if usage is not None and usage.reason is not None
+                else "A execução não produziu uso normalizado."
+            )
+        )
+    else:
+        usage_fields = {
+            "items": [
+                UsageItem(unit=item.unit, quantity=str(item.quantity))
+                for item in usage.items
+            ]
+        }
+        if usage.status == "uncertain":
+            assert usage.reason is not None
+            public_usage = UncertainUsage(
+                **usage_fields, reason=usage.reason
+            )
+        else:
+            public_usage = AvailableUsage(**usage_fields)
+
     return ExecutionEconomics(
         estimate=public_estimate,
-        usage=UnavailableEconomicValue(
-            reason="O adaptador desta fatia não fornece uso normalizado."
-        ),
+        usage=public_usage,
         calculated_cost=UnavailableEconomicValue(
-            reason="Não é possível calcular custo sem uso normalizado suficiente."
+            reason=(
+                "Não existe método ou política aprovada para calcular o custo "
+                "posterior nesta etapa."
+            )
         ),
     )
 

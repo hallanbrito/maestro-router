@@ -14,14 +14,21 @@ from ..execution import (
     ExecutionRoute,
     ExecutionTimeoutError,
     ExecutionUnavailableError,
+    NormalizedUsage,
+    NormalizedUsageItem,
     TextExecutionRequest,
     TextExecutionResult,
+    USAGE_UNAVAILABLE_REASON,
 )
 
 
 _FAILED_MESSAGE = "A execução externa falhou."
 _TIMEOUT_MESSAGE = "A execução externa excedeu o timeout aplicável."
 _UNAVAILABLE_MESSAGE = "A execução externa estava temporariamente indisponível."
+_PARTIAL_USAGE_REASON = (
+    "A resposta concluída forneceu somente parte do uso normalizável."
+)
+_MISSING = object()
 
 
 class OpenAIResponsesAdapter:
@@ -78,11 +85,53 @@ def _normalize_response(response: object) -> TextExecutionResult:
         output_text = getattr(response, "output_text")
         if not isinstance(output_text, str):
             raise ExecutionFailedError(_FAILED_MESSAGE)
-        return TextExecutionResult(content=output_text)
+        return TextExecutionResult(
+            content=output_text,
+            usage=_normalize_usage(response),
+        )
     except ExecutionFailedError:
         raise
     except Exception as error:
         raise ExecutionFailedError(_FAILED_MESSAGE) from error
+
+
+def _normalize_usage(response: object) -> NormalizedUsage:
+    usage = _read_attribute(response, "usage")
+    if usage is _MISSING or usage is None:
+        return NormalizedUsage(
+            status="unavailable", reason=USAGE_UNAVAILABLE_REASON
+        )
+
+    items = []
+    for external_name, neutral_unit in (
+        ("input_tokens", "input_token"),
+        ("output_tokens", "output_token"),
+    ):
+        quantity = _read_attribute(usage, external_name)
+        if type(quantity) is int and quantity >= 0:
+            items.append(
+                NormalizedUsageItem(unit=neutral_unit, quantity=quantity)
+            )
+
+    normalized_items = tuple(items)
+    if len(normalized_items) == 2:
+        return NormalizedUsage(status="available", items=normalized_items)
+    if normalized_items:
+        return NormalizedUsage(
+            status="uncertain",
+            items=normalized_items,
+            reason=_PARTIAL_USAGE_REASON,
+        )
+    return NormalizedUsage(
+        status="unavailable", reason=USAGE_UNAVAILABLE_REASON
+    )
+
+
+def _read_attribute(value: object, name: str) -> object:
+    try:
+        return getattr(value, name)
+    except Exception:
+        return _MISSING
 
 
 def _has_valid_text_output(output: list[object]) -> bool:

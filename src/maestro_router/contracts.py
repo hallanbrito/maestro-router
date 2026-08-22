@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 DECIMAL_PATTERN = re.compile(r"^(0|[1-9][0-9]*)(\.[0-9]+)?$")
@@ -200,13 +200,70 @@ class UnavailableEconomicValue(ClosedModel):
     reason: str
 
 
+class UsageItem(ClosedModel):
+    unit: str
+    quantity: str
+
+    @field_validator("unit")
+    @classmethod
+    def validate_unit(cls, value: str) -> str:
+        if not _is_non_blank(value):
+            raise ValueError("A unidade deve ser uma string não branca.")
+        return value
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, value: str) -> str:
+        if not DECIMAL_PATTERN.fullmatch(value):
+            raise ValueError("A quantidade deve ser uma string decimal não negativa.")
+        return value
+
+
+class AvailableUsage(ClosedModel):
+    status: Literal["available"] = "available"
+    items: list[UsageItem]
+
+    @model_validator(mode="after")
+    def validate_items(self) -> AvailableUsage:
+        if not self.items:
+            raise ValueError("O uso conhecido deve conter ao menos um item.")
+        units = [item.unit for item in self.items]
+        if len(set(units)) != len(units):
+            raise ValueError("As unidades de uso não podem se repetir.")
+        return self
+
+
+class UncertainUsage(AvailableUsage):
+    status: Literal["uncertain"] = "uncertain"
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        if not _is_non_blank(value):
+            raise ValueError("A razão deve ser uma string não branca.")
+        return value
+
+
+class UnavailableUsage(ClosedModel):
+    status: Literal["unavailable"] = "unavailable"
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        if not _is_non_blank(value):
+            raise ValueError("A razão deve ser uma string não branca.")
+        return value
+
+
 class ExecutionEconomics(ClosedModel):
     estimate: (
         AvailableEconomicValue
         | UncertainEconomicValue
         | UnavailableEconomicValue
     )
-    usage: UnavailableEconomicValue
+    usage: AvailableUsage | UncertainUsage | UnavailableUsage
     calculated_cost: UnavailableEconomicValue
 
 

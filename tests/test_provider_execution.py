@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import FrozenInstanceError
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import maestro_router.api as api_module
 from maestro_router.api import create_app
@@ -12,8 +14,15 @@ from maestro_router.execution import (
     ExecutionRoute,
     ExecutionTimeoutError,
     ExecutionUnavailableError,
+    NormalizedUsage,
+    NormalizedUsageItem,
     TextExecutionRequest,
     TextExecutionResult,
+)
+from maestro_router.contracts import (
+    AvailableUsage,
+    UnavailableUsage,
+    UncertainUsage,
 )
 from maestro_router.routing import (
     EconomicEstimate,
@@ -29,9 +38,11 @@ class ControlledAdapter:
         *,
         content: str = "controlled result",
         error: Exception | None = None,
+        usage: NormalizedUsage | None = None,
     ) -> None:
         self.content = content
         self.error = error
+        self.usage = usage
         self.calls: list[tuple[TextExecutionRequest, ExecutionRoute]] = []
 
     async def execute(
@@ -40,7 +51,9 @@ class ControlledAdapter:
         self.calls.append((request, route))
         if self.error is not None:
             raise self.error
-        return TextExecutionResult(content=self.content)
+        if self.usage is None:
+            return TextExecutionResult(content=self.content)
+        return TextExecutionResult(content=self.content, usage=self.usage)
 
 
 class InvalidSynchronousAdapter:
@@ -124,6 +137,102 @@ def client_for(
     return TestClient(create_app(RouteCatalog(routes), adapters))
 
 
+@pytest.mark.parametrize("quantity", [True, -1, 1.0, "1", None, object()])
+def test_normalized_usage_item_rejects_non_integer_quantities(
+    quantity: object,
+) -> None:
+    with pytest.raises(ValueError, match="non-negative integer"):
+        NormalizedUsageItem(unit="input_token", quantity=quantity)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("unit", ["", "   ", "\t"])
+def test_normalized_usage_item_requires_non_blank_unit(unit: str) -> None:
+    with pytest.raises(ValueError, match="non-blank"):
+        NormalizedUsageItem(unit=unit, quantity=1)
+
+
+def test_normalized_usage_is_immutable_and_enforces_state_invariants() -> None:
+    item = NormalizedUsageItem(unit="input_token", quantity=0)
+    available_usage = NormalizedUsage(status="available", items=(item,))
+
+    with pytest.raises(FrozenInstanceError):
+        available_usage.status = "unavailable"  # type: ignore[misc]
+    with pytest.raises(ValueError, match="at least one item"):
+        NormalizedUsage(status="available")
+    with pytest.raises(ValueError, match="must not contain a reason"):
+        NormalizedUsage(status="available", items=(item,), reason="unexpected")
+    with pytest.raises(ValueError, match="at least one item"):
+        NormalizedUsage(status="uncertain", reason="partial")
+    with pytest.raises(ValueError, match="non-blank"):
+        NormalizedUsage(status="uncertain", items=(item,), reason="   ")
+    with pytest.raises(ValueError, match="contain a reason"):
+        NormalizedUsage(status="unavailable")
+    with pytest.raises(ValueError, match="must not contain items"):
+        NormalizedUsage(status="unavailable", items=(item,), reason="missing")
+    with pytest.raises(ValueError, match="unique"):
+        NormalizedUsage(
+            status="available",
+            items=(item, NormalizedUsageItem(unit="input_token", quantity=2)),
+        )
+
+
+def test_public_usage_models_are_closed_and_strict() -> None:
+    available_usage = AvailableUsage(
+        items=[{"unit": "custom_neutral_unit", "quantity": "0"}]
+    )
+    uncertain_usage = UncertainUsage(
+        items=[{"unit": "output_token", "quantity": "7"}],
+        reason="O uso conhecido é parcial.",
+    )
+    unavailable_usage = UnavailableUsage(reason="O uso não está disponível.")
+
+    assert set(available_usage.model_dump()) == {"status", "items"}
+    assert set(uncertain_usage.model_dump()) == {"status", "items", "reason"}
+    assert set(unavailable_usage.model_dump()) == {"status", "reason"}
+
+    invalid_models = (
+        (AvailableUsage, {"items": []}),
+        (
+            AvailableUsage,
+            {
+                "items": [
+                    {"unit": "input_token", "quantity": "1"},
+                    {"unit": "input_token", "quantity": "2"},
+                ]
+            },
+        ),
+        (AvailableUsage, {"items": [{"unit": "   ", "quantity": "1"}]}),
+        (AvailableUsage, {"items": [{"unit": "unit", "quantity": "1"}], "reason": "x"}),
+        (UncertainUsage, {"items": [{"unit": "unit", "quantity": "1"}], "reason": " "}),
+        (UnavailableUsage, {"reason": "missing", "items": []}),
+    )
+    for model, payload in invalid_models:
+        with pytest.raises(ValidationError):
+            model.model_validate(payload)
+
+
+@pytest.mark.parametrize("quantity", ["0", "1", "1.0", "0.250"])
+def test_public_usage_quantity_accepts_normative_decimal_strings(
+    quantity: str,
+) -> None:
+    usage = AvailableUsage(items=[{"unit": "neutral_unit", "quantity": quantity}])
+
+    assert usage.items[0].quantity == quantity
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    [1, -1, 1.0, "-1", "+1", "01", ".5", "1.", "1e3", "", " "],
+)
+def test_public_usage_quantity_rejects_non_normative_values(
+    quantity: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        AvailableUsage.model_validate(
+            {"items": [{"unit": "neutral_unit", "quantity": quantity}]}
+        )
+
+
 def test_success_executes_only_selected_adapter_once_and_matches_closed_schema() -> None:
     selected = ControlledAdapter(content="content returned by the adapter")
     unselected = ControlledAdapter(content="wrong content")
@@ -189,6 +298,45 @@ def test_success_executes_only_selected_adapter_once_and_matches_closed_schema()
         provider="provider-route-a",
         model="model-route-a",
     )
+
+
+def test_neutral_partial_usage_is_projected_without_changing_selection() -> None:
+    partial_usage = NormalizedUsage(
+        status="uncertain",
+        items=(NormalizedUsageItem(unit="custom_neutral_unit", quantity=9),),
+        reason="A execução forneceu uso parcial.",
+    )
+    selected = ControlledAdapter(content="selected", usage=partial_usage)
+    unselected = ControlledAdapter(content="must not execute")
+    selected_route = route("route-a", "0.0100")
+    unselected_route = route("route-b", "0.0200")
+
+    response = client_for(
+        (unselected_route, selected_route),
+        {
+            unselected_route.adapter_id: unselected,
+            selected_route.adapter_id: selected,
+        },
+    ).post("/v1/executions", json={"task": "Execute."})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["decision"]["route"]["id"] == "route-a"
+    assert body["economics"]["estimate"] == {
+        "status": "available",
+        "amount": "0.0100",
+        "currency": "USD",
+        "price_reference": "pricing-route-a",
+        "assumptions": ["Estimativa controlada para o teste."],
+    }
+    assert body["economics"]["usage"] == {
+        "status": "uncertain",
+        "items": [{"unit": "custom_neutral_unit", "quantity": "9"}],
+        "reason": "A execução forneceu uso parcial.",
+    }
+    assert body["economics"]["calculated_cost"]["status"] == "unavailable"
+    assert len(selected.calls) == 1
+    assert unselected.calls == []
 
 
 @pytest.mark.parametrize("invalid_adapter", [None, InvalidSynchronousAdapter()])

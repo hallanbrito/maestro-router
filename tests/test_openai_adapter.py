@@ -24,6 +24,7 @@ from maestro_router.routing import EconomicEstimate, Route, RouteCatalog
 
 
 SENSITIVE_DETAIL = "external key material and payload https://internal.invalid"
+OMITTED = object()
 
 
 class FakeResponses:
@@ -53,12 +54,25 @@ class FakeAsyncOpenAI:
         return self
 
 
-def completed_response(text: str) -> SimpleNamespace:
+def completed_response(
+    text: str, usage: object = OMITTED
+) -> SimpleNamespace:
     text_part = SimpleNamespace(type="output_text", text=text)
     message = SimpleNamespace(type="message", content=[text_part])
-    return SimpleNamespace(
+    response = SimpleNamespace(
         status="completed", output=[message], output_text=text
     )
+    if usage is not OMITTED:
+        response.usage = usage
+    return response
+
+
+class RaisingCounter:
+    @property
+    def input_tokens(self) -> int:
+        raise RuntimeError(SENSITIVE_DETAIL)
+
+    output_tokens = 7
 
 
 def execution_route() -> ExecutionRoute:
@@ -330,7 +344,7 @@ def test_routing_refusal_does_not_call_openai_adapter() -> None:
     assert client.responses.calls == []
 
 
-def test_openai_success_keeps_usage_and_calculated_cost_unavailable() -> None:
+def test_openai_success_without_usage_keeps_calculated_cost_unavailable() -> None:
     client = FakeAsyncOpenAI(completed_response("normalized"))
     adapter = OpenAIResponsesAdapter(client)  # type: ignore[arg-type]
     route = configured_route()
@@ -347,3 +361,102 @@ def test_openai_success_keeps_usage_and_calculated_cost_unavailable() -> None:
         response.json()["economics"]["calculated_cost"]["status"]
         == "unavailable"
     )
+
+
+def test_openai_complete_usage_is_projected_in_deterministic_order() -> None:
+    usage = SimpleNamespace(
+        input_tokens=0,
+        output_tokens=12,
+        total_tokens=12,
+        input_tokens_details={"cached_tokens": 4},
+        output_tokens_details={"reasoning_tokens": 3},
+        request_id=SENSITIVE_DETAIL,
+    )
+    client = FakeAsyncOpenAI(completed_response("normalized", usage))
+    adapter = OpenAIResponsesAdapter(client)  # type: ignore[arg-type]
+    route = configured_route()
+
+    response = TestClient(
+        create_app(RouteCatalog([route]), {route.adapter_id: adapter})
+    ).post("/v1/executions", json={"task": "Execute."})
+
+    assert response.status_code == 200
+    assert response.json()["economics"]["usage"] == {
+        "status": "available",
+        "items": [
+            {"unit": "input_token", "quantity": "0"},
+            {"unit": "output_token", "quantity": "12"},
+        ],
+    }
+    assert response.json()["economics"]["calculated_cost"]["status"] == (
+        "unavailable"
+    )
+    assert "método ou política" in response.json()["economics"][
+        "calculated_cost"
+    ]["reason"]
+    assert "total_tokens" not in response.text
+    assert "cached_tokens" not in response.text
+    assert "reasoning_tokens" not in response.text
+    assert SENSITIVE_DETAIL not in response.text
+    assert len(client.responses.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected_unit", "expected_quantity"),
+    [
+        (SimpleNamespace(input_tokens=5), "input_token", 5),
+        (SimpleNamespace(output_tokens=6), "output_token", 6),
+        (SimpleNamespace(input_tokens=5, output_tokens=-1), "input_token", 5),
+        (SimpleNamespace(input_tokens=True, output_tokens=6), "output_token", 6),
+        (SimpleNamespace(input_tokens=1.0, output_tokens=6), "output_token", 6),
+        (SimpleNamespace(input_tokens="5", output_tokens=6), "output_token", 6),
+        (SimpleNamespace(input_tokens=None, output_tokens=6), "output_token", 6),
+        (RaisingCounter(), "output_token", 7),
+    ],
+)
+@pytest.mark.anyio
+async def test_one_safe_counter_produces_sanitized_partial_usage(
+    usage: object, expected_unit: str, expected_quantity: int
+) -> None:
+    client = FakeAsyncOpenAI(completed_response("normalized", usage))
+    adapter = OpenAIResponsesAdapter(client)  # type: ignore[arg-type]
+
+    result = await adapter.execute(
+        TextExecutionRequest(task="Execute."), execution_route()
+    )
+
+    assert result.content == "normalized"
+    assert result.usage.status == "uncertain"
+    assert result.usage.items[0].unit == expected_unit
+    assert result.usage.items[0].quantity == expected_quantity
+    assert result.usage.reason is not None and result.usage.reason.strip()
+    assert SENSITIVE_DETAIL not in result.usage.reason
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        SimpleNamespace(),
+        SimpleNamespace(input_tokens=-1, output_tokens=-2),
+        SimpleNamespace(input_tokens=False, output_tokens=True),
+        SimpleNamespace(input_tokens=1.5, output_tokens=2.5),
+        SimpleNamespace(input_tokens="1", output_tokens="2"),
+        SimpleNamespace(input_tokens=None, output_tokens=None),
+    ],
+)
+@pytest.mark.anyio
+async def test_absent_or_fully_irregular_usage_does_not_invalidate_content(
+    usage: object,
+) -> None:
+    client = FakeAsyncOpenAI(completed_response("normalized", usage))
+    adapter = OpenAIResponsesAdapter(client)  # type: ignore[arg-type]
+
+    result = await adapter.execute(
+        TextExecutionRequest(task="Execute."), execution_route()
+    )
+
+    assert result.content == "normalized"
+    assert result.usage.status == "unavailable"
+    assert result.usage.items == ()
+    assert result.usage.reason is not None and result.usage.reason.strip()

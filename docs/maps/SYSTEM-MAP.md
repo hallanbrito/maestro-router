@@ -18,8 +18,8 @@ flowchart TD
     I --> J["Rota selecionada<br/>e decisão validada"]
     J --> K["Fronteira neutra de adaptador"]
     K --> L["Adaptador injetado<br/>controlado ou OpenAI Responses"]
-    L --> M["Resultado normalizado"]
-    M --> N["economics<br/>estimate preservada<br/>usage e custo indisponíveis"]
+    L --> M["Resultado e uso normalizados"]
+    M --> N["economics<br/>estimate preservada<br/>usage completo, parcial ou indisponível<br/>custo indisponível"]
     N --> O["Resposta à aplicação<br/>resultado + decisão + economia"]
 ```
 
@@ -44,7 +44,8 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Seleção determinística | Estratégia `lowest-estimated-cost`, candidato único, comparação decimal, desempate por `route.id` e validação interna. |
 | ✅ Implementado | Fronteira neutra de execução | Contrato assíncrono, associação manual em memória, execução única da rota selecionada e normalização de sucesso ou erro, provados com adaptador controlado nos testes. |
 | ✅ Implementado | Primeiro adaptador externo | OpenAI Responses API por cliente assíncrono injetado, sem registro no aplicativo padrão e sem rota, modelo ou credencial padrão. |
-| ⚪ Futuro | Uso e custo calculado | `usage` e `calculated_cost` posteriores à execução ainda não implementados. |
+| ✅ Implementado | Uso normalizado da OpenAI | `input_tokens` e `output_tokens` são traduzidos para unidades neutras e projetados como uso completo, parcial ou indisponível, sem detalhes externos. |
+| ⚪ Futuro | Custo calculado | `calculated_cost` posterior à execução ainda não foi aprovado nem implementado; uso observado não comprova economia entre provedores. |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.
 

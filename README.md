@@ -14,7 +14,7 @@ O estado executável atual cobre:
 - primeiro adaptador externo para a OpenAI Responses API, construído e injetado
   explicitamente;
 - composição operacional OpenAI opcional, explícita e separada do aplicativo
-  padrão neutro;
+  padrão neutro, com referência de preço opcional fornecida pelo operador;
 - normalização de `input_tokens` e `output_tokens` do adaptador OpenAI em uso
   neutro completo, parcial ou indisponível;
 - primeira política neutra e decimalmente exata de cálculo de custo posterior,
@@ -28,7 +28,7 @@ Ainda não estão implementados ou configurados por padrão:
 
 - rota, provedora ou modelo padrão;
 - gestão de credenciais e configuração operacional padrão;
-- referência de preço ou preço padrão na composição OpenAI;
+- preço padrão ou configuração automática de referência de preço;
 - timeout concreto, retry ou fallback;
 - tabela ou atualização automática de preços.
 
@@ -40,9 +40,10 @@ preservada; o uso observado pelo adaptador OpenAI é publicado como `available`,
 `uncertain` ou `unavailable`. O núcleo calcula `calculated_cost` somente quando
 a rota selecionada possui uma referência neutra, explícita e completa para as
 unidades aprovadas `input_token` e `output_token`; informação insuficiente mantém
-o custo como `unavailable`. A
-composição OpenAI não configura preço e, portanto, continua com custo
-indisponível. Uso observado e custo calculado não comprovam economia entre
+o custo como `unavailable`. A composição OpenAI pode associar uma referência
+fornecida pelo operador, mas não possui preço padrão nem consulta ou atualização
+automática. Mesmo configurado, o custo posterior só pode ficar disponível com
+uso completo e não representa billing, cobrança ou prova de economia entre
 provedores.
 
 Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
@@ -70,18 +71,24 @@ uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
 
 A composição operacional OpenAI exige que o ambiente contenha valores não
 brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e
-`MAESTRO_OPENAI_ROUTE_ID`. Ela é iniciada explicitamente como uma fábrica ASGI:
+`MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única
+referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON`,
+conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md).
+Ela é iniciada explicitamente como uma fábrica ASGI:
 
 ```shell
 python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
 ```
 
 Essa composição contém uma única rota, sem capacidades, critérios de qualidade
-ou estimativa econômica declarada. Ela não comprova comparação econômica entre
-provedores. O uso retornado pela OpenAI é normalizado quando defensável, mas
-`calculated_cost` permanece `unavailable` porque não existe referência de preço
-configurada. Não há tabela automática nem preço padrão, e o uso não comprova
-economia entre provedores.
+ou estimativa econômica declarada. `estimate` permanece `unavailable`, inclusive
+quando a referência opcional está configurada, e um teto econômico continua
+sendo recusado antes de qualquer chamada externa. O uso retornado pela OpenAI é
+normalizado quando defensável; somente uma configuração válida e uso completo
+podem tornar `calculated_cost` disponível. Sem a variável opcional, o custo
+continua indisponível. Não há tabela, preço padrão, consulta ou atualização
+automática. O valor calculado não representa billing nem comprova economia entre
+provedores.
 
 ```shell
 .venv\Scripts\python -m pytest

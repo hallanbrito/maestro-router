@@ -45,7 +45,7 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Fronteira neutra de execução | Contrato assíncrono, associação manual em memória, execução única da rota selecionada e normalização de sucesso ou erro, provados com adaptador controlado nos testes. |
 | ✅ Implementado | Primeiro adaptador externo | OpenAI Responses API por cliente assíncrono injetado, sem registro no aplicativo padrão e sem rota, modelo ou credencial padrão. |
 | ✅ Implementado | Uso normalizado da OpenAI | `input_tokens` e `output_tokens` são traduzidos para unidades neutras e projetados como uso completo, parcial ou indisponível, sem detalhes externos. |
-| ✅ Implementado | Custo calculado | A primeira política posterior calcula somente `input_token` e `output_token` com aritmética decimal exata e só produz custo disponível com referência explícita e contexto completo; caso contrário, permanece indisponível. A composição OpenAI não possui preço configurado, tabela automática nem preço padrão. Uso e custo não comprovam economia entre provedores. |
+| ✅ Implementado | Custo calculado | A primeira política posterior calcula somente `input_token` e `output_token` com aritmética decimal exata. A composição OpenAI aceita uma referência opcional fornecida pelo operador, sem preço padrão, consulta ou atualização automática; a estimativa permanece indisponível e o custo posterior só fica disponível com configuração válida e uso completo. O valor não representa billing nem comprova economia entre provedores. |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.
 

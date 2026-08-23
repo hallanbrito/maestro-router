@@ -49,7 +49,8 @@ Conceitualmente, ela abrangerá:
 - moeda;
 - unidades tarifáveis normalizadas;
 - taxa decimal não negativa de cada unidade;
-- base positiva da taxa, como preço por determinada quantidade de unidades;
+- base da taxa inteira, positiva e igual a uma potência de dez, como `1`,
+  `1000` ou `1000000`;
 - versão, vigência ou momento de verificação;
 - fonte ou responsável pela manutenção;
 - condições tarifárias necessárias para determinar sua aplicabilidade.
@@ -63,6 +64,18 @@ A decisão, a execução e o cálculo posterior usarão o mesmo snapshot aplicá
 de rota e referência econômica. A mesma referência, o mesmo contexto tarifário
 e o mesmo uso normalizado produzirão o mesmo custo.
 
+Quando `estimate.status` for `available` ou `uncertain`, um
+`calculated_cost.status = available` somente poderá usar exatamente a mesma
+`currency` e o mesmo `price_reference` da estimativa registrada antes da
+execução. Se essa correspondência não puder ser assegurada, a primeira política
+produzirá `calculated_cost.status = unavailable`, com razão sanitizada.
+
+Quando a estimativa for `unavailable` e tiver sido aceita porque custo não era
+indispensável, dados posteriores completos ainda poderão produzir custo com
+uma referência configurada aplicável, conforme permitido por
+`docs/05-API.md`. Em nenhum caso o custo posterior recalculará ou substituirá a
+estimativa anterior.
+
 Uma atualização de preços somente poderá afetar snapshots posteriores. Ela não
 alterará retrospectivamente uma resposta já calculada.
 
@@ -72,6 +85,14 @@ O cálculo futuro usará aritmética decimal exata e rejeitará ponto flutuante.
 Quantidades e taxas serão não negativas. Não haverá conversão cambial implícita
 nem arredondamento silencioso que altere o valor calculado. Valores seguirão a
 gramática decimal pública definida em `docs/05-API.md`.
+
+Na primeira implementação futura, `base_da_taxa` será um inteiro positivo e uma
+potência de dez, como `1`, `1000` ou `1000000`. Essa limitação garante que
+quantidades e taxas decimais finitas continuem representáveis como strings
+decimais finitas. Se o resultado não puder ser representado exatamente pela
+gramática pública, `calculated_cost` permanecerá `unavailable`. Outras formas
+de base ou qualquer política de arredondamento dependerão de decisão futura
+separada.
 
 Para unidades independentes, a fórmula conceitual será equivalente à soma de:
 
@@ -91,6 +112,8 @@ poderá ocorrer quando todos estes fatos forem comprovados:
 - não existe dupla contagem entre total e detalhamentos;
 - todas as taxas necessárias existem;
 - moeda, modelo, rota e contexto tarifário correspondem à referência;
+- quando a estimativa possuir valor, moeda e referência correspondem exatamente
+  às registradas antes da execução;
 - a referência pertence ao mesmo snapshot da execução;
 - nenhuma condição material de preço ficou sem representação;
 - o resultado pode ser calculado exatamente pela política aprovada.

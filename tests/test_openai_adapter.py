@@ -391,7 +391,7 @@ def test_openai_complete_usage_is_projected_in_deterministic_order() -> None:
     assert response.json()["economics"]["calculated_cost"]["status"] == (
         "unavailable"
     )
-    assert "método ou política" in response.json()["economics"][
+    assert "referência de preço" in response.json()["economics"][
         "calculated_cost"
     ]["reason"]
     assert "total_tokens" not in response.text

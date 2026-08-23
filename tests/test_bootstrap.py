@@ -142,6 +142,7 @@ def test_composition_builds_only_the_approved_route_and_association(
     assert route.known_unavailable is False
     assert route.estimate.status == "unavailable"
     assert route.estimate.reason == UNAVAILABLE_ESTIMATE_REASON
+    assert route.price_reference is None
     adapters = captured["adapters"]
     assert isinstance(adapters, dict)
     assert set(adapters) == {"openai-responses"}

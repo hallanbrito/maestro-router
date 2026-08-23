@@ -43,9 +43,10 @@ from .execution import (
     TextExecutionRequest,
     TextExecutionResult,
 )
+from .economics import calculate_post_execution_cost
 from .routing import (
-    EconomicEstimate,
     InvalidDecisionError,
+    Route,
     RouteCatalog,
     SelectedDecision,
     route_request,
@@ -209,7 +210,7 @@ async def _execute_selection(
     execute = adapter.execute
 
     public_decision = _public_decision(decision)
-    economics = _execution_economics(route.estimate)
+    economics = _execution_economics(route)
     try:
         result = await execute(
             TextExecutionRequest(task=request.task, context=request.context),
@@ -264,7 +265,7 @@ async def _execute_selection(
     response = ExecutionSuccessResponse(
         result=ExecutionResult(content=result.content),
         decision=public_decision,
-        economics=_execution_economics(route.estimate, result.usage),
+        economics=_execution_economics(route, result.usage),
     )
     return JSONResponse(
         status_code=200,
@@ -289,9 +290,10 @@ def _public_decision(decision: SelectedDecision) -> SelectedPublicDecision:
 
 
 def _execution_economics(
-    estimate: EconomicEstimate,
+    route: Route,
     usage: NormalizedUsage | None = None,
 ) -> ExecutionEconomics:
+    estimate = route.estimate
     if estimate.status == "unavailable":
         assert estimate.reason is not None
         public_estimate = UnavailableEconomicValue(reason=estimate.reason)
@@ -337,15 +339,35 @@ def _execution_economics(
         else:
             public_usage = AvailableUsage(**usage_fields)
 
+    calculated_cost = calculate_post_execution_cost(
+        route_id=route.id,
+        provider=route.provider,
+        model=route.model,
+        estimate=estimate,
+        usage=usage,
+        reference=route.price_reference,
+    )
+    if calculated_cost.status == "available":
+        assert calculated_cost.amount is not None
+        assert calculated_cost.currency is not None
+        assert calculated_cost.price_reference is not None
+        assert calculated_cost.assumptions is not None
+        public_calculated_cost = AvailableEconomicValue(
+            amount=calculated_cost.amount,
+            currency=calculated_cost.currency,
+            price_reference=calculated_cost.price_reference,
+            assumptions=list(calculated_cost.assumptions),
+        )
+    else:
+        assert calculated_cost.reason is not None
+        public_calculated_cost = UnavailableEconomicValue(
+            reason=calculated_cost.reason
+        )
+
     return ExecutionEconomics(
         estimate=public_estimate,
         usage=public_usage,
-        calculated_cost=UnavailableEconomicValue(
-            reason=(
-                "Não existe método ou política aprovada para calcular o custo "
-                "posterior nesta etapa."
-            )
-        ),
+        calculated_cost=public_calculated_cost,
     )
 
 

@@ -264,7 +264,11 @@ class ExecutionEconomics(ClosedModel):
         | UnavailableEconomicValue
     )
     usage: AvailableUsage | UncertainUsage | UnavailableUsage
-    calculated_cost: UnavailableEconomicValue
+    calculated_cost: (
+        AvailableEconomicValue
+        | UncertainEconomicValue
+        | UnavailableEconomicValue
+    )
 
 
 class ExecutionSuccessResponse(ClosedModel):

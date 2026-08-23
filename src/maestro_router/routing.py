@@ -16,6 +16,7 @@ from .contracts import (
     RefusedDecision,
     Strategy,
 )
+from .economics import PriceReference
 
 
 EstimateStatus = Literal["available", "uncertain", "unavailable"]
@@ -106,6 +107,7 @@ class Route:
     quality_criteria: frozenset[str] = field(default_factory=frozenset)
     known_unavailable: bool = False
     estimate: EconomicEstimate = field(default_factory=_default_estimate)
+    price_reference: PriceReference | None = None
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -120,6 +122,10 @@ class Route:
                 )
         if any(0xD800 <= ord(character) <= 0xDFFF for character in self.id):
             raise ValueError("Route IDs must be well-formed Unicode scalar sequences.")
+        if self.price_reference is not None and not isinstance(
+            self.price_reference, PriceReference
+        ):
+            raise ValueError("Route price reference must be provider-neutral.")
 
 
 class RouteCatalog:

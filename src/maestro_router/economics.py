@@ -111,6 +111,10 @@ class PriceReference:
 
 
 CostStatus = Literal["available", "unavailable"]
+_SUPPORTED_COST_UNITS = frozenset({"input_token", "output_token"})
+_UNSUPPORTED_COST_UNIT_REASON = (
+    "A primeira política não cobre todas as unidades observadas ou tarifadas."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +213,11 @@ def calculate_post_execution_cost(
 
     usage_by_unit = {item.unit: item.quantity for item in usage.items}
     rates_by_unit = {rate.unit: rate for rate in reference.rates}
+    if (
+        not usage_by_unit.keys() <= _SUPPORTED_COST_UNITS
+        or not rates_by_unit.keys() <= _SUPPORTED_COST_UNITS
+    ):
+        return _unavailable(_UNSUPPORTED_COST_UNIT_REASON)
     missing_units = rates_by_unit.keys() - usage_by_unit.keys()
     if missing_units:
         return _unavailable(

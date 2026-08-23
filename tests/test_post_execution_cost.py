@@ -232,6 +232,42 @@ def test_exact_cost_uses_independent_input_and_output_rates() -> None:
     assert cost.assumptions == ()
 
 
+@pytest.mark.parametrize(
+    ("unsupported_unit", "include_input"),
+    [
+        ("total_tokens", True),
+        ("cached_input_token", False),
+        ("cache_write_token", False),
+        ("reasoning_token", False),
+        (SENSITIVE_DETAIL, False),
+    ],
+)
+def test_matching_unsupported_units_keep_cost_unavailable(
+    unsupported_unit: str, include_input: bool
+) -> None:
+    usage_items = (NormalizedUsageItem(unsupported_unit, 15),)
+    rates = (UnitPrice(unsupported_unit, "1", 1),)
+    if include_input:
+        usage_items = (NormalizedUsageItem("input_token", 10), *usage_items)
+        rates = (UnitPrice("input_token", "1", 1), *rates)
+
+    cost = calculate_post_execution_cost(
+        route_id="route-a",
+        provider="provider-a",
+        model="model-a",
+        estimate=available_estimate(),
+        usage=NormalizedUsage(status="available", items=usage_items),
+        reference=price_reference(rates=rates),
+    )
+
+    assert cost.status == "unavailable"
+    assert cost.amount is None
+    assert cost.reason == (
+        "A primeira política não cobre todas as unidades observadas ou tarifadas."
+    )
+    assert unsupported_unit not in cost.reason
+
+
 def test_exact_cost_sums_multiple_finite_decimals_without_floating_point() -> None:
     reference = price_reference(
         rates=(
@@ -447,7 +483,7 @@ def test_non_available_usage_keeps_cost_unavailable(
                 UnitPrice("input_token", "1", 1),
                 UnitPrice("output_token", "1", 1),
             ),
-            "não coberta",
+            "primeira política",
         ),
     ],
 )

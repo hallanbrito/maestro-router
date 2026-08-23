@@ -18,8 +18,8 @@ O estado executável atual cobre:
 - normalização de `input_tokens` e `output_tokens` do adaptador OpenAI em uso
   neutro completo, parcial ou indisponível;
 - primeira política neutra e decimalmente exata de cálculo de custo posterior,
-  disponível somente com referência de preço explícita e contexto tarifário
-  completo;
+  limitada a `input_token` e `output_token` e disponível somente com referência
+  de preço explícita e contexto tarifário completo;
 - projeção pública normalizada de sucesso e dos erros de execução;
 - recusas normativas `NO_ELIGIBLE_ROUTE` e
   `INSUFFICIENT_ECONOMIC_INFORMATION`.
@@ -38,8 +38,9 @@ construção e a associação a uma rota. Os testes usam somente clientes
 controlados, sem chamada de rede. Em sucesso, a estimativa usada na seleção é
 preservada; o uso observado pelo adaptador OpenAI é publicado como `available`,
 `uncertain` ou `unavailable`. O núcleo calcula `calculated_cost` somente quando
-a rota selecionada possui uma referência neutra, explícita e completa para todo
-o uso observado; informação insuficiente mantém o custo como `unavailable`. A
+a rota selecionada possui uma referência neutra, explícita e completa para as
+unidades aprovadas `input_token` e `output_token`; informação insuficiente mantém
+o custo como `unavailable`. A
 composição OpenAI não configura preço e, portanto, continua com custo
 indisponível. Uso observado e custo calculado não comprovam economia entre
 provedores.

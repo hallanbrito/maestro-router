@@ -19,7 +19,7 @@ flowchart TD
     J --> K["Fronteira neutra de adaptador"]
     K --> L["Adaptador injetado<br/>controlado ou OpenAI Responses"]
     L --> M["Resultado e uso normalizados"]
-    M --> N["economics<br/>estimate preservada<br/>usage completo, parcial ou indisponível<br/>custo indisponível"]
+    M --> N["economics<br/>estimate preservada<br/>usage completo, parcial ou indisponível<br/>custo exato ou indisponível"]
     N --> O["Resposta à aplicação<br/>resultado + decisão + economia"]
 ```
 
@@ -45,7 +45,7 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Fronteira neutra de execução | Contrato assíncrono, associação manual em memória, execução única da rota selecionada e normalização de sucesso ou erro, provados com adaptador controlado nos testes. |
 | ✅ Implementado | Primeiro adaptador externo | OpenAI Responses API por cliente assíncrono injetado, sem registro no aplicativo padrão e sem rota, modelo ou credencial padrão. |
 | ✅ Implementado | Uso normalizado da OpenAI | `input_tokens` e `output_tokens` são traduzidos para unidades neutras e projetados como uso completo, parcial ou indisponível, sem detalhes externos. |
-| ⚪ Futuro | Custo calculado | `calculated_cost` posterior à execução ainda não foi aprovado nem implementado; uso observado não comprova economia entre provedores. |
+| ✅ Implementado | Custo calculado | A primeira política posterior calcula somente `input_token` e `output_token` com aritmética decimal exata e só produz custo disponível com referência explícita e contexto completo; caso contrário, permanece indisponível. A composição OpenAI não possui preço configurado, tabela automática nem preço padrão. Uso e custo não comprovam economia entre provedores. |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.
 

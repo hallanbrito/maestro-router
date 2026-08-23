@@ -142,10 +142,18 @@ construção de `AsyncOpenAI`. Configuração inválida impedirá o processo de
 começar a atender solicitações, e nenhuma chamada de rede ocorrerá durante a
 validação.
 
-Erros poderão identificar somente o nome seguro da variável ou a categoria ou
-caminho estático do campo inválido. Valores recebidos, taxas, fonte, condições,
-conteúdo bruto do JSON e credenciais não aparecerão em mensagens, logs,
-respostas ou exceções públicas.
+Erros de validação ou inicialização poderão identificar somente o nome seguro
+da variável ou a categoria ou caminho estático do campo inválido. Mensagens de
+validação, logs e exceções de inicialização não reproduzirão valores recebidos,
+taxas, fonte, condições, conteúdo bruto do JSON ou credenciais.
+
+As respostas públicas continuarão governadas exclusivamente por
+`docs/05-API.md`. Quando a política produzir `calculated_cost.status =
+available`, a projeção poderá conter somente os fatos econômicos aprovados pelo
+contrato: `status`, valor calculado, moeda, identificador público e seguro
+`price_reference` e hipóteses. Quando o custo permanecer `unavailable`, sua
+razão será objetiva e sanitizada. Tarifas individuais, fonte, condições,
+documento JSON bruto e credenciais nunca serão expostos.
 
 A implementação futura continuará testável por meio de configurações e
 clientes controlados, sem modificar o ambiente real do processo. Esta decisão

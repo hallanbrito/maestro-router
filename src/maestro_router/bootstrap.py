@@ -14,12 +14,12 @@ from .contracts import CURRENCY_PATTERN
 from .economics import PriceReference, UnitPrice, calculate_pre_execution_amount
 from .routing import EconomicEstimate, Route, RouteCatalog
 
-
 _OPENAI_API_KEY = "OPENAI_API_KEY"
 _OPENAI_MODEL = "MAESTRO_OPENAI_MODEL"
 _OPENAI_ROUTE_ID = "MAESTRO_OPENAI_ROUTE_ID"
 _OPENAI_PRICE_REFERENCE_JSON = "MAESTRO_OPENAI_PRICE_REFERENCE_JSON"
 _OPENAI_ESTIMATED_USAGE_JSON = "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON"
+_OPENAI_ROUTES_JSON = "MAESTRO_OPENAI_ROUTES_JSON"
 _REQUIRED_VARIABLES = (_OPENAI_API_KEY, _OPENAI_MODEL, _OPENAI_ROUTE_ID)
 _OPTIONAL_VARIABLES = (
     _OPENAI_PRICE_REFERENCE_JSON,
@@ -56,9 +56,7 @@ _UNAVAILABLE_ESTIMATE_REASON = (
 
 
 class InvalidRuntimeConfigurationError(ValueError):
-    def __init__(
-        self, variable_name: str, *, invalid_optional: bool = False
-    ) -> None:
+    def __init__(self, variable_name: str, *, invalid_optional: bool = False) -> None:
         self.variable_name = variable_name
         message = (
             f"{variable_name} contém uma configuração inválida."
@@ -72,13 +70,51 @@ class _DuplicateJsonMemberError(ValueError):
     pass
 
 
+class DuplicateTrackingDict(dict):
+    def __init__(self, pairs: list[tuple[str, Any]]) -> None:
+        self.duplicate_keys = set()
+        d = {}
+        for k, v in pairs:
+            if k in d:
+                self.duplicate_keys.add(k)
+            d[k] = v
+        super().__init__(d)
+
+
+def _nested_has_duplicates(obj: Any) -> bool:
+    if isinstance(obj, DuplicateTrackingDict):
+        if obj.duplicate_keys:
+            return True
+        return any(_nested_has_duplicates(v) for v in obj.values())
+    elif isinstance(obj, list):
+        return any(_nested_has_duplicates(item) for item in obj)
+    return False
+
+
+def _is_structurally_valid_string(val: Any) -> bool:
+    return (
+        isinstance(val, str)
+        and any(not c.isspace() for c in val)
+        and not any(0xD800 <= ord(c) <= 0xDFFF for c in val)
+    )
+
+
 def create_openai_app(
     configuration: Mapping[str, str],
     *,
     client_factory: Callable[..., AsyncOpenAI] = AsyncOpenAI,
 ) -> FastAPI:
-    api_key, model, route_id, price_reference, estimate = (
-        _validated_configuration(configuration)
+    if _OPENAI_ROUTES_JSON in configuration:
+        api_key, routes = _validated_multiroute_configuration(configuration)
+        client = client_factory(api_key=api_key)
+        adapter = OpenAIResponsesAdapter(client)
+        return create_app(
+            RouteCatalog(routes),
+            {"openai-responses": adapter},
+        )
+
+    api_key, model, route_id, price_reference, estimate = _validated_configuration(
+        configuration
     )
 
     route = Route(
@@ -104,7 +140,7 @@ def create_openai_app(
 def create_openai_app_from_env() -> FastAPI:
     configuration = {
         name: os.environ[name]
-        for name in (*_REQUIRED_VARIABLES, *_OPTIONAL_VARIABLES)
+        for name in (*_REQUIRED_VARIABLES, *_OPTIONAL_VARIABLES, _OPENAI_ROUTES_JSON)
         if name in os.environ
     }
     return create_openai_app(configuration)
@@ -169,6 +205,198 @@ def _validated_configuration(
     return api_key, model, route_id, price_reference, estimate
 
 
+def _validated_multiroute_configuration(
+    configuration: Mapping[str, str],
+) -> tuple[str, list[Route]]:
+    api_key = configuration.get(_OPENAI_API_KEY)
+    if not isinstance(api_key, str) or not any(not c.isspace() for c in api_key):
+        raise InvalidRuntimeConfigurationError(_OPENAI_API_KEY)
+
+    legacy_keys = {
+        _OPENAI_ROUTE_ID,
+        _OPENAI_MODEL,
+        _OPENAI_PRICE_REFERENCE_JSON,
+        _OPENAI_ESTIMATED_USAGE_JSON,
+    }
+    if any(key in configuration for key in legacy_keys):
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    routes_json = configuration[_OPENAI_ROUTES_JSON]
+    if not isinstance(routes_json, str) or not any(not c.isspace() for c in routes_json):
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    try:
+        document = json.loads(
+            routes_json,
+            object_pairs_hook=DuplicateTrackingDict,
+            parse_constant=_reject_non_json_constant,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    if not isinstance(document, dict) or document.duplicate_keys or set(document.keys()) != {"routes"}:
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    routes_list = document["routes"]
+    if not isinstance(routes_list, list) or len(routes_list) == 0:
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    route_ids = []
+    for route_entry in routes_list:
+        if not isinstance(route_entry, dict):
+            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        if isinstance(route_entry, DuplicateTrackingDict) and "route_id" in route_entry.duplicate_keys:
+            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        if "route_id" not in route_entry:
+            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        route_id = route_entry["route_id"]
+        if (
+            not isinstance(route_id, str)
+            or not any(not c.isspace() for c in route_id)
+            or any(0xD800 <= ord(c) <= 0xDFFF for c in route_id)
+        ):
+            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        route_ids.append(route_id)
+
+    if len(route_ids) != len(set(route_ids)):
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    models = []
+    price_ref_ids = []
+    for route_entry in routes_list:
+        is_duplicate_model_local = isinstance(route_entry, DuplicateTrackingDict) and "model" in route_entry.duplicate_keys
+        if "model" in route_entry and not is_duplicate_model_local:
+            model_val = route_entry["model"]
+            if _is_structurally_valid_string(model_val):
+                models.append(model_val)
+
+        is_duplicate_price_local = isinstance(route_entry, DuplicateTrackingDict) and "price_reference" in route_entry.duplicate_keys
+        if "price_reference" in route_entry and not is_duplicate_price_local:
+            price_ref = route_entry["price_reference"]
+            if isinstance(price_ref, dict):
+                is_duplicate_id_local = isinstance(price_ref, DuplicateTrackingDict) and "id" in price_ref.duplicate_keys
+                if "id" in price_ref and not is_duplicate_id_local:
+                    ref_id = price_ref["id"]
+                    if _is_structurally_valid_string(ref_id):
+                        price_ref_ids.append(ref_id)
+
+    if len(models) != len(set(models)):
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+    if len(price_ref_ids) != len(set(price_ref_ids)):
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    routes: list[Route] = []
+    num_valid_routes = 0
+
+    for route_entry in routes_list:
+        route_id = route_entry["route_id"]
+        local_failed = False
+
+        if _nested_has_duplicates(route_entry):
+            local_failed = True
+
+        if set(route_entry.keys()) != {"route_id", "model", "price_reference", "estimated_usage"}:
+            local_failed = True
+
+        model = route_entry.get("model")
+        if not _is_structurally_valid_string(model):
+            local_failed = True
+
+        price_ref_val = route_entry.get("price_reference")
+        price_reference = None
+        if not isinstance(price_ref_val, dict):
+            local_failed = True
+        else:
+            price_ref_id = price_ref_val.get("id")
+            if not _is_structurally_valid_string(price_ref_id):
+                local_failed = True
+            else:
+                try:
+                    raw_price = json.dumps(price_ref_val)
+                    temp_model = model if isinstance(model, str) else "dummy"
+                    price_reference = _parse_price_reference(
+                        raw_price,
+                        route_id=route_id,
+                        model=temp_model,
+                    )
+                except (InvalidRuntimeConfigurationError, ValueError, TypeError, KeyError):
+                    local_failed = True
+
+        est_usage_val = route_entry.get("estimated_usage")
+        quantities = None
+        if not isinstance(est_usage_val, dict):
+            local_failed = True
+        else:
+            try:
+                raw_usage = json.dumps(est_usage_val)
+                quantities = _parse_estimated_usage(raw_usage)
+            except (InvalidRuntimeConfigurationError, ValueError, TypeError, KeyError):
+                local_failed = True
+
+        estimate = None
+        if not local_failed:
+            try:
+                amount = calculate_pre_execution_amount(
+                    quantities=quantities,
+                    reference=price_reference,
+                )
+                estimate = EconomicEstimate(
+                    status="available",
+                    amount=amount,
+                    currency=price_reference.currency,
+                    price_reference=price_reference.id,
+                    assumptions=(
+                        _estimated_usage_assumption(
+                            "input_token", quantities["input_token"]
+                        ),
+                        _estimated_usage_assumption(
+                            "output_token", quantities["output_token"]
+                        ),
+                    ),
+                )
+                num_valid_routes += 1
+            except (ValueError, TypeError, KeyError):
+                local_failed = True
+
+        if local_failed:
+            safe_model = model if _is_structurally_valid_string(model) else "invalid-model"
+            route = Route(
+                id=route_id,
+                provider="openai",
+                model=safe_model,
+                adapter_id=f"invalid-adapter-{route_id}",
+                enabled=True,
+                capabilities=frozenset(),
+                quality_criteria=frozenset(),
+                known_unavailable=False,
+                estimate=EconomicEstimate(
+                    status="unavailable",
+                    reason="Rota inválida na configuração.",
+                ),
+                price_reference=None,
+            )
+        else:
+            route = Route(
+                id=route_id,
+                provider="openai",
+                model=model,
+                adapter_id="openai-responses",
+                enabled=True,
+                capabilities=frozenset(),
+                quality_criteria=frozenset(),
+                known_unavailable=False,
+                estimate=estimate,
+                price_reference=price_reference,
+            )
+        routes.append(route)
+
+    if num_valid_routes == 0:
+        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+
+    routes.sort(key=lambda r: r.id)
+    return api_key, routes
+
+
 def _parse_estimated_usage(raw_value: object) -> dict[str, int]:
     try:
         if not isinstance(raw_value, str) or not any(
@@ -224,10 +452,7 @@ def _parse_price_reference(
             object_pairs_hook=_object_without_duplicate_members,
             parse_constant=_reject_non_json_constant,
         )
-        if (
-            not isinstance(document, dict)
-            or set(document) != _PRICE_REFERENCE_FIELDS
-        ):
+        if not isinstance(document, dict) or set(document) != _PRICE_REFERENCE_FIELDS:
             raise ValueError
 
         for field_name in ("id", "version", "source"):

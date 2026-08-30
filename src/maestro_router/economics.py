@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, Inexact, Rounded, localcontext
 from typing import TYPE_CHECKING, Literal
@@ -162,6 +163,45 @@ def _unavailable(reason: str) -> PostExecutionCost:
     return PostExecutionCost(status="unavailable", reason=reason)
 
 
+def calculate_pre_execution_amount(
+    *,
+    quantities: Mapping[str, int],
+    reference: PriceReference,
+) -> str:
+    """Calculate an exact amount from a complete configured usage forecast."""
+
+    if set(quantities) != _SUPPORTED_COST_UNITS or any(
+        type(quantity) is not int or quantity <= 0
+        for quantity in quantities.values()
+    ):
+        raise ValueError(
+            "pre-execution quantities must contain the two supported units"
+        )
+    if {rate.unit for rate in reference.rates} != _SUPPORTED_COST_UNITS:
+        raise ValueError("price reference does not cover the supported units")
+    if not all(
+        (
+            reference.context_complete,
+            reference.units_exhaustive,
+            reference.no_double_counting,
+            reference.model_identity_exact,
+        )
+    ):
+        raise ValueError("price reference is not complete")
+
+    try:
+        amount = _calculate_exact_amount(reference, quantities)
+    except (DecimalException, ArithmeticError, ValueError, KeyError):
+        raise ValueError(
+            "pre-execution amount cannot be represented exactly"
+        ) from None
+    if not DECIMAL_PATTERN.fullmatch(amount):
+        raise ValueError(
+            "pre-execution amount does not match the public decimal grammar"
+        )
+    return amount
+
+
 def calculate_post_execution_cost(
     *,
     route_id: str,
@@ -230,23 +270,12 @@ def calculate_post_execution_cost(
         )
 
     try:
-        with localcontext() as context:
-            context.prec = _required_precision(reference, usage)
-            context.traps[Inexact] = True
-            context.traps[Rounded] = True
-            total = Decimal(0)
-            for rate in reference.rates:
-                total += (
-                    Decimal(usage_by_unit[rate.unit])
-                    * Decimal(rate.rate)
-                    / Decimal(rate.base)
-                )
-    except (DecimalException, ArithmeticError, ValueError):
+        amount = _calculate_exact_amount(reference, usage_by_unit)
+    except (DecimalException, ArithmeticError, ValueError, KeyError):
         return _unavailable(
             "O custo não pode ser representado exatamente pela política aprovada."
         )
 
-    amount = _plain_decimal(total)
     if not DECIMAL_PATTERN.fullmatch(amount):
         return _unavailable(
             "O custo não pode ser representado exatamente pela gramática pública."
@@ -261,9 +290,8 @@ def calculate_post_execution_cost(
 
 
 def _required_precision(
-    reference: PriceReference, usage: NormalizedUsage
+    reference: PriceReference, quantities: Mapping[str, int]
 ) -> int:
-    quantities = {item.unit: item.quantity for item in usage.items}
     scales = [
         _fractional_digits(rate.rate) + len(str(rate.base)) - 1
         for rate in reference.rates
@@ -280,6 +308,24 @@ def _required_precision(
             - scale
         )
     return max(aligned_digits) + len(str(len(reference.rates))) + 4
+
+
+def _calculate_exact_amount(
+    reference: PriceReference,
+    quantities: Mapping[str, int],
+) -> str:
+    with localcontext() as context:
+        context.prec = _required_precision(reference, quantities)
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+        total = Decimal(0)
+        for rate in reference.rates:
+            total += (
+                Decimal(quantities[rate.unit])
+                * Decimal(rate.rate)
+                / Decimal(rate.base)
+            )
+    return _plain_decimal(total)
 
 
 def _fractional_digits(value: str) -> int:

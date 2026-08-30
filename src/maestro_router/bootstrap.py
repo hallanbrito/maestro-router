@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from .adapters import OpenAIResponsesAdapter
 from .api import create_app
 from .contracts import CURRENCY_PATTERN
-from .economics import PriceReference, UnitPrice
+from .economics import PriceReference, UnitPrice, calculate_pre_execution_amount
 from .routing import EconomicEstimate, Route, RouteCatalog
 
 
@@ -19,7 +19,12 @@ _OPENAI_API_KEY = "OPENAI_API_KEY"
 _OPENAI_MODEL = "MAESTRO_OPENAI_MODEL"
 _OPENAI_ROUTE_ID = "MAESTRO_OPENAI_ROUTE_ID"
 _OPENAI_PRICE_REFERENCE_JSON = "MAESTRO_OPENAI_PRICE_REFERENCE_JSON"
+_OPENAI_ESTIMATED_USAGE_JSON = "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON"
 _REQUIRED_VARIABLES = (_OPENAI_API_KEY, _OPENAI_MODEL, _OPENAI_ROUTE_ID)
+_OPTIONAL_VARIABLES = (
+    _OPENAI_PRICE_REFERENCE_JSON,
+    _OPENAI_ESTIMATED_USAGE_JSON,
+)
 _PRICE_REFERENCE_FIELDS = frozenset(
     {
         "id",
@@ -35,6 +40,9 @@ _PRICE_REFERENCE_FIELDS = frozenset(
     }
 )
 _RATE_FIELDS = frozenset({"unit", "rate", "base"})
+_ESTIMATED_USAGE_FIELDS = frozenset(
+    {"input_token", "output_token", "applicability_confirmed"}
+)
 _SUPPORTED_UNITS = frozenset({"input_token", "output_token"})
 _COMPLETENESS_FIELDS = (
     "context_complete",
@@ -69,8 +77,8 @@ def create_openai_app(
     *,
     client_factory: Callable[..., AsyncOpenAI] = AsyncOpenAI,
 ) -> FastAPI:
-    api_key, model, route_id, price_reference = _validated_configuration(
-        configuration
+    api_key, model, route_id, price_reference, estimate = (
+        _validated_configuration(configuration)
     )
 
     route = Route(
@@ -82,10 +90,7 @@ def create_openai_app(
         capabilities=frozenset(),
         quality_criteria=frozenset(),
         known_unavailable=False,
-        estimate=EconomicEstimate(
-            status="unavailable",
-            reason=_UNAVAILABLE_ESTIMATE_REASON,
-        ),
+        estimate=estimate,
         price_reference=price_reference,
     )
     client = client_factory(api_key=api_key)
@@ -99,7 +104,7 @@ def create_openai_app(
 def create_openai_app_from_env() -> FastAPI:
     configuration = {
         name: os.environ[name]
-        for name in (*_REQUIRED_VARIABLES, _OPENAI_PRICE_REFERENCE_JSON)
+        for name in (*_REQUIRED_VARIABLES, *_OPTIONAL_VARIABLES)
         if name in os.environ
     }
     return create_openai_app(configuration)
@@ -107,7 +112,7 @@ def create_openai_app_from_env() -> FastAPI:
 
 def _validated_configuration(
     configuration: Mapping[str, str],
-) -> tuple[str, str, str, PriceReference | None]:
+) -> tuple[str, str, str, PriceReference | None, EconomicEstimate]:
     values: list[str] = []
     for variable_name in _REQUIRED_VARIABLES:
         value = configuration.get(variable_name)
@@ -124,7 +129,83 @@ def _validated_configuration(
             route_id=route_id,
             model=model,
         )
-    return api_key, model, route_id, price_reference
+    estimate = EconomicEstimate(
+        status="unavailable",
+        reason=_UNAVAILABLE_ESTIMATE_REASON,
+    )
+    if _OPENAI_ESTIMATED_USAGE_JSON in configuration:
+        quantities = _parse_estimated_usage(
+            configuration[_OPENAI_ESTIMATED_USAGE_JSON]
+        )
+        if price_reference is None:
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ESTIMATED_USAGE_JSON,
+                invalid_optional=True,
+            )
+        try:
+            amount = calculate_pre_execution_amount(
+                quantities=quantities,
+                reference=price_reference,
+            )
+        except ValueError:
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ESTIMATED_USAGE_JSON,
+                invalid_optional=True,
+            ) from None
+        estimate = EconomicEstimate(
+            status="available",
+            amount=amount,
+            currency=price_reference.currency,
+            price_reference=price_reference.id,
+            assumptions=(
+                _estimated_usage_assumption(
+                    "input_token", quantities["input_token"]
+                ),
+                _estimated_usage_assumption(
+                    "output_token", quantities["output_token"]
+                ),
+            ),
+        )
+    return api_key, model, route_id, price_reference, estimate
+
+
+def _parse_estimated_usage(raw_value: object) -> dict[str, int]:
+    try:
+        if not isinstance(raw_value, str) or not any(
+            not character.isspace() for character in raw_value
+        ):
+            raise ValueError
+        document = json.loads(
+            raw_value,
+            object_pairs_hook=_object_without_duplicate_members,
+            parse_constant=_reject_non_json_constant,
+        )
+        if (
+            not isinstance(document, dict)
+            or set(document) != _ESTIMATED_USAGE_FIELDS
+            or type(document["input_token"]) is not int
+            or document["input_token"] <= 0
+            or type(document["output_token"]) is not int
+            or document["output_token"] <= 0
+            or document["applicability_confirmed"] is not True
+        ):
+            raise ValueError
+        return {
+            "input_token": document["input_token"],
+            "output_token": document["output_token"],
+        }
+    except (TypeError, ValueError):
+        raise InvalidRuntimeConfigurationError(
+            _OPENAI_ESTIMATED_USAGE_JSON,
+            invalid_optional=True,
+        ) from None
+
+
+def _estimated_usage_assumption(unit: str, quantity: int) -> str:
+    return (
+        f"A estimativa considera {quantity} unidades de {unit} "
+        "configuradas pelo operador."
+    )
 
 
 def _parse_price_reference(

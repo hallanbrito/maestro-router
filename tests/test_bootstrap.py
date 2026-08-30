@@ -25,6 +25,7 @@ CONTROLLED_KEY = "controlled-key-input"
 CONTROLLED_MODEL = "controlled-model"
 CONTROLLED_ROUTE_ID = "controlled-route"
 PRICE_REFERENCE_VARIABLE = "MAESTRO_OPENAI_PRICE_REFERENCE_JSON"
+ESTIMATED_USAGE_VARIABLE = "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON"
 CONTROLLED_PRICE_ID = "controlled-pricing-reference"
 SENSITIVE_SENTINELS = (
     CONTROLLED_KEY,
@@ -37,6 +38,10 @@ SENSITIVE_SENTINELS = (
 UNAVAILABLE_ESTIMATE_REASON = (
     "Não há preço nem método de estimativa aprovados para esta rota."
 )
+CONTROLLED_ESTIMATE_ASSUMPTIONS = [
+    "A estimativa considera 300 unidades de input_token configuradas pelo operador.",
+    "A estimativa considera 500 unidades de output_token configuradas pelo operador.",
+]
 
 
 class FakeResponses:
@@ -116,6 +121,28 @@ def configuration_with_price(
     return configuration
 
 
+def valid_estimated_usage_document() -> dict[str, object]:
+    return {
+        "input_token": 300,
+        "output_token": 500,
+        "applicability_confirmed": True,
+    }
+
+
+def configuration_with_estimate(
+    usage_document: object | None = None,
+    *,
+    price_document: object | None = None,
+) -> dict[str, str]:
+    configuration = configuration_with_price(price_document)
+    configuration[ESTIMATED_USAGE_VARIABLE] = json.dumps(
+        valid_estimated_usage_document()
+        if usage_document is None
+        else usage_document
+    )
+    return configuration
+
+
 def changed_price_document(**changes: object) -> dict[str, object]:
     document = valid_price_document()
     document.update(changes)
@@ -131,6 +158,12 @@ def price_rate(
     result = {"unit": unit, "rate": rate, "base": base}
     result.update(extra)
     return result
+
+
+def changed_estimated_usage_document(**changes: object) -> dict[str, object]:
+    document = valid_estimated_usage_document()
+    document.update(changes)
+    return document
 
 
 @pytest.mark.parametrize(
@@ -378,7 +411,154 @@ def _assert_invalid_price_configuration(raw_value: str) -> None:
     assert factory.client is None
 
 
-def test_environment_factory_reads_optional_price_only_when_present(
+@pytest.mark.parametrize(
+    "raw_value",
+    [
+        "",
+        "   ",
+        "{",
+        "[]",
+        "null",
+        "true",
+        "1",
+        (
+            '{"input_token":300,"input_token":301,'
+            '"output_token":500,"applicability_confirmed":true}'
+        ),
+        "NaN",
+        "Infinity",
+        "-Infinity",
+    ],
+)
+def test_invalid_estimated_usage_json_prevents_client_construction(
+    raw_value: str,
+) -> None:
+    configuration = configuration_with_price()
+    configuration[ESTIMATED_USAGE_VARIABLE] = raw_value
+    factory = ControlledClientFactory()
+
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(configuration, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ESTIMATED_USAGE_VARIABLE
+    assert str(caught.value) == (
+        f"{ESTIMATED_USAGE_VARIABLE} contém uma configuração inválida."
+    )
+    if raw_value:
+        assert raw_value not in str(caught.value)
+    assert factory.calls == []
+    assert factory.client is None
+
+
+@pytest.mark.parametrize("raw_value", [None, 1, {}, []])
+def test_non_string_estimated_usage_prevents_client_construction(
+    raw_value: object,
+) -> None:
+    configuration: dict[str, object] = configuration_with_price()
+    configuration[ESTIMATED_USAGE_VARIABLE] = raw_value
+    factory = ControlledClientFactory()
+
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(configuration, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ESTIMATED_USAGE_VARIABLE
+    assert factory.calls == []
+    assert factory.client is None
+
+
+@pytest.mark.parametrize("field", list(valid_estimated_usage_document()))
+def test_missing_estimated_usage_field_prevents_client_construction(
+    field: str,
+) -> None:
+    document = valid_estimated_usage_document()
+    del document[field]
+    _assert_invalid_estimated_usage_configuration(json.dumps(document))
+
+
+@pytest.mark.parametrize(
+    "unknown_field",
+    ["unknown", "currency", "price_reference", "model", "route_id"],
+)
+def test_unknown_estimated_usage_field_prevents_client_construction(
+    unknown_field: str,
+) -> None:
+    document = valid_estimated_usage_document()
+    document[unknown_field] = "sensitive-unknown-value"
+    _assert_invalid_estimated_usage_configuration(json.dumps(document))
+
+
+@pytest.mark.parametrize("field", ["input_token", "output_token"])
+@pytest.mark.parametrize(
+    "invalid_value",
+    [0, -1, True, False, 1.0, "1", None, [], {}],
+)
+def test_invalid_estimated_quantity_prevents_client_construction(
+    field: str,
+    invalid_value: object,
+) -> None:
+    document = changed_estimated_usage_document(**{field: invalid_value})
+    _assert_invalid_estimated_usage_configuration(json.dumps(document))
+
+
+@pytest.mark.parametrize("invalid_value", [False, 1, 0, "true", None, [], {}])
+def test_unconfirmed_estimated_usage_prevents_client_construction(
+    invalid_value: object,
+) -> None:
+    document = changed_estimated_usage_document(
+        applicability_confirmed=invalid_value
+    )
+    _assert_invalid_estimated_usage_configuration(json.dumps(document))
+
+
+def test_estimated_usage_requires_price_before_client_construction() -> None:
+    configuration = controlled_configuration()
+    raw_usage = json.dumps(valid_estimated_usage_document())
+    configuration[ESTIMATED_USAGE_VARIABLE] = raw_usage
+    factory = ControlledClientFactory()
+
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(configuration, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ESTIMATED_USAGE_VARIABLE
+    assert raw_usage not in str(caught.value)
+    assert factory.calls == []
+    assert factory.client is None
+
+
+def test_invalid_estimated_usage_error_never_reproduces_received_values() -> None:
+    raw_usage = json.dumps(
+        changed_estimated_usage_document(input_token="sensitive-quantity-41")
+    )
+    configuration = configuration_with_price()
+    configuration[ESTIMATED_USAGE_VARIABLE] = raw_usage
+
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(
+            configuration,
+            client_factory=ControlledClientFactory(),  # type: ignore[arg-type]
+        )
+
+    message = str(caught.value)
+    assert ESTIMATED_USAGE_VARIABLE in message
+    assert raw_usage not in message
+    assert "sensitive-quantity-41" not in message
+    assert all(sentinel not in message for sentinel in SENSITIVE_SENTINELS)
+
+
+def _assert_invalid_estimated_usage_configuration(raw_value: str) -> None:
+    configuration = configuration_with_price()
+    configuration[ESTIMATED_USAGE_VARIABLE] = raw_value
+    factory = ControlledClientFactory()
+
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(configuration, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ESTIMATED_USAGE_VARIABLE
+    assert factory.calls == []
+    assert factory.client is None
+
+
+def test_environment_factory_reads_optional_economics_only_when_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[dict[str, str]] = []
@@ -391,16 +571,25 @@ def test_environment_factory_reads_optional_price_only_when_present(
     for name, value in controlled_configuration().items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv(PRICE_REFERENCE_VARIABLE, raising=False)
+    monkeypatch.delenv(ESTIMATED_USAGE_VARIABLE, raising=False)
 
     create_openai_app_from_env()
     raw_price = json.dumps(valid_price_document())
     monkeypatch.setenv(PRICE_REFERENCE_VARIABLE, raw_price)
+    create_openai_app_from_env()
+    raw_usage = json.dumps(valid_estimated_usage_document())
+    monkeypatch.setenv(ESTIMATED_USAGE_VARIABLE, raw_usage)
     create_openai_app_from_env()
 
     assert captured[0] == controlled_configuration()
     assert captured[1] == {
         **controlled_configuration(),
         PRICE_REFERENCE_VARIABLE: raw_price,
+    }
+    assert captured[2] == {
+        **controlled_configuration(),
+        PRICE_REFERENCE_VARIABLE: raw_price,
+        ESTIMATED_USAGE_VARIABLE: raw_usage,
     }
 
 
@@ -460,7 +649,50 @@ def test_valid_price_reference_is_bound_ordered_and_frozen_in_route_snapshot(
     assert factory.calls == [{"api_key": CONTROLLED_KEY}]
 
 
-def test_price_configuration_is_not_passed_to_openai_adapter(
+def test_valid_estimated_usage_is_exact_order_independent_and_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_routes: list[object] = []
+
+    def capture_create_app(
+        catalog: RouteCatalog,
+        adapters: dict[str, OpenAIResponsesAdapter],
+    ) -> FastAPI:
+        captured_routes.append(catalog.snapshot()[0])
+        return FastAPI()
+
+    monkeypatch.setattr(bootstrap_module, "create_app", capture_create_app)
+    normal_document = valid_estimated_usage_document()
+    reversed_document = dict(reversed(tuple(normal_document.items())))
+    configuration = configuration_with_estimate(normal_document)
+
+    create_openai_app(
+        configuration,
+        client_factory=ControlledClientFactory(),  # type: ignore[arg-type]
+    )
+    configuration[ESTIMATED_USAGE_VARIABLE] = json.dumps(
+        changed_estimated_usage_document(input_token=999, output_token=999)
+    )
+    create_openai_app(
+        configuration_with_estimate(reversed_document),
+        client_factory=ControlledClientFactory(),  # type: ignore[arg-type]
+    )
+
+    first_estimate = captured_routes[0].estimate  # type: ignore[attr-defined]
+    second_estimate = captured_routes[1].estimate  # type: ignore[attr-defined]
+    assert first_estimate == second_estimate
+    assert first_estimate.status == "available"
+    assert first_estimate.amount == "0.0023"
+    assert first_estimate.currency == "USD"
+    assert first_estimate.price_reference == CONTROLLED_PRICE_ID
+    assert list(first_estimate.assumptions) == CONTROLLED_ESTIMATE_ASSUMPTIONS
+    assert first_estimate.reason is None
+    assert first_estimate.comparable is True
+    with pytest.raises(FrozenInstanceError):
+        first_estimate.amount = "999"  # type: ignore[misc]
+
+
+def test_economic_configuration_is_not_passed_to_openai_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -473,7 +705,7 @@ def test_price_configuration_is_not_passed_to_openai_adapter(
     monkeypatch.setattr(bootstrap_module, "create_app", lambda *_: FastAPI())
     factory = ControlledClientFactory()
 
-    create_openai_app(configuration_with_price(), client_factory=factory)  # type: ignore[arg-type]
+    create_openai_app(configuration_with_estimate(), client_factory=factory)  # type: ignore[arg-type]
 
     assert factory.client is not None
     assert adapter_calls == [((factory.client,), {})]
@@ -621,6 +853,139 @@ def test_valid_price_and_complete_usage_produce_exact_public_cost_once() -> None
     assert "0.001" not in response.text
     assert "0.004" not in response.text
     assert raw_price not in response.text
+
+
+def test_valid_forecast_and_complete_usage_keep_estimate_and_cost_separate() -> None:
+    factory = ControlledClientFactory(
+        SimpleNamespace(input_tokens=310, output_tokens=86)
+    )
+    app = create_openai_app(
+        configuration_with_estimate(),
+        client_factory=factory,  # type: ignore[arg-type]
+    )
+    assert factory.client is not None
+
+    response = TestClient(app).post(
+        "/v1/executions", json={"task": "Execute."}
+    )
+
+    assert response.status_code == 200
+    economics = response.json()["economics"]
+    assert economics["estimate"] == {
+        "status": "available",
+        "amount": "0.0023",
+        "currency": "USD",
+        "price_reference": CONTROLLED_PRICE_ID,
+        "assumptions": CONTROLLED_ESTIMATE_ASSUMPTIONS,
+    }
+    assert economics["calculated_cost"] == {
+        "status": "available",
+        "amount": "0.000654",
+        "currency": "USD",
+        "price_reference": CONTROLLED_PRICE_ID,
+        "assumptions": [],
+    }
+    assert economics["estimate"]["amount"] != economics["calculated_cost"][
+        "amount"
+    ]
+    assert len(factory.client.responses.calls) == 1
+
+
+def test_static_forecast_is_reused_for_different_requests_in_snapshot() -> None:
+    factory = ControlledClientFactory()
+    app = create_openai_app(
+        configuration_with_estimate(),
+        client_factory=factory,  # type: ignore[arg-type]
+    )
+    assert factory.client is not None
+    client = TestClient(app)
+
+    first = client.post("/v1/executions", json={"task": "First task."})
+    second = client.post(
+        "/v1/executions",
+        json={"task": "Different task.", "context": "Different context."},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["economics"]["estimate"] == second.json()["economics"][
+        "estimate"
+    ]
+    assert len(factory.client.responses.calls) == 2
+
+
+def test_estimate_within_economic_ceiling_executes_once() -> None:
+    factory = ControlledClientFactory()
+    app = create_openai_app(
+        configuration_with_estimate(),
+        client_factory=factory,  # type: ignore[arg-type]
+    )
+    assert factory.client is not None
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {
+                "max_estimated_cost": {"amount": "0.0023", "currency": "USD"}
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["economics"]["estimate"]["amount"] == "0.0023"
+    assert len(factory.client.responses.calls) == 1
+
+
+def test_estimate_above_economic_ceiling_refuses_without_external_call() -> None:
+    factory = ControlledClientFactory()
+    app = create_openai_app(
+        configuration_with_estimate(),
+        client_factory=factory,  # type: ignore[arg-type]
+    )
+    assert factory.client is not None
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {
+                "max_estimated_cost": {"amount": "0.0022", "currency": "USD"}
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert response.json()["decision"]["outcome"] == "refused"
+    assert "economics" not in response.json()
+    assert factory.client.responses.calls == []
+
+
+def test_estimate_in_another_currency_refuses_without_external_call() -> None:
+    factory = ControlledClientFactory()
+    app = create_openai_app(
+        configuration_with_estimate(),
+        client_factory=factory,  # type: ignore[arg-type]
+    )
+    assert factory.client is not None
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {
+                "max_estimated_cost": {"amount": "10", "currency": "BRL"}
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert (
+        response.json()["error"]["code"]
+        == "INSUFFICIENT_ECONOMIC_INFORMATION"
+    )
+    assert factory.client.responses.calls == []
 
 
 def test_undeclared_capability_refuses_without_external_call() -> None:

@@ -14,7 +14,10 @@ O estado executável atual cobre:
 - primeiro adaptador externo para a OpenAI Responses API, construído e injetado
   explicitamente;
 - composição operacional OpenAI opcional, explícita e separada do aplicativo
-  padrão neutro, com referência de preço opcional fornecida pelo operador;
+  padrão neutro, com referência de preço e previsão estática de uso opcionais
+  fornecidas pelo operador;
+- primeira política operacional de estimativa pré-execução, decimalmente exata
+  e limitada a uma previsão configurada de `input_token` e `output_token`;
 - normalização de `input_tokens` e `output_tokens` do adaptador OpenAI em uso
   neutro completo, parcial ou indisponível;
 - primeira política neutra e decimalmente exata de cálculo de custo posterior,
@@ -41,10 +44,12 @@ preservada; o uso observado pelo adaptador OpenAI é publicado como `available`,
 a rota selecionada possui uma referência neutra, explícita e completa para as
 unidades aprovadas `input_token` e `output_token`; informação insuficiente mantém
 o custo como `unavailable`. A composição OpenAI pode associar uma referência
-fornecida pelo operador, mas não possui preço padrão nem consulta ou atualização
-automática. Mesmo configurado, o custo posterior só pode ficar disponível com
-uso completo e não representa billing, cobrança ou prova de economia entre
-provedores.
+fornecida pelo operador e, quando uma previsão estática de uso também estiver
+configurada, produzir uma estimativa pré-execução `available` com a mesma moeda
+e referência. Sem essa previsão, a estimativa permanece `unavailable`. Não há
+preço padrão, tokenização, consulta ou atualização automática. Mesmo
+configurado, o custo posterior só pode ficar disponível com uso completo e não
+representa billing, cobrança ou prova de economia entre provedores.
 
 Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
 [docs/INDEX.md](docs/INDEX.md) para localizar a fonte normativa de cada assunto.
@@ -74,21 +79,25 @@ brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e
 `MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única
 referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON`,
 conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md).
+Com essa referência configurada, também pode fornecer uma previsão estática em
+`MAESTRO_OPENAI_ESTIMATED_USAGE_JSON`, conforme a
+[ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md).
 Ela é iniciada explicitamente como uma fábrica ASGI:
 
 ```shell
 python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
 ```
 
-Essa composição contém uma única rota, sem capacidades, critérios de qualidade
-ou estimativa econômica declarada. `estimate` permanece `unavailable`, inclusive
-quando a referência opcional está configurada, e um teto econômico continua
-sendo recusado antes de qualquer chamada externa. O uso retornado pela OpenAI é
-normalizado quando defensável; somente uma configuração válida e uso completo
-podem tornar `calculated_cost` disponível. Sem a variável opcional, o custo
-continua indisponível. Não há tabela, preço padrão, consulta ou atualização
-automática. O valor calculado não representa billing nem comprova economia entre
-provedores.
+Essa composição contém uma única rota, sem capacidades ou critérios de
+qualidade declarados. Sem a previsão opcional, `estimate` permanece
+`unavailable`, inclusive quando existe referência de preço. Uma previsão válida
+exige essa referência, é lida uma única vez na composição e produz uma
+estimativa `available` fixa para o snapshot. Ela pode comprovar ou violar um teto
+econômico antes de qualquer chamada externa. O uso retornado pela OpenAI é
+normalizado quando defensável; somente uma referência válida e uso completo
+podem tornar `calculated_cost` disponível. Não há tabela, preço padrão,
+tokenização, consulta ou atualização automática. Estimativa e custo calculado
+não representam billing nem comprovam economia entre provedores.
 
 ```shell
 .venv\Scripts\python -m pytest

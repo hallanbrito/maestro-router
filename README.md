@@ -77,7 +77,7 @@ uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
 A composição operacional OpenAI possui dois modos de configuração:
 
 1. **Modo Legado (Rota única)**: Exige que o ambiente contenha valores não brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e `MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON` (conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md)) e uma previsão estática em `MAESTRO_OPENAI_ESTIMATED_USAGE_JSON` (conforme a [ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md)).
-2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido, contendo uma lista estruturada de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md)), cada uma com seu próprio ID, modelo, referência de preço e previsão de uso. Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
+2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido, contendo uma lista estruturada de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md)). Cada entrada exige obrigatoriamente os membros `route_id`, `model`, `price_reference` e `estimated_usage`. A ausência de qualquer um deles ou qualquer invalidade local (como duplicidades ou surrogates) exclui a rota do catálogo executável. Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
 
 A composição é iniciada explicitamente como uma fábrica ASGI:
 
@@ -85,7 +85,7 @@ A composição é iniciada explicitamente como uma fábrica ASGI:
 python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
 ```
 
-Para cada rota válida, a estimativa pré-execução é calculada no bootstrap e as alternativas são ordenadas por `route_id`. Sem a previsão de uso, a estimativa da rota permanece `unavailable`. A rota com menor estimativa é selecionada para execução, com desempate determinístico. Estimativa e custo calculado não representam billing nem comprovam economia entre provedores.
+Para cada rota válida e executável, a estimativa pré-execução é calculada no bootstrap e as alternativas são ordenadas por `route_id`. Se restarem múltiplos candidatos válidos, a rota com menor estimativa é selecionada para execução, com desempate determinístico. Estimativa e custo calculado não representam billing nem comprovam economia entre provedores.
 
 ```shell
 .venv\Scripts\python -m pytest

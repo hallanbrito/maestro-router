@@ -136,12 +136,18 @@ class RouteCatalog:
     ``INVALID_CONFIGURATION`` semantics remain outside this implementation.
     """
 
-    def __init__(self, routes: Iterable[Route] = ()) -> None:
+    def __init__(
+        self,
+        routes: Iterable[Route] = (),
+        *,
+        local_invalid_ids: Iterable[str] = (),
+    ) -> None:
         snapshot = tuple(routes)
         route_ids = [route.id for route in snapshot]
         if len(route_ids) != len(set(route_ids)):
             raise ValueError("Route IDs must be unique.")
         self._routes = snapshot
+        self.local_invalid_ids = frozenset(local_invalid_ids)
 
     def snapshot(self) -> tuple[Route, ...]:
         return self._routes
@@ -236,6 +242,21 @@ def route_request(
             candidates.append(route)
         else:
             exclusions.append(exclusion)
+
+    catalog_route_ids = {route.id for route in catalog.snapshot()}
+    for invalid_id in sorted(locally_invalid_route_ids):
+        if invalid_id not in catalog_route_ids:
+            exclusions.append(
+                Exclusion(
+                    invalid_id,
+                    "invalid_route",
+                    "configuration",
+                    (
+                        f"{invalid_id} foi excluída porque sua associação de execução "
+                        "era inválida."
+                    ),
+                )
+            )
 
     if not candidates:
         return _refusal(

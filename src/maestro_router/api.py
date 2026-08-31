@@ -145,7 +145,7 @@ def create_app(
                     ),
                 )
             locally_invalid_route_ids = catalog_invalid_ids | getattr(
-                route_catalog, "local_invalid_ids", frozenset()
+                route_catalog, "configuration_invalid_route_ids", frozenset()
             )
             routing_result = route_request(
                 execution_request,

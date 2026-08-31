@@ -1610,6 +1610,7 @@ def test_multiroute_catalog_contains_only_valid_routes(monkeypatch: pytest.Monke
     assert "route-b" not in [r.id for r in snapshot]
     assert "invalid-model" not in [r.model for r in snapshot]
     assert not any("invalid-adapter" in r.adapter_id for r in snapshot)
+    assert captured_catalog.configuration_invalid_route_ids == frozenset(["route-b"])
 
 
 def test_multiroute_allowlist_only_invalid_route_refuses() -> None:
@@ -1672,3 +1673,97 @@ def test_multiroute_all_routes_invalid_fails_initialization() -> None:
     with pytest.raises(InvalidRuntimeConfigurationError) as caught:
         create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
     assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_route_catalog_validation_invariants() -> None:
+    from maestro_router.routing import Route, EconomicEstimate, RouteCatalog
+
+    route_a = Route(
+        id="route-a",
+        provider="openai",
+        model="gpt-4",
+        adapter_id="openai-responses",
+        enabled=True,
+        capabilities=frozenset(),
+        quality_criteria=frozenset(),
+        known_unavailable=False,
+        estimate=EconomicEstimate(status="unavailable", reason="Unavailable."),
+        price_reference=None,
+    )
+    # 1. aceita IDs de configuração válidos, únicos e ausentes do catálogo executável;
+    catalog = RouteCatalog([route_a], configuration_invalid_route_ids=["route-b", "route-c"])
+    # 2. armazena-os imutavelmente;
+    assert isinstance(catalog.configuration_invalid_route_ids, frozenset)
+    assert catalog.configuration_invalid_route_ids == frozenset(["route-b", "route-c"])
+
+    # 3. rejeita ID vazio ou branco;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=[""])
+    assert "non-blank strings" in str(caught.value)
+
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["   "])
+    assert "non-blank strings" in str(caught.value)
+
+    # 4. rejeita tipo diferente de string;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=[123])  # type: ignore[list-item]
+    assert "non-blank strings" in str(caught.value)
+
+    # 5. rejeita surrogate isolado;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["price\ud800id"])
+    assert "isolated Unicode surrogates" in str(caught.value)
+
+    # 6. rejeita duplicidade antes da conversão para conjunto;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["route-b", "route-b"])
+    assert "must be unique" in str(caught.value)
+
+    # 7. rejeita interseção com um route.id executável;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["route-a"])
+    assert "must not overlap with executable route IDs" in str(caught.value)
+
+
+def test_route_catalog_carries_exclusion_to_explanation() -> None:
+    from maestro_router.routing import Route, EconomicEstimate, RouteCatalog
+    from maestro_router.api import create_app
+
+    route_a = Route(
+        id="route-a",
+        provider="openai",
+        model="gpt-4",
+        adapter_id="openai-responses",
+        enabled=True,
+        capabilities=frozenset(),
+        quality_criteria=frozenset(),
+        known_unavailable=False,
+        estimate=EconomicEstimate(status="unavailable", reason="Unavailable."),
+        price_reference=None,
+    )
+    catalog = RouteCatalog([route_a], configuration_invalid_route_ids=["route-b"])
+
+    from maestro_router.execution import TextExecutionResult
+
+    class MockAdapter:
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return TextExecutionResult(content="Success.")
+
+    app = create_app(catalog, {"openai-responses": MockAdapter()})
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {"allowed_route_ids": ["route-a", "route-b"]},
+        },
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    applied_constraints = res_data["decision"]["applied_constraints"]
+    assert any(
+        c["source"] == "configuration"
+        and c["category"] == "route"
+        and "route-b possuía associação de execução inválida" in c["description"]
+        for c in applied_constraints
+    )

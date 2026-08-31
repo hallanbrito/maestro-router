@@ -105,11 +105,11 @@ def create_openai_app(
     client_factory: Callable[..., AsyncOpenAI] = AsyncOpenAI,
 ) -> FastAPI:
     if _OPENAI_ROUTES_JSON in configuration:
-        api_key, routes, local_invalid_ids = _validated_multiroute_configuration(configuration)
+        api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
         client = client_factory(api_key=api_key)
         adapter = OpenAIResponsesAdapter(client)
         return create_app(
-            RouteCatalog(routes, local_invalid_ids=local_invalid_ids),
+            RouteCatalog(routes, configuration_invalid_route_ids=configuration_invalid_route_ids),
             {"openai-responses": adapter},
         )
 
@@ -286,7 +286,7 @@ def _validated_multiroute_configuration(
         raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
 
     routes: list[Route] = []
-    local_invalid_ids: list[str] = []
+    configuration_invalid_route_ids: list[str] = []
     num_valid_routes = 0
 
     for route_entry in routes_list:
@@ -360,7 +360,7 @@ def _validated_multiroute_configuration(
                 local_failed = True
 
         if local_failed:
-            local_invalid_ids.append(route_id)
+            configuration_invalid_route_ids.append(route_id)
         else:
             route = Route(
                 id=route_id,
@@ -380,7 +380,7 @@ def _validated_multiroute_configuration(
         raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
 
     routes.sort(key=lambda r: r.id)
-    return api_key, routes, local_invalid_ids
+    return api_key, routes, configuration_invalid_route_ids
 
 
 def _parse_estimated_usage(raw_value: object) -> dict[str, int]:

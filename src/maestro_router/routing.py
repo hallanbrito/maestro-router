@@ -131,23 +131,37 @@ class Route:
 class RouteCatalog:
     """In-memory route snapshot used by the routing decision.
 
-    This slice classifies only the execution-adapter association as a minimal
-    local-validity concern. Other ``invalid_route`` and
-    ``INVALID_CONFIGURATION`` semantics remain outside this implementation.
+    This slice contains valid and executable routes, alongside explicitly tracked
+    configuration-isolated invalid route IDs necessary for routing explanations.
     """
 
     def __init__(
         self,
         routes: Iterable[Route] = (),
         *,
-        local_invalid_ids: Iterable[str] = (),
+        configuration_invalid_route_ids: Iterable[str] = (),
     ) -> None:
         snapshot = tuple(routes)
         route_ids = [route.id for route in snapshot]
         if len(route_ids) != len(set(route_ids)):
             raise ValueError("Route IDs must be unique.")
         self._routes = snapshot
-        self.local_invalid_ids = frozenset(local_invalid_ids)
+
+        invalid_ids = tuple(configuration_invalid_route_ids)
+        for val in invalid_ids:
+            if not isinstance(val, str) or not any(not c.isspace() for c in val):
+                raise ValueError("Configuration invalid route IDs must be non-blank strings.")
+            if any(0xD800 <= ord(c) <= 0xDFFF for c in val):
+                raise ValueError("Configuration invalid route IDs must not contain isolated Unicode surrogates.")
+
+        if len(invalid_ids) != len(set(invalid_ids)):
+            raise ValueError("Configuration invalid route IDs must be unique.")
+
+        executable_ids = set(route_ids)
+        if executable_ids.intersection(invalid_ids):
+            raise ValueError("Configuration invalid route IDs must not overlap with executable route IDs.")
+
+        self.configuration_invalid_route_ids = frozenset(invalid_ids)
 
     def snapshot(self) -> tuple[Route, ...]:
         return self._routes

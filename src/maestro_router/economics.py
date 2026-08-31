@@ -1,3 +1,10 @@
+"""Exact, provider-neutral economic calculations used by the MVP.
+
+Prices arrive as operator-supplied immutable facts.  This module validates
+those facts and calculates decimal amounts without floating-point arithmetic,
+provider lookups, or claims about the provider's final invoice.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -13,6 +20,8 @@ if TYPE_CHECKING:
 
 
 def _require_non_blank(value: object, field_name: str) -> None:
+    """Require an explicit string containing at least one visible character."""
+
     if not isinstance(value, str) or not any(
         not character.isspace() for character in value
     ):
@@ -20,6 +29,8 @@ def _require_non_blank(value: object, field_name: str) -> None:
 
 
 def _is_power_of_ten(value: int) -> bool:
+    """Return whether an integer can be used as a decimal pricing base."""
+
     if value < 1:
         return False
     while value > 1 and value % 10 == 0:
@@ -36,6 +47,8 @@ class UnitPrice:
     base: int
 
     def __post_init__(self) -> None:
+        """Validate the unit, exact decimal rate, and power-of-ten base."""
+
         _require_non_blank(self.unit, "price unit")
         if not isinstance(self.rate, str) or not DECIMAL_PATTERN.fullmatch(
             self.rate
@@ -66,6 +79,8 @@ class PriceReference:
     model_identity_exact: bool
 
     def __post_init__(self) -> None:
+        """Validate completeness evidence and canonicalize immutable members."""
+
         for field_name, value in (
             ("price reference id", self.id),
             ("price route id", self.route_id),
@@ -105,6 +120,8 @@ class PriceReference:
             if type(value) is not bool:
                 raise ValueError(f"{field_name} must be an explicit boolean.")
 
+        # Canonical ordering makes snapshots and calculations deterministic even
+        # when equivalent configuration arrives in a different order.
         object.__setattr__(
             self, "rates", tuple(sorted(self.rates, key=lambda rate: rate.unit))
         )
@@ -120,6 +137,13 @@ _UNSUPPORTED_COST_UNIT_REASON = (
 
 @dataclass(frozen=True, slots=True)
 class PostExecutionCost:
+    """Result of attempting a conservative post-execution cost calculation.
+
+    An available result contains all public monetary facts and no reason.  An
+    unavailable result contains only a sanitized reason, so incomplete facts
+    can never be mistaken for a numeric cost.
+    """
+
     status: CostStatus
     amount: str | None = None
     currency: str | None = None
@@ -128,6 +152,8 @@ class PostExecutionCost:
     reason: str | None = None
 
     def __post_init__(self) -> None:
+        """Enforce the mutually exclusive available and unavailable shapes."""
+
         if self.status == "available":
             if (
                 self.amount is None
@@ -160,6 +186,8 @@ class PostExecutionCost:
 
 
 def _unavailable(reason: str) -> PostExecutionCost:
+    """Create the single non-monetary result shape used by policy failures."""
+
     return PostExecutionCost(status="unavailable", reason=reason)
 
 
@@ -168,7 +196,13 @@ def calculate_pre_execution_amount(
     quantities: Mapping[str, int],
     reference: PriceReference,
 ) -> str:
-    """Calculate an exact amount from a complete configured usage forecast."""
+    """Calculate an exact amount from a complete configured usage forecast.
+
+    Raises:
+        ValueError: If quantities or pricing evidence are incomplete, contain
+            unsupported units, or cannot be represented by the public decimal
+            grammar.
+    """
 
     if set(quantities) != _SUPPORTED_COST_UNITS or any(
         type(quantity) is not int or quantity <= 0
@@ -213,7 +247,12 @@ def calculate_post_execution_cost(
     usage: NormalizedUsage | None,
     reference: PriceReference | None,
 ) -> PostExecutionCost:
-    """Apply the first conservative post-execution cost policy."""
+    """Apply the first conservative post-execution cost policy.
+
+    Every required identity, completeness flag, usage unit, and estimate link
+    is checked before arithmetic.  A missing or inconsistent fact produces an
+    unavailable result instead of a partial or guessed cost.
+    """
 
     # ``model`` keeps the original internal call form meaningful: callers that
     # provide one identity are asserting it as both configured and observed.
@@ -268,6 +307,8 @@ def calculate_post_execution_cost(
             "A referência posterior não corresponde à estimativa registrada."
         )
 
+    # Set comparisons make the accepted billable vocabulary explicit.  Future
+    # provider units must receive an approved policy before they affect cost.
     usage_by_unit = {item.unit: item.quantity for item in usage.items}
     rates_by_unit = {rate.unit: rate for rate in reference.rates}
     if (
@@ -309,6 +350,8 @@ def calculate_post_execution_cost(
 def _required_precision(
     reference: PriceReference, quantities: Mapping[str, int]
 ) -> int:
+    """Derive enough Decimal precision for all products and their final sum."""
+
     scales = [
         _fractional_digits(rate.rate) + len(str(rate.base)) - 1
         for rate in reference.rates
@@ -331,8 +374,12 @@ def _calculate_exact_amount(
     reference: PriceReference,
     quantities: Mapping[str, int],
 ) -> str:
+    """Multiply each quantity by its rate and reject any rounding."""
+
     with localcontext() as context:
         context.prec = _required_precision(reference, quantities)
+        # A price is publishable only when every operation is exact.  Trapping
+        # both signals prevents Decimal from silently rounding configured facts.
         context.traps[Inexact] = True
         context.traps[Rounded] = True
         total = Decimal(0)
@@ -346,11 +393,15 @@ def _calculate_exact_amount(
 
 
 def _fractional_digits(value: str) -> int:
+    """Count the explicit decimal places in a validated decimal string."""
+
     separator = value.find(".")
     return 0 if separator < 0 else len(value) - separator - 1
 
 
 def _plain_decimal(value: Decimal) -> str:
+    """Serialize a Decimal without exponent notation or insignificant zeros."""
+
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")

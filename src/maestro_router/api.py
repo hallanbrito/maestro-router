@@ -1,3 +1,10 @@
+"""FastAPI boundary for validating, routing, and executing public requests.
+
+The HTTP layer coordinates existing domain components.  It owns strict JSON
+handling and public response projection, but delegates selection, provider
+execution, and economic calculation to their respective neutral modules.
+"""
+
 from __future__ import annotations
 
 import json
@@ -54,7 +61,11 @@ from .routing import (
 
 
 class DuplicateMemberError(ValueError):
+    """Signal a repeated JSON object member while preserving its name."""
+
     def __init__(self, member: str) -> None:
+        """Create an error for the duplicate member reported to the caller."""
+
         self.member = member
         super().__init__(member)
 
@@ -63,6 +74,18 @@ def create_app(
     catalog: RouteCatalog | None = None,
     adapters: Mapping[str, ExecutionAdapter] | None = None,
 ) -> FastAPI:
+    """Compose the Maestro HTTP application from explicit runtime components.
+
+    Args:
+        catalog: Immutable-snapshot source for routes available to the router.
+            An empty catalog is used when it is omitted.
+        adapters: Mapping from configured adapter identifiers to provider-neutral
+            execution adapters.  An empty registry is used when it is omitted.
+
+    Returns:
+        A FastAPI application exposing only ``POST /v1/executions``.
+    """
+
     app = FastAPI(
         title="Maestro Router",
         version="0.1.0",
@@ -87,6 +110,11 @@ def create_app(
         },
     )
     async def create_execution(request: Request) -> JSONResponse:
+        """Validate one request, select one route, and execute it at most once."""
+
+        # The body is decoded and parsed manually because the public contract
+        # distinguishes invalid UTF-8, duplicate JSON members, and media errors
+        # that ordinary framework parsing may normalize before validation.
         media_issue = _validate_content_type(request.headers.get("content-type"))
         if media_issue is not None:
             return _invalid_request([media_issue], status_code=415)
@@ -129,6 +157,8 @@ def create_app(
             return _invalid_request(_validation_issues(error))
 
         try:
+            # Freeze adapter associations before routing so registry mutation
+            # cannot change the executor after a decision has been made.
             adapter_snapshot = _snapshot_adapters(
                 route_catalog, adapter_registry
             )
@@ -156,6 +186,9 @@ def create_app(
             locally_invalid_route_ids = catalog_invalid_ids | getattr(
                 route_catalog, "configuration_invalid_route_ids", frozenset()
             )
+            # Invalid runtime associations are expressed as route exclusions.
+            # This lets a valid route still win while preventing selection of a
+            # route that cannot be executed.
             routing_result = route_request(
                 execution_request,
                 route_catalog,
@@ -185,6 +218,8 @@ def _snapshot_adapters(
     catalog: RouteCatalog,
     adapters: Mapping[str, ExecutionAdapter],
 ) -> Mapping[str, ExecutionAdapter | None]:
+    """Freeze only adapter associations used by enabled catalog routes."""
+
     applicable_adapter_ids = {
         route.adapter_id for route in catalog.snapshot() if route.enabled
     }
@@ -196,6 +231,8 @@ def _snapshot_adapters(
 
 
 def _is_valid_adapter(adapter: object | None) -> bool:
+    """Return whether an object exposes the required asynchronous operation."""
+
     try:
         execute = getattr(adapter, "execute", None)
         return (
@@ -212,6 +249,13 @@ async def _execute_selection(
     decision: SelectedDecision,
     adapters: Mapping[str, ExecutionAdapter],
 ) -> JSONResponse:
+    """Execute one validated decision and map its outcome to public JSON.
+
+    Provider-neutral exceptions receive distinct public status codes.  Unknown
+    exceptions and invalid adapter results are sanitized as execution failures
+    so implementation details never leak through the API boundary.
+    """
+
     route = decision.route
     adapter = adapters.get(route.adapter_id)
     if not _is_valid_adapter(adapter):
@@ -290,6 +334,8 @@ async def _execute_selection(
 
 
 def _public_decision(decision: SelectedDecision) -> SelectedPublicDecision:
+    """Project a validated internal selection into its public explanation."""
+
     route = decision.route
     return SelectedPublicDecision(
         route=SelectedRoute(
@@ -310,6 +356,13 @@ def _execution_economics(
     *,
     observed_model: str | None = None,
 ) -> ExecutionEconomics:
+    """Build the three public economic views for an execution.
+
+    The pre-execution estimate is preserved from the selected route, observed
+    usage is normalized independently, and calculated cost is attempted only
+    through the conservative post-execution policy.
+    """
+
     estimate = route.estimate
     if estimate.status == "unavailable":
         assert estimate.reason is not None
@@ -396,6 +449,8 @@ def _execution_error(
     economics: ExecutionEconomics,
     status_code: int,
 ) -> JSONResponse:
+    """Create a provider-neutral error while preserving known decision facts."""
+
     response = ExecutionErrorResponse(
         error=ExecutionPublicError(code=code, message=message),
         decision=decision,
@@ -409,6 +464,8 @@ def _execution_error(
 
 
 def _internal_error(code: str, message: str, issue: str) -> JSONResponse:
+    """Create a sanitized server error for invalid local state."""
+
     response = InternalErrorResponse(
         error=InternalPublicError(
             code=code,
@@ -424,6 +481,8 @@ def _internal_error(code: str, message: str, issue: str) -> JSONResponse:
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while rejecting ambiguous repeated member names."""
+
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
@@ -433,6 +492,11 @@ def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _has_isolated_surrogate(value: object) -> bool:
+    """Check iteratively whether a decoded JSON structure contains Unicode surrogates.
+
+    Iterates through strings, lists, and dict keys/values using an explicit stack
+    to avoid recursion depth limits while rejecting unpaired surrogates (U+D800..U+DFFF).
+    """
     pending = [value]
     while pending:
         current = pending.pop()
@@ -448,6 +512,8 @@ def _has_isolated_surrogate(value: object) -> bool:
 
 
 def _validate_content_type(content_type: str | None) -> ErrorIssue | None:
+    """Accept JSON with no parameter or with one explicit UTF-8 charset."""
+
     if content_type is None:
         return ErrorIssue(message="Content-Type deve ser application/json.")
 
@@ -471,6 +537,8 @@ def _validate_content_type(content_type: str | None) -> ErrorIssue | None:
 
 
 def _validation_issues(error: ValidationError) -> list[ErrorIssue]:
+    """Translate Pydantic errors into the stable public issue model."""
+
     return [
         ErrorIssue(
             path=_json_pointer(item["loc"]),
@@ -481,6 +549,8 @@ def _validation_issues(error: ValidationError) -> list[ErrorIssue]:
 
 
 def _json_pointer(location: tuple[str | int, ...]) -> str:
+    """Encode a Pydantic location as an RFC 6901-style JSON Pointer."""
+
     if not location:
         return ""
     encoded = [str(part).replace("~", "~0").replace("/", "~1") for part in location]
@@ -488,6 +558,8 @@ def _json_pointer(location: tuple[str | int, ...]) -> str:
 
 
 def _validation_message(item: dict[str, Any]) -> str:
+    """Replace framework wording with stable Portuguese contract messages."""
+
     error_type = item["type"]
     if error_type == "missing":
         return "O campo é obrigatório."
@@ -508,6 +580,8 @@ def _validation_message(item: dict[str, Any]) -> str:
 def _invalid_request(
     issues: list[ErrorIssue], status_code: int = 400
 ) -> JSONResponse:
+    """Create the public invalid-request envelope with its applicable status."""
+
     response = InvalidRequestResponse(error=InvalidRequestError(issues=issues))
     return JSONResponse(
         status_code=status_code,
@@ -516,4 +590,6 @@ def _invalid_request(
     )
 
 
+# Default imports remain intentionally unconfigured.  Operational composition
+# with provider routes is performed by the explicit bootstrap module.
 app = create_app()

@@ -126,14 +126,14 @@ def create_app(
             enabled_routes = tuple(
                 route for route in route_catalog.snapshot() if route.enabled
             )
-            locally_invalid_route_ids = frozenset(
+            catalog_invalid_ids = frozenset(
                 route.id
                 for route in enabled_routes
                 if not _is_valid_adapter(
                     adapter_snapshot.get(route.adapter_id)
                 )
             )
-            if enabled_routes and len(locally_invalid_route_ids) == len(
+            if enabled_routes and len(catalog_invalid_ids) == len(
                 enabled_routes
             ):
                 return _internal_error(
@@ -144,6 +144,9 @@ def create_app(
                         "de execução válida."
                     ),
                 )
+            locally_invalid_route_ids = catalog_invalid_ids | getattr(
+                route_catalog, "configuration_invalid_route_ids", frozenset()
+            )
             routing_result = route_request(
                 execution_request,
                 route_catalog,

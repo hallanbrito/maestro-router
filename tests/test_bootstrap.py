@@ -20,7 +20,6 @@ from maestro_router.bootstrap import (
 )
 from maestro_router.routing import RouteCatalog
 
-
 CONTROLLED_KEY = "controlled-key-input"
 CONTROLLED_MODEL = "controlled-model"
 CONTROLLED_ROUTE_ID = "controlled-route"
@@ -136,9 +135,7 @@ def configuration_with_estimate(
 ) -> dict[str, str]:
     configuration = configuration_with_price(price_document)
     configuration[ESTIMATED_USAGE_VARIABLE] = json.dumps(
-        valid_estimated_usage_document()
-        if usage_document is None
-        else usage_document
+        valid_estimated_usage_document() if usage_document is None else usage_document
     )
     return configuration
 
@@ -350,17 +347,18 @@ def test_invalid_conditions_prevent_client_construction(
     ],
 )
 def test_invalid_rates_prevent_client_construction(rates: object) -> None:
-    _assert_invalid_price_configuration(
-        json.dumps(changed_price_document(rates=rates))
-    )
+    _assert_invalid_price_configuration(json.dumps(changed_price_document(rates=rates)))
 
 
-@pytest.mark.parametrize("field", [
-    "context_complete",
-    "units_exhaustive",
-    "no_double_counting",
-    "model_identity_exact",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "context_complete",
+        "units_exhaustive",
+        "no_double_counting",
+        "model_identity_exact",
+    ],
+)
 @pytest.mark.parametrize("invalid_value", [False, 1, "true", None])
 def test_invalid_completeness_declarations_prevent_client_construction(
     field: str,
@@ -504,9 +502,7 @@ def test_invalid_estimated_quantity_prevents_client_construction(
 def test_unconfirmed_estimated_usage_prevents_client_construction(
     invalid_value: object,
 ) -> None:
-    document = changed_estimated_usage_document(
-        applicability_confirmed=invalid_value
-    )
+    document = changed_estimated_usage_document(applicability_confirmed=invalid_value)
     _assert_invalid_estimated_usage_configuration(json.dumps(document))
 
 
@@ -783,9 +779,7 @@ def test_valid_composition_executes_once_and_preserves_unavailable_economics() -
     )
     assert factory.client is not None
 
-    response = TestClient(app).post(
-        "/v1/executions", json={"task": "Execute."}
-    )
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 200
     assert response.json()["result"] == {"content": "controlled result"}
@@ -819,9 +813,7 @@ def test_valid_price_and_complete_usage_produce_exact_public_cost_once() -> None
     )
     assert factory.client is not None
 
-    response = TestClient(app).post(
-        "/v1/executions", json={"task": "Execute."}
-    )
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 200
     economics = response.json()["economics"]
@@ -865,9 +857,7 @@ def test_valid_forecast_and_complete_usage_keep_estimate_and_cost_separate() -> 
     )
     assert factory.client is not None
 
-    response = TestClient(app).post(
-        "/v1/executions", json={"task": "Execute."}
-    )
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 200
     economics = response.json()["economics"]
@@ -885,9 +875,7 @@ def test_valid_forecast_and_complete_usage_keep_estimate_and_cost_separate() -> 
         "price_reference": CONTROLLED_PRICE_ID,
         "assumptions": [],
     }
-    assert economics["estimate"]["amount"] != economics["calculated_cost"][
-        "amount"
-    ]
+    assert economics["estimate"]["amount"] != economics["calculated_cost"]["amount"]
     assert len(factory.client.responses.calls) == 1
 
 
@@ -908,9 +896,9 @@ def test_static_forecast_is_reused_for_different_requests_in_snapshot() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json()["economics"]["estimate"] == second.json()["economics"][
-        "estimate"
-    ]
+    assert (
+        first.json()["economics"]["estimate"] == second.json()["economics"]["estimate"]
+    )
     assert len(factory.client.responses.calls) == 2
 
 
@@ -974,17 +962,12 @@ def test_estimate_in_another_currency_refuses_without_external_call() -> None:
         "/v1/executions",
         json={
             "task": "Execute.",
-            "constraints": {
-                "max_estimated_cost": {"amount": "10", "currency": "BRL"}
-            },
+            "constraints": {"max_estimated_cost": {"amount": "10", "currency": "BRL"}},
         },
     )
 
     assert response.status_code == 422
-    assert (
-        response.json()["error"]["code"]
-        == "INSUFFICIENT_ECONOMIC_INFORMATION"
-    )
+    assert response.json()["error"]["code"] == "INSUFFICIENT_ECONOMIC_INFORMATION"
     assert factory.client.responses.calls == []
 
 
@@ -1032,10 +1015,7 @@ def test_economic_ceiling_refuses_without_external_call(
     )
 
     assert response.status_code == 422
-    assert (
-        response.json()["error"]["code"]
-        == "INSUFFICIENT_ECONOMIC_INFORMATION"
-    )
+    assert response.json()["error"]["code"] == "INSUFFICIENT_ECONOMIC_INFORMATION"
     assert factory.client.responses.calls == []
 
 
@@ -1054,9 +1034,7 @@ def test_configuration_is_snapshotted_during_composition() -> None:
             "MAESTRO_OPENAI_ROUTE_ID": "later-route",
         }
     )
-    response = TestClient(app).post(
-        "/v1/executions", json={"task": "Execute."}
-    )
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 200
     assert response.json()["decision"]["route"]["id"] == CONTROLLED_ROUTE_ID
@@ -1078,9 +1056,7 @@ def test_non_blank_values_are_preserved_without_normalization() -> None:
     )
     assert factory.client is not None
 
-    response = TestClient(app).post(
-        "/v1/executions", json={"task": "Execute."}
-    )
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 200
     assert factory.calls == [{"api_key": "  controlled-key-input  "}]
@@ -1097,3 +1073,697 @@ def test_default_application_remains_neutral() -> None:
 
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def make_route_json(
+    route_id: str,
+    model: str,
+    price_id: str,
+    input_rate: str = "0.001",
+    output_rate: str = "0.004",
+    input_tokens: int = 300,
+    output_tokens: int = 500,
+    currency: str = "USD",
+) -> dict[str, Any]:
+    return {
+        "route_id": route_id,
+        "model": model,
+        "price_reference": {
+            "id": price_id,
+            "currency": currency,
+            "version": "v1",
+            "source": "operator",
+            "rates": [
+                {"unit": "input_token", "rate": input_rate, "base": 1000},
+                {"unit": "output_token", "rate": output_rate, "base": 1000},
+            ],
+            "conditions": [],
+            "context_complete": True,
+            "units_exhaustive": True,
+            "no_double_counting": True,
+            "model_identity_exact": True,
+        },
+        "estimated_usage": {
+            "input_token": input_tokens,
+            "output_token": output_tokens,
+            "applicability_confirmed": True,
+        },
+    }
+
+
+def test_multiroute_selects_lowest_estimate() -> None:
+    route_a = make_route_json(
+        "route-a", "model-a", "price-a", input_rate="0.001", output_rate="0.004"
+    )
+    route_b = make_route_json(
+        "route-b", "model-b", "price-b", input_rate="0.002", output_rate="0.008"
+    )
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+    assert res_data["decision"]["route"]["model"] == "model-a"
+    assert res_data["economics"]["estimate"]["amount"] == "0.0023"
+
+
+def test_multiroute_order_invariance_and_deterministic_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_a = make_route_json(
+        "route-a", "model-a", "price-a", input_rate="0.001", output_rate="0.004"
+    )
+    route_b = make_route_json(
+        "route-b", "model-b", "price-b", input_rate="0.002", output_rate="0.008"
+    )
+
+    config_1 = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    config_2 = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_b, route_a]}),
+    }
+
+    captured_catalogs = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_catalogs.append(catalog.snapshot())
+        return default_app
+
+    monkeypatch.setattr(bootstrap_module, "create_app", mock_create_app)
+
+    create_openai_app(config_1, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    create_openai_app(config_2, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    assert len(captured_catalogs) == 2
+    assert [r.id for r in captured_catalogs[0]] == ["route-a", "route-b"]
+    assert [r.id for r in captured_catalogs[1]] == ["route-a", "route-b"]
+
+
+def test_multiroute_tie_breaker() -> None:
+    route_a = make_route_json(
+        "route-a", "model-a", "price-a", input_rate="0.001", output_rate="0.004"
+    )
+    route_b = make_route_json(
+        "route-b", "model-b", "price-b", input_rate="0.001", output_rate="0.004"
+    )
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_b, route_a]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+    assert any(f["category"] == "tie_breaker" for f in res_data["decision"]["factors"])
+
+
+def test_multiroute_max_estimated_cost_filtering() -> None:
+    route_a = make_route_json(
+        "route-a", "model-a", "price-a", input_rate="0.003", output_rate="0.008"
+    )
+    route_b = make_route_json(
+        "route-b", "model-b", "price-b", input_rate="0.002", output_rate="0.006"
+    )
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {
+                "max_estimated_cost": {"amount": "0.0040", "currency": "USD"}
+            },
+        },
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-b"
+
+
+def test_multiroute_incompatible_currencies() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a", currency="USD")
+    route_b = make_route_json("route-b", "model-b", "price-b", currency="BRL")
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INSUFFICIENT_ECONOMIC_INFORMATION"
+
+
+def test_multiroute_adapter_calls_and_shares() -> None:
+    route_a = make_route_json(
+        "route-a", "model-a", "price-a", input_rate="0.001", output_rate="0.004"
+    )
+    route_b = make_route_json(
+        "route-b", "model-b", "price-b", input_rate="0.002", output_rate="0.008"
+    )
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert factory.calls == [{"api_key": CONTROLLED_KEY}]
+    assert factory.client is not None
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+    assert response.status_code == 200
+
+    assert len(factory.client.responses.calls) == 1
+    assert factory.client.responses.calls[0]["model"] == "model-a"
+
+
+def test_multiroute_absent_preserves_legacy() -> None:
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_MODEL": CONTROLLED_MODEL,
+        "MAESTRO_OPENAI_ROUTE_ID": CONTROLLED_ROUTE_ID,
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+    assert response.status_code == 200
+    assert response.json()["decision"]["route"]["id"] == CONTROLLED_ROUTE_ID
+
+
+@pytest.mark.parametrize(
+    "legacy_var",
+    [
+        "MAESTRO_OPENAI_ROUTE_ID",
+        "MAESTRO_OPENAI_MODEL",
+        "MAESTRO_OPENAI_PRICE_REFERENCE_JSON",
+        "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON",
+    ],
+)
+@pytest.mark.parametrize("legacy_val", ["some-value", "", "   "])
+def test_multiroute_legacy_collision_fails(legacy_var: str, legacy_val: str) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        legacy_var: legacy_val,
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert "MAESTRO_OPENAI_ROUTES_JSON contém uma configuração inválida." in str(
+        caught.value
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_json",
+    [
+        "",
+        "   ",
+        "{",
+        "[]",
+        '{"routes": []}',
+        '{"routes": [null]}',
+        '{"routes": [{"route_id": "a", "route_id": "b", "model": "m", "price_reference": {}, "estimated_usage": {}}]}',
+        '{"routes": [{"route_id": "a", "model": "m", "price_reference": {}, "estimated_usage": {}, "extra": 1}]}',
+        '{"routes": [{"route_id": "a", "model": "m"}]}',
+        '{"routes": [{"route_id": "a", "model": "m", "price_reference": null, "estimated_usage": null}]}',
+        '{"routes": [{"route_id": "a", "model": "m", "price_reference": {}, "estimated_usage": {}}], "extra": 1}',
+        '{"routes": NaN}',
+    ],
+)
+def test_multiroute_invalid_json_shapes_fail(invalid_json: str) -> None:
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": invalid_json,
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+@pytest.mark.parametrize(
+    "invalid_route_id",
+    [
+        None,
+        "",
+        "   ",
+        123,
+        "route\ud800id",
+    ],
+)
+def test_multiroute_invalid_route_id_fails_globally(invalid_route_id: Any) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    if invalid_route_id is None:
+        del route_a["route_id"]
+    else:
+        route_a["route_id"] = invalid_route_id
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_duplicate_route_id_fails_globally() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-a", "model-b", "price-b")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_duplicate_model_fails_globally() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-a", "price-b")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_duplicate_price_ref_id_fails_globally() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price-a")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_isolable_failure_and_invalid_route_explanation() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["price_reference"]["currency"] = "invalid-currency-format"
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {"allowed_route_ids": ["route-a", "route-b"]},
+        },
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+
+    applied_constraints = res_data["decision"]["applied_constraints"]
+    assert any(
+        c["source"] == "configuration"
+        and c["category"] == "route"
+        and "associação de execução inválida" in c["description"]
+        for c in applied_constraints
+    )
+
+
+def test_multiroute_no_valid_routes_fails_initialization() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["price_reference"]["currency"] = "invalid-currency"
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_errors_are_sanitized() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["price_reference"]["currency"] = "invalid-currency"
+
+    config = {
+        "OPENAI_API_KEY": "sensitive-key-12345",
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    error_msg = str(caught.value)
+    assert "sensitive-key-12345" not in error_msg
+    assert "route-a" not in error_msg
+    assert "model-a" not in error_msg
+    assert "invalid-currency" not in error_msg
+    assert "MAESTRO_OPENAI_ROUTES_JSON" in error_msg
+
+
+def test_multiroute_snapshot_mutation_immunity() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    routes_dict = {"routes": [route_a]}
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps(routes_dict),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    config["OPENAI_API_KEY"] = "mutated-key"
+    routes_dict["routes"] = []
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+    assert response.status_code == 200
+    assert response.json()["decision"]["route"]["id"] == "route-a"
+
+
+def test_multiroute_local_duplicate_in_price_reference() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    routes_json = (
+        '{"routes": ['
+        + json.dumps(route_a)
+        + ', {'
+        + '"route_id": "route-b", "model": "model-b", '
+        + '"price_reference": {"id": "price-b", "id": "price-c", "currency": "USD", "version": "v1", "source": "operator", "rates": [{"unit": "input_token", "rate": "0.001", "base": 1000}, {"unit": "output_token", "rate": "0.004", "base": 1000}], "conditions": [], "context_complete": true, "units_exhaustive": true, "no_double_counting": true, "model_identity_exact": true}, '
+        + '"estimated_usage": {"input_token": 300, "output_token": 500, "applicability_confirmed": true}'
+        + '}]}'
+    )
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": routes_json,
+    }
+    app = create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a", "route-b"]}}
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+    applied_constraints = res_data["decision"]["applied_constraints"]
+    assert any("associação de execução inválida" in c["description"] for c in applied_constraints)
+
+
+def test_multiroute_local_duplicate_in_estimated_usage() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    routes_json = (
+        '{"routes": ['
+        + json.dumps(route_a)
+        + ', {'
+        + '"route_id": "route-b", "model": "model-b", '
+        + '"price_reference": {"id": "price-b", "currency": "USD", "version": "v1", "source": "operator", "rates": [{"unit": "input_token", "rate": "0.001", "base": 1000}, {"unit": "output_token", "rate": "0.004", "base": 1000}], "conditions": [], "context_complete": true, "units_exhaustive": true, "no_double_counting": true, "model_identity_exact": true}, '
+        + '"estimated_usage": {"input_token": 300, "input_token": 400, "output_token": 500, "applicability_confirmed": true}'
+        + '}]}'
+    )
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": routes_json,
+    }
+    app = create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a", "route-b"]}}
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+
+
+def test_multiroute_single_route_local_duplicate() -> None:
+    routes_json = (
+        '{"routes": [{'
+        + '"route_id": "route-b", "model": "model-b", '
+        + '"price_reference": {"id": "price-b", "currency": "USD", "version": "v1", "source": "operator", "rates": [{"unit": "input_token", "rate": "0.001", "base": 1000}, {"unit": "output_token", "rate": "0.004", "base": 1000}], "conditions": [], "context_complete": true, "units_exhaustive": true, "no_double_counting": true, "model_identity_exact": true}, '
+        + '"estimated_usage": {"input_token": 300, "input_token": 400, "output_token": 500, "applicability_confirmed": true}'
+        + '}]}'
+    )
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": routes_json,
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_price_ref_id_surrogate_isolated() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price\ud800id")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    app = create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a", "route-b"]}}
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+
+
+def test_multiroute_single_route_price_ref_id_surrogate() -> None:
+    route_a = make_route_json("route-a", "model-a", "price\ud800id")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_multiroute_sensitive_values_absent_in_errors() -> None:
+    route_a = make_route_json("route-a", "model-a", "price\ud800id")
+    config = {
+        "OPENAI_API_KEY": "sensitive-key-99999",
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    error_msg = str(caught.value)
+    assert "sensitive-key-99999" not in error_msg
+    assert "price\ud800id" not in error_msg
+    assert "price" not in error_msg
+    assert "route-a" not in error_msg
+    assert "model-a" not in error_msg
+
+
+def test_multiroute_catalog_contains_only_valid_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["price_reference"]["currency"] = "invalid-currency-format"
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+
+    captured_catalog = None
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        nonlocal captured_catalog
+        captured_catalog = catalog
+        return default_app
+
+    monkeypatch.setattr(bootstrap_module, "create_app", mock_create_app)
+    create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    assert captured_catalog is not None
+    snapshot = captured_catalog.snapshot()
+    assert len(snapshot) == 1
+    assert snapshot[0].id == "route-a"
+    assert "route-b" not in [r.id for r in snapshot]
+    assert "invalid-model" not in [r.model for r in snapshot]
+    assert not any("invalid-adapter" in r.adapter_id for r in snapshot)
+    assert captured_catalog.configuration_invalid_route_ids == frozenset(["route-b"])
+
+
+def test_multiroute_allowlist_only_invalid_route_refuses() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["price_reference"]["currency"] = "invalid-currency-format"
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    app = create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {"allowed_route_ids": ["route-b"]},
+        },
+    )
+    assert response.status_code == 422
+    res_data = response.json()
+    assert res_data["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_multiroute_invalid_cheaper_route_not_selected() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a", input_rate="0.005", output_rate="0.010")
+    route_b_json = (
+        '{'
+        + '"route_id": "route-b", "model": "model-b", '
+        + '"price_reference": {"id": "price-b", "id": "price-c", "currency": "USD", "version": "v1", "source": "operator", "rates": [{"unit": "input_token", "rate": "0.001", "base": 1000}, {"unit": "output_token", "rate": "0.002", "base": 1000}], "conditions": [], "context_complete": true, "units_exhaustive": true, "no_double_counting": true, "model_identity_exact": true}, '
+        + '"estimated_usage": {"input_token": 300, "output_token": 500, "applicability_confirmed": true}'
+        + '}'
+    )
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": '{"routes": [' + json.dumps(route_a) + ', ' + route_b_json + ']}',
+    }
+    app = create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={"task": "Execute."},
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    assert res_data["decision"]["route"]["id"] == "route-a"
+
+
+def test_multiroute_all_routes_invalid_fails_initialization() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["price_reference"]["currency"] = "invalid-currency"
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["price_reference"]["currency"] = "invalid-currency"
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+
+
+def test_route_catalog_validation_invariants() -> None:
+    from maestro_router.routing import Route, EconomicEstimate, RouteCatalog
+
+    route_a = Route(
+        id="route-a",
+        provider="openai",
+        model="gpt-4",
+        adapter_id="openai-responses",
+        enabled=True,
+        capabilities=frozenset(),
+        quality_criteria=frozenset(),
+        known_unavailable=False,
+        estimate=EconomicEstimate(status="unavailable", reason="Unavailable."),
+        price_reference=None,
+    )
+    # 1. aceita IDs de configuração válidos, únicos e ausentes do catálogo executável;
+    catalog = RouteCatalog([route_a], configuration_invalid_route_ids=["route-b", "route-c"])
+    # 2. armazena-os imutavelmente;
+    assert isinstance(catalog.configuration_invalid_route_ids, frozenset)
+    assert catalog.configuration_invalid_route_ids == frozenset(["route-b", "route-c"])
+
+    # 3. rejeita ID vazio ou branco;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=[""])
+    assert "non-blank strings" in str(caught.value)
+
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["   "])
+    assert "non-blank strings" in str(caught.value)
+
+    # 4. rejeita tipo diferente de string;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=[123])  # type: ignore[list-item]
+    assert "non-blank strings" in str(caught.value)
+
+    # 5. rejeita surrogate isolado;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["price\ud800id"])
+    assert "isolated Unicode surrogates" in str(caught.value)
+
+    # 6. rejeita duplicidade antes da conversão para conjunto;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["route-b", "route-b"])
+    assert "must be unique" in str(caught.value)
+
+    # 7. rejeita interseção com um route.id executável;
+    with pytest.raises(ValueError) as caught:
+        RouteCatalog([route_a], configuration_invalid_route_ids=["route-a"])
+    assert "must not overlap with executable route IDs" in str(caught.value)
+
+
+def test_route_catalog_carries_exclusion_to_explanation() -> None:
+    from maestro_router.routing import Route, EconomicEstimate, RouteCatalog
+    from maestro_router.api import create_app
+
+    route_a = Route(
+        id="route-a",
+        provider="openai",
+        model="gpt-4",
+        adapter_id="openai-responses",
+        enabled=True,
+        capabilities=frozenset(),
+        quality_criteria=frozenset(),
+        known_unavailable=False,
+        estimate=EconomicEstimate(status="unavailable", reason="Unavailable."),
+        price_reference=None,
+    )
+    catalog = RouteCatalog([route_a], configuration_invalid_route_ids=["route-b"])
+
+    from maestro_router.execution import TextExecutionResult
+
+    class MockAdapter:
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return TextExecutionResult(content="Success.")
+
+    app = create_app(catalog, {"openai-responses": MockAdapter()})
+    response = TestClient(app).post(
+        "/v1/executions",
+        json={
+            "task": "Execute.",
+            "constraints": {"allowed_route_ids": ["route-a", "route-b"]},
+        },
+    )
+    assert response.status_code == 200
+    res_data = response.json()
+    applied_constraints = res_data["decision"]["applied_constraints"]
+    assert any(
+        c["source"] == "configuration"
+        and c["category"] == "route"
+        and "route-b possuía associação de execução inválida" in c["description"]
+        for c in applied_constraints
+    )

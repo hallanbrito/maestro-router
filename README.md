@@ -74,30 +74,18 @@ uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
 
 ### Composição OpenAI opcional
 
-A composição operacional OpenAI exige que o ambiente contenha valores não
-brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e
-`MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única
-referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON`,
-conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md).
-Com essa referência configurada, também pode fornecer uma previsão estática em
-`MAESTRO_OPENAI_ESTIMATED_USAGE_JSON`, conforme a
-[ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md).
-Ela é iniciada explicitamente como uma fábrica ASGI:
+A composição operacional OpenAI possui dois modos de configuração:
+
+1. **Modo Legado (Rota única)**: Exige que o ambiente contenha valores não brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e `MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON` (conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md)) e uma previsão estática em `MAESTRO_OPENAI_ESTIMATED_USAGE_JSON` (conforme a [ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md)).
+2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido, contendo uma lista estruturada de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md)). Cada entrada exige obrigatoriamente os membros `route_id`, `model`, `price_reference` e `estimated_usage`. A ausência de qualquer um deles ou qualquer invalidade local (como duplicidades ou surrogates) exclui a rota do catálogo executável. Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
+
+A composição é iniciada explicitamente como uma fábrica ASGI:
 
 ```shell
 python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
 ```
 
-Essa composição contém uma única rota, sem capacidades ou critérios de
-qualidade declarados. Sem a previsão opcional, `estimate` permanece
-`unavailable`, inclusive quando existe referência de preço. Uma previsão válida
-exige essa referência, é lida uma única vez na composição e produz uma
-estimativa `available` fixa para o snapshot. Ela pode comprovar ou violar um teto
-econômico antes de qualquer chamada externa. O uso retornado pela OpenAI é
-normalizado quando defensável; somente uma referência válida e uso completo
-podem tornar `calculated_cost` disponível. Não há tabela, preço padrão,
-tokenização, consulta ou atualização automática. Estimativa e custo calculado
-não representam billing nem comprovam economia entre provedores.
+Para cada rota válida e executável, a estimativa pré-execução é calculada no bootstrap e as alternativas são ordenadas por `route_id`. Se restarem múltiplos candidatos válidos, a rota com menor estimativa é selecionada para execução, com desempate determinístico. Estimativa e custo calculado não representam billing nem comprovam economia entre provedores.
 
 ```shell
 .venv\Scripts\python -m pytest

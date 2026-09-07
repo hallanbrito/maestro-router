@@ -1,23 +1,23 @@
 Listagem de caminhos de pasta
-O número de série do volume é 0000002C 9602:C33C
+O nÃºmero de sÃ©rie do volume Ã© 0000002C 9602:C33C
 C:.
-¦   ARCHITECTURE.md
-¦   CONTRIBUTING.md
-¦   estrutura.txt
-¦   LICENSE
-¦   PRODUCT.md
-¦   README.md
-¦   ROADMAP.md
-¦   
+Â¦   ARCHITECTURE.md
+Â¦   CONTRIBUTING.md
+Â¦   estrutura.txt
+Â¦   LICENSE
+Â¦   PRODUCT.md
+Â¦   README.md
+Â¦   ROADMAP.md
+Â¦
 +---docs
-¦   ¦   00-MANIFESTO.md
-¦   ¦   01-VISAO-GERAL.md
-¦   ¦   02-PROPOSTA-DE-VALOR.md
-¦   ¦   03-REQUISITOS-MVP.md
-¦   ¦   04-CASOS-DE-USO.md
-¦   ¦   05-API.md
-¦   ¦   
-¦   +---decisions
-¦           README.md
-¦           
+Â¦   Â¦   00-MANIFESTO.md
+Â¦   Â¦   01-VISAO-GERAL.md
+Â¦   Â¦   02-PROPOSTA-DE-VALOR.md
+Â¦   Â¦   03-ARQUITETURA.md
+Â¦   Â¦   04-CASOS-DE-USO.md
+Â¦   Â¦   05-API.md
+Â¦   Â¦
+Â¦   +---decisions
+Â¦           README.md
+Â¦
 +---src

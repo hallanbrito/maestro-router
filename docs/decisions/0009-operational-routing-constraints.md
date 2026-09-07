@@ -11,7 +11,7 @@
 
 O Maestro Router foi concebido para oferecer uma camada neutra, controlável e explicável de roteamento entre modelos de inteligência artificial. Os documentos normativos de fundação (`docs/00-MANIFESTO.md` a `docs/04-CASOS-DE-USO.md`), o contrato técnico público (`docs/05-API.md`) e a especificação algorítmica (`docs/06-DECISAO-DE-ROTEAMENTO.md`) já estabelecem que a decisão de roteamento é governada por restrições de capacidade, qualidade, disponibilidade, allowlists de rotas e limites econômicos.
 
-Até a ADR 0008 e sua respectiva implementação na W18/W19, a composição operacional permitiu configurar múltiplas rotas OpenAI com preços e previsões de uso individuais (`MAESTRO_OPENAI_ROUTES_JSON`). No entanto, a composição em tempo de execução ainda não dispõe de um mecanismo operacional para declarar as capacidades e qualidades oferecidas por essas rotas, nem para receber políticas obrigatórias e valores padrão mantidos pelo operador.
+A ADR 0008 e sua implementação posterior permitem configurar múltiplas rotas OpenAI com preços e previsões de uso individuais por meio de `MAESTRO_OPENAI_ROUTES_JSON`. No entanto, a composição em tempo de execução ainda não dispõe de um mecanismo operacional para declarar as capacidades e qualidades oferecidas por essas rotas, nem para receber políticas obrigatórias e valores padrão mantidos pelo operador. A W19 é exclusivamente documental e decisória, não implementando comportamento executável.
 
 ## 3. Problema G01
 
@@ -182,27 +182,27 @@ O fragmento abaixo ilustra uma rota completa e sanitizada respeitando simultanea
 {
   "routes": [
     {
-      "route_id": "openai-route-primary",
-      "model": "gpt-4o-mini-2024-07-18",
+      "route_id": "route-a",
+      "model": "operator-model-a",
       "price_reference": {
-        "id": "pricing-openai-primary-2026-q1",
+        "id": "operator-price-reference-a",
         "currency": "USD",
-        "version": "2026-01-15",
-        "source": "operator-procurement-records",
+        "version": "operator-version-a",
+        "source": "operator-source-a",
         "rates": [
           {
             "unit": "input_token",
-            "rate": "0.00000015",
-            "base": "1"
+            "rate": "7.0000",
+            "base": 1000000
           },
           {
             "unit": "output_token",
-            "rate": "0.00000060",
-            "base": "1"
+            "rate": "15.0000",
+            "base": 1000000
           }
         ],
         "conditions": [
-          "standard-commercial-tier"
+          "operator-condition-a"
         ],
         "context_complete": true,
         "units_exhaustive": true,
@@ -215,14 +215,14 @@ O fragmento abaixo ilustra uma rota completa e sanitizada respeitando simultanea
         "applicability_confirmed": true
       },
       "capabilities": [
-        "text_generation",
-        "structured_json"
+        "capability-a",
+        "capability-b"
       ],
       "quality_criteria": [
         {
-          "criterion": "summary_faithfulness_approved",
+          "criterion": "criterion-a",
           "evidence_references": [
-            "benchmark-eval-2026-01-report"
+            "evidence-a"
           ]
         }
       ]
@@ -236,27 +236,27 @@ O fragmento abaixo ilustra uma rota completa e sanitizada respeitando simultanea
 ```json
 {
   "required_capabilities": [
-    "text_generation"
+    "capability-a"
   ],
   "required_quality_criteria": [
-    "summary_faithfulness_approved"
+    "criterion-a"
   ],
   "allowed_route_ids": [
-    "openai-route-primary",
-    "openai-route-secondary"
+    "route-a",
+    "route-b"
   ],
   "max_estimated_costs": [
     {
-      "amount": "0.0050",
+      "amount": "1.0000",
       "currency": "USD"
     }
   ],
   "defaults": {
     "required_capabilities": [
-      "structured_json"
+      "capability-b"
     ],
     "max_estimated_cost": {
-      "amount": "0.0020",
+      "amount": "0.5000",
       "currency": "USD"
     }
   }

@@ -34,10 +34,19 @@ _MISSING = object()
 class OpenAIResponsesAdapter:
     """Translate the neutral execution contract to the OpenAI Responses API."""
 
-    def __init__(self, client: AsyncOpenAI) -> None:
+    def __init__(
+        self,
+        client: AsyncOpenAI,
+        *,
+        retry_policy_configured: bool = False,
+    ) -> None:
         # Freeze the retry policy once when the adapter joins the application
         # snapshot. Rebuilding SDK options per request could re-read process state.
-        self._client = client.with_options(max_retries=0)
+        self._client = (
+            client
+            if retry_policy_configured
+            else client.with_options(max_retries=0)
+        )
 
     async def execute(
         self, request: TextExecutionRequest, route: ExecutionRoute

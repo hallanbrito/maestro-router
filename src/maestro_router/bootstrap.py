@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
 from typing import Any
 
 from fastapi import FastAPI
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, omit
 
 from .adapters import OpenAIResponsesAdapter
 from .api import create_app
@@ -55,15 +54,7 @@ _UNAVAILABLE_ESTIMATE_REASON = (
     "Não há preço nem método de estimativa aprovados para esta rota."
 )
 _OPENAI_PUBLIC_BASE_URL = "https://api.openai.com/v1"
-_UNAPPROVED_OPENAI_SDK_VARIABLES = (
-    "OPENAI_ADMIN_KEY",
-    "OPENAI_ORG_ID",
-    "OPENAI_PROJECT_ID",
-    "OPENAI_WEBHOOK_SECRET",
-    "OPENAI_BASE_URL",
-    "OPENAI_CUSTOM_HEADERS",
-)
-_MISSING_ENVIRONMENT_VALUE = object()
+_OPENAI_CUSTOM_HEADERS = "OPENAI_CUSTOM_HEADERS"
 
 
 class InvalidRuntimeConfigurationError(ValueError):
@@ -161,35 +152,42 @@ def _create_openai_adapter(
 ) -> OpenAIResponsesAdapter:
     # The official SDK otherwise infers several unsupported options from the
     # process environment. All supported inputs are supplied explicitly here.
-    with _without_unapproved_openai_environment():
-        client = client_factory(
-            api_key=api_key,
-            base_url=_OPENAI_PUBLIC_BASE_URL,
-            max_retries=0,
-            default_headers={},
-            default_query={},
-        )
-        return OpenAIResponsesAdapter(client)
+    client = client_factory(
+        api_key=api_key,
+        admin_api_key="",
+        organization="",
+        project="",
+        webhook_secret="",
+        base_url=_OPENAI_PUBLIC_BASE_URL,
+        max_retries=0,
+        default_headers=_unapproved_openai_header_omissions(api_key),
+        default_query={},
+    )
+    return OpenAIResponsesAdapter(client, retry_policy_configured=True)
 
 
-@contextmanager
-def _without_unapproved_openai_environment():
-    """Prevent SDK-only OpenAI variables from entering this bootstrap snapshot."""
+def _unapproved_openai_header_omissions(api_key: str) -> dict[str, object]:
+    """Override SDK-only environment headers without mutating process state."""
 
-    captured = {
-        name: os.environ.get(name, _MISSING_ENVIRONMENT_VALUE)
-        for name in _UNAPPROVED_OPENAI_SDK_VARIABLES
+    headers: dict[str, object] = {
+        "OpenAI-Organization": omit,
+        "OpenAI-Project": omit,
     }
-    try:
-        for name in captured:
-            os.environ.pop(name, None)
-        yield
-    finally:
-        for name, value in captured.items():
-            if value is _MISSING_ENVIRONMENT_VALUE:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value  # type: ignore[assignment]
+    configured = os.environ.get(_OPENAI_CUSTOM_HEADERS)
+    if configured is None:
+        return headers
+
+    for line in configured.split("\n"):
+        name, separator, _ = line.partition(":")
+        if not separator:
+            continue
+        name = name.strip()
+        if not name:
+            continue
+        headers[name] = (
+            f"Bearer {api_key}" if name.lower() == "authorization" else omit
+        )
+    return headers
 
 
 def _validated_configuration(

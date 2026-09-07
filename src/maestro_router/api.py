@@ -118,7 +118,7 @@ def create_app(
                     )
                 ]
             )
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, RecursionError, ValueError):
             return _invalid_request(
                 [ErrorIssue(message="O corpo deve conter um objeto JSON válido.")]
             )
@@ -433,15 +433,17 @@ def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _has_isolated_surrogate(value: object) -> bool:
-    if isinstance(value, str):
-        return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
-    if isinstance(value, list):
-        return any(_has_isolated_surrogate(item) for item in value)
-    if isinstance(value, dict):
-        return any(
-            _has_isolated_surrogate(key) or _has_isolated_surrogate(item)
-            for key, item in value.items()
-        )
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in current):
+                return True
+        elif isinstance(current, list):
+            pending.extend(current)
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
     return False
 
 

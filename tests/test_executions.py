@@ -62,9 +62,31 @@ class UnexpectedCallAdapter:
         raise AssertionError("Routing refusal must not execute an adapter.")
 
 
+class CountingAdapter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, request: object, route: object) -> TextExecutionResult:
+        self.calls += 1
+        return TextExecutionResult(content="unexpected")
+
+
 def client_for(*routes: Route) -> TestClient:
     adapters = {route.adapter_id: UnexpectedCallAdapter() for route in routes}
     return TestClient(create_app(RouteCatalog(routes), adapters))
+
+
+def client_with_counting_adapter() -> tuple[TestClient, CountingAdapter]:
+    route = configured_route("route-a")
+    adapter = CountingAdapter()
+    return (
+        TestClient(create_app(RouteCatalog([route]), {route.adapter_id: adapter})),
+        adapter,
+    )
+
+
+def nested_json(depth: int, leaf: str = "{}") -> str:
+    return '{"nested":' * depth + leaf + "}" * depth
 
 
 def test_structurally_valid_request_reaches_routing() -> None:
@@ -130,6 +152,34 @@ def test_closed_request_objects_reject_additional_fields(payload: object) -> Non
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"task":"Execute.","unknown":' + nested_json(500) + "}",
+        '{"task":"Execute.","unknown":' + nested_json(500, '"\\ud800"') + "}",
+        '{"task":"Execute.","unknown":' + nested_json(2000) + "}",
+    ],
+    ids=["unknown-field-500", "isolated-surrogate-500", "decoder-limit"],
+)
+def test_deep_json_is_sanitized_without_adapter_execution(body: str) -> None:
+    client, adapter = client_with_counting_adapter()
+
+    response = client.post(
+        "/v1/executions",
+        content=body.encode("utf-8"),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    payload = response.json()
+    assert payload["error"]["code"] == "INVALID_REQUEST"
+    assert "traceback" not in response.text.lower()
+    assert "recursion" not in response.text.lower()
+    assert "detail" not in payload
+    assert adapter.calls == 0
 
 
 def test_empty_catalog_produces_explainable_refusal() -> None:

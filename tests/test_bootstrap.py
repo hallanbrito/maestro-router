@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,7 +12,7 @@ import pytest
 import httpx2
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Omit, omit
 
 import maestro_router.bootstrap as bootstrap_module
 from maestro_router.adapters import OpenAIResponsesAdapter
@@ -43,9 +46,16 @@ PRICE_ONLY_UNAVAILABLE_ESTIMATE_REASON = (
     "Não há previsão de uso configurada para estimar esta rota."
 )
 APPROVED_CLIENT_OPTIONS = {
+    "admin_api_key": "",
+    "organization": "",
+    "project": "",
+    "webhook_secret": "",
     "base_url": "https://api.openai.com/v1",
     "max_retries": 0,
-    "default_headers": {},
+    "default_headers": {
+        "OpenAI-Organization": omit,
+        "OpenAI-Project": omit,
+    },
     "default_query": {},
 }
 CONTROLLED_ESTIMATE_ASSUMPTIONS = [
@@ -661,11 +671,22 @@ def test_official_client_ignores_unapproved_environment_and_freezes_options(
         clients.append(client)
         return client
 
+    def reject_second_client(*args: object, **kwargs: object) -> AsyncOpenAI:
+        raise AssertionError("with_options would construct a second AsyncOpenAI")
+
+    monkeypatch.setattr(AsyncOpenAI, "with_options", reject_second_client)
+
     for name, value in {
         "OPENAI_BASE_URL": "https://unapproved.invalid/v1",
         "OPENAI_ORG_ID": "unapproved-organization",
         "OPENAI_PROJECT_ID": "unapproved-project",
-        "OPENAI_CUSTOM_HEADERS": "X-Unapproved: leaked",
+        "OPENAI_ADMIN_KEY": "unapproved-admin-key",
+        "OPENAI_WEBHOOK_SECRET": "unapproved-webhook-secret",
+        "OPENAI_CUSTOM_HEADERS": (
+            "X-Unapproved: leaked\n"
+            "Authorization: Bearer unapproved\n"
+            "OpenAI-Organization: custom-organization"
+        ),
     }.items():
         monkeypatch.setenv(name, value)
 
@@ -685,11 +706,81 @@ def test_official_client_ignores_unapproved_environment_and_freezes_options(
     assert len(requests) == 1
     request = requests[0]
     assert str(request.url) == "https://api.openai.com/v1/responses"
+    assert request.headers["authorization"] == f"Bearer {CONTROLLED_KEY}"
     assert request.headers["x-stainless-retry-count"] == "0"
     assert "openai-organization" not in request.headers
     assert "openai-project" not in request.headers
     assert "x-unapproved" not in request.headers
     assert "x-changed" not in request.headers
+    assert clients[0].admin_api_key == ""
+    assert clients[0].webhook_secret == ""
+
+
+def test_overlapping_compositions_preserve_environment_and_isolate_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = {
+        "OPENAI_BASE_URL": "https://unapproved.invalid/v1",
+        "OPENAI_ORG_ID": "unapproved-organization",
+        "OPENAI_PROJECT_ID": "unapproved-project",
+        "OPENAI_ADMIN_KEY": "unapproved-admin-key",
+        "OPENAI_WEBHOOK_SECRET": "unapproved-webhook-secret",
+        "OPENAI_CUSTOM_HEADERS": "X-Unapproved: leaked",
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+    entered = Barrier(3)
+    release = Barrier(3)
+    lock = Lock()
+    during: list[dict[str, str]] = []
+    captured: list[tuple[dict[str, object], FakeAsyncOpenAI]] = []
+
+    def overlapping_factory(**kwargs: object) -> FakeAsyncOpenAI:
+        client = FakeAsyncOpenAI()
+        with lock:
+            captured.append((kwargs, client))
+        entered.wait()
+        with lock:
+            during.append(dict(os.environ))
+        release.wait()
+        return client
+
+    def compose() -> FastAPI:
+        return create_openai_app(
+            controlled_configuration(), client_factory=overlapping_factory
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(compose) for _ in range(2)]
+        entered.wait()
+        assert dict(os.environ) == before
+        release.wait()
+        apps = [future.result() for future in futures]
+
+    assert len(apps) == 2
+    assert during == [before, before]
+    assert dict(os.environ) == before
+    assert len(captured) == 2
+    assert captured[0][1] is not captured[1][1]
+    for options, client in captured:
+        assert options["api_key"] == CONTROLLED_KEY
+        assert options["admin_api_key"] == ""
+        assert options["organization"] == ""
+        assert options["project"] == ""
+        assert options["webhook_secret"] == ""
+        assert options["base_url"] == "https://api.openai.com/v1"
+        assert options["max_retries"] == 0
+        assert options["default_query"] == {}
+        headers = options["default_headers"]
+        assert isinstance(headers, dict)
+        assert set(headers) == {
+            "OpenAI-Organization",
+            "OpenAI-Project",
+            "X-Unapproved",
+        }
+        assert all(isinstance(value, Omit) for value in headers.values())
+        assert client.option_calls == []
 
 
 def test_legacy_price_reference_id_with_surrogate_fails_before_client() -> None:
@@ -822,7 +913,9 @@ def test_economic_configuration_is_not_passed_to_openai_adapter(
     create_openai_app(configuration_with_estimate(), client_factory=factory)  # type: ignore[arg-type]
 
     assert factory.client is not None
-    assert adapter_calls == [((factory.client,), {})]
+    assert adapter_calls == [
+        ((factory.client,), {"retry_policy_configured": True})
+    ]
 
 
 def test_empty_conditions_are_accepted(

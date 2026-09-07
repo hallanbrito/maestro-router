@@ -791,6 +791,33 @@ def test_duplicate_json_member_is_rejected() -> None:
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        r'{"task":"ok","constraints":{"allowed_route_ids":["\ud800"]}}',
+        r'{"task":"ok","\ud800":1,"\ud800":2}',
+        '{"task":' + "1" * 4301 + "}",
+    ],
+)
+def test_non_representable_or_oversized_json_values_are_invalid_request(
+    content: str,
+) -> None:
+    route = configured_route("route-a")
+    response = client_for(route).post(
+        "/v1/executions",
+        content=content,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body) == {"error"}
+    assert body["error"]["code"] == "INVALID_REQUEST"
+    assert body["error"]["message"] == "A solicitação é inválida."
+    assert body["error"]["issues"]
+    assert "Traceback" not in response.text
+
+
 def test_non_json_media_type_is_rejected() -> None:
     response = client_for().post(
         "/v1/executions",

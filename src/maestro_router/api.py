@@ -94,22 +94,31 @@ def create_app(
         try:
             body = (await request.body()).decode("utf-8")
             payload = json.loads(body, object_pairs_hook=_reject_duplicate_members)
+            if _has_isolated_surrogate(payload):
+                return _invalid_request(
+                    [ErrorIssue(message="O corpo JSON contém Unicode inválido.")]
+                )
         except UnicodeDecodeError:
             return _invalid_request(
                 [ErrorIssue(message="O corpo JSON deve usar codificação UTF-8.")]
             )
         except DuplicateMemberError as error:
+            member = (
+                error.member
+                if not _has_isolated_surrogate(error.member)
+                else "não representável"
+            )
             return _invalid_request(
                 [
                     ErrorIssue(
                         message=(
                             "O JSON contém um nome de membro duplicado: "
-                            f"{error.member}."
+                            f"{member}."
                         )
                     )
                 ]
             )
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             return _invalid_request(
                 [ErrorIssue(message="O corpo deve conter um objeto JSON válido.")]
             )
@@ -421,6 +430,19 @@ def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise DuplicateMemberError(key)
         result[key] = value
     return result
+
+
+def _has_isolated_surrogate(value: object) -> bool:
+    if isinstance(value, str):
+        return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+    if isinstance(value, list):
+        return any(_has_isolated_surrogate(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _has_isolated_surrogate(key) or _has_isolated_surrogate(item)
+            for key, item in value.items()
+        )
+    return False
 
 
 def _validate_content_type(content_type: str | None) -> ErrorIssue | None:

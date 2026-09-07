@@ -8,14 +8,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from maestro_router.api import create_app
-from maestro_router.contracts import ExecutionRequest
+from maestro_router.contracts import DecisionFactor, ExecutionRequest
 from maestro_router.execution import TextExecutionResult
 from maestro_router.routing import (
     EconomicEstimate,
     Route,
     RouteCatalog,
     SelectedDecision,
+    InvalidDecisionError,
+    _RefusalContext,
     _selection_context,
+    _validate_refusal,
     _validate_selection,
     route_request,
 )
@@ -558,6 +561,137 @@ def test_incoherent_selection_cannot_pass_validation() -> None:
 
     with pytest.raises(ValueError, match="authoritative selectable set"):
         _validate_selection(context, incoherent)
+
+
+def test_comparison_requires_authoritative_economic_factors() -> None:
+    route_a = configured_route("route-a", estimate=available("0.01"))
+    route_b = configured_route("route-b", estimate=available("0.02"))
+    request = ExecutionRequest(task="Execute.")
+    decision = route_request(request, RouteCatalog([route_a, route_b]))
+    assert isinstance(decision, SelectedDecision)
+    context = _selection_context(request, [route_a, route_b], [])
+    generic = replace(
+        decision,
+        factors=(
+            DecisionFactor(
+                category="strategy",
+                description="A estratégia escolheu uma rota.",
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(context, generic)
+
+
+def test_single_candidate_unavailable_cost_cannot_claim_economic_advantage() -> None:
+    route = configured_route("route-a")
+    request = ExecutionRequest(task="Execute.")
+    decision = route_request(request, RouteCatalog([route]))
+    assert isinstance(decision, SelectedDecision)
+    context = _selection_context(request, [route], [])
+    false_claim = replace(
+        decision,
+        reason="route-a era a rota mais barata.",
+        factors=(
+            DecisionFactor(
+                category="economics",
+                description="O custo indisponível favoreceu route-a.",
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(context, false_claim)
+
+
+def test_refusal_reason_and_factors_must_match_authoritative_precedence() -> None:
+    route_a = configured_route("route-a")
+    route_b = configured_route("route-b", estimate=uncertain())
+    request = ExecutionRequest(task="Execute.")
+    refusal = route_request(request, RouteCatalog([route_a, route_b]))
+    assert not isinstance(refusal, SelectedDecision)
+    context = _RefusalContext(
+        request=request,
+        candidates=(route_a, route_b),
+        exclusions=(),
+        kind="economic_insufficiency",
+    )
+    incompatible = refusal.model_copy(
+        update={
+            "decision": refusal.decision.model_copy(
+                update={
+                    "reason": "As rotas excederam um teto inexistente.",
+                    "factors": [
+                        DecisionFactor(
+                            category="route",
+                            description="Nenhuma rota estava habilitada.",
+                        )
+                    ],
+                }
+            )
+        }
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_refusal(context, incompatible)
+
+
+def test_determinant_economic_exclusion_cannot_be_omitted() -> None:
+    comparable = configured_route("route-a", estimate=available("0.01"))
+    excluded = configured_route("route-b")
+    request = ExecutionRequest(task="Execute.")
+    decision = route_request(request, RouteCatalog([comparable, excluded]))
+    assert isinstance(decision, SelectedDecision)
+    context = _selection_context(request, [comparable, excluded], [])
+    incomplete = replace(
+        decision,
+        factors=tuple(
+            factor
+            for factor in decision.factors
+            if "route-b" not in factor.description
+        ),
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(context, incomplete)
+
+
+def test_tie_breaker_factor_cannot_be_missing_or_added_without_tie() -> None:
+    tied_a = configured_route("route-a", estimate=available("0.10"))
+    tied_b = configured_route("route-b", estimate=available("0.1"))
+    request = ExecutionRequest(task="Execute.")
+    tied_decision = route_request(request, RouteCatalog([tied_a, tied_b]))
+    assert isinstance(tied_decision, SelectedDecision)
+    tied_context = _selection_context(request, [tied_a, tied_b], [])
+    missing = replace(
+        tied_decision,
+        factors=tuple(
+            factor
+            for factor in tied_decision.factors
+            if factor.category != "tie_breaker"
+        ),
+    )
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(tied_context, missing)
+
+    lower = configured_route("route-a", estimate=available("0.01"))
+    higher = configured_route("route-b", estimate=available("0.02"))
+    untied_decision = route_request(request, RouteCatalog([lower, higher]))
+    assert isinstance(untied_decision, SelectedDecision)
+    untied_context = _selection_context(request, [lower, higher], [])
+    improper = replace(
+        untied_decision,
+        factors=untied_decision.factors
+        + (
+            DecisionFactor(
+                category="tie_breaker",
+                description="Um desempate inexistente foi aplicado.",
+            ),
+        ),
+    )
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(untied_context, improper)
 
 
 def test_ceiling_selects_comparable_route_and_preserves_indeterminate_route() -> None:

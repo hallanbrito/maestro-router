@@ -94,22 +94,31 @@ def create_app(
         try:
             body = (await request.body()).decode("utf-8")
             payload = json.loads(body, object_pairs_hook=_reject_duplicate_members)
+            if _has_isolated_surrogate(payload):
+                return _invalid_request(
+                    [ErrorIssue(message="O corpo JSON contém Unicode inválido.")]
+                )
         except UnicodeDecodeError:
             return _invalid_request(
                 [ErrorIssue(message="O corpo JSON deve usar codificação UTF-8.")]
             )
         except DuplicateMemberError as error:
+            member = (
+                error.member
+                if not _has_isolated_surrogate(error.member)
+                else "não representável"
+            )
             return _invalid_request(
                 [
                     ErrorIssue(
                         message=(
                             "O JSON contém um nome de membro duplicado: "
-                            f"{error.member}."
+                            f"{member}."
                         )
                     )
                 ]
             )
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError, ValueError):
             return _invalid_request(
                 [ErrorIssue(message="O corpo deve conter um objeto JSON válido.")]
             )
@@ -151,6 +160,7 @@ def create_app(
                 execution_request,
                 route_catalog,
                 locally_invalid_route_ids=locally_invalid_route_ids,
+                invalid_execution_route_ids=catalog_invalid_ids,
             )
         except InvalidDecisionError:
             return _internal_error(
@@ -268,7 +278,9 @@ async def _execute_selection(
     response = ExecutionSuccessResponse(
         result=ExecutionResult(content=result.content),
         decision=public_decision,
-        economics=_execution_economics(route, result.usage),
+        economics=_execution_economics(
+            route, result.usage, observed_model=result.observed_model
+        ),
     )
     return JSONResponse(
         status_code=200,
@@ -295,6 +307,8 @@ def _public_decision(decision: SelectedDecision) -> SelectedPublicDecision:
 def _execution_economics(
     route: Route,
     usage: NormalizedUsage | None = None,
+    *,
+    observed_model: str | None = None,
 ) -> ExecutionEconomics:
     estimate = route.estimate
     if estimate.status == "unavailable":
@@ -345,7 +359,8 @@ def _execution_economics(
     calculated_cost = calculate_post_execution_cost(
         route_id=route.id,
         provider=route.provider,
-        model=route.model,
+        configured_model=route.model,
+        observed_model=observed_model,
         estimate=estimate,
         usage=usage,
         reference=route.price_reference,
@@ -415,6 +430,21 @@ def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise DuplicateMemberError(key)
         result[key] = value
     return result
+
+
+def _has_isolated_surrogate(value: object) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in current):
+                return True
+        elif isinstance(current, list):
+            pending.extend(current)
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+    return False
 
 
 def _validate_content_type(content_type: str | None) -> ErrorIssue | None:

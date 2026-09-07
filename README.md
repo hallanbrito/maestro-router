@@ -32,6 +32,9 @@ Ainda não estão implementados ou configurados por padrão:
 - rota, provedora ou modelo padrão;
 - gestão de credenciais e configuração operacional padrão;
 - preço padrão ou configuração automática de referência de preço;
+- composição operacional de capacidades e critérios de qualidade obrigatórios,
+  allowlists obrigatórias, múltiplos tetos, valores padrão e sua combinação
+  monotônica com as restrições da solicitação;
 - timeout concreto, retry ou fallback;
 - tabela ou atualização automática de preços.
 
@@ -77,13 +80,26 @@ uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
 A composição operacional OpenAI possui dois modos de configuração:
 
 1. **Modo Legado (Rota única)**: Exige que o ambiente contenha valores não brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e `MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON` (conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md)) e uma previsão estática em `MAESTRO_OPENAI_ESTIMATED_USAGE_JSON` (conforme a [ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md)).
-2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido, contendo uma lista estruturada de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md)). Cada entrada exige obrigatoriamente os membros `route_id`, `model`, `price_reference` e `estimated_usage`. A ausência de qualquer um deles ou qualquer invalidade local (como duplicidades ou surrogates) exclui a rota do catálogo executável. Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
+2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido. O valor é um objeto JSON de nível superior contendo exatamente o membro obrigatório `routes`; `routes` contém o array não vazio de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md)). Cada entrada exige os membros `route_id`, `model`, `price_reference` e `estimated_usage`. Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
+
+No modo multirrota, JSON ou estrutura superior inválidos e ambiguidades que
+impedem identificar o universo com segurança invalidam todo o snapshot. A mesma
+regra vale para duplicidade de `route_id`, `model` ou `price_reference.id` entre
+identidades estruturalmente válidas. Identidade ausente ou estruturalmente
+inválida também é global quando impede associar o erro com segurança a uma rota.
+Somente uma falha local isolável, em uma entrada com `route_id` válido e único,
+exclui apenas essa rota; se nenhuma rota válida restar, a inicialização falha.
 
 A composição é iniciada explicitamente como uma fábrica ASGI:
 
 ```shell
 python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
 ```
+
+A composição usa somente as entradas documentadas acima. Variáveis próprias do
+SDK, como `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` e
+`OPENAI_CUSTOM_HEADERS`, não são suportadas por esse bootstrap e não alteram o
+cliente capturado no snapshot.
 
 Para cada rota válida e executável, a estimativa pré-execução é calculada no bootstrap e as alternativas são ordenadas por `route_id`. Se restarem múltiplos candidatos válidos, a rota com menor estimativa é selecionada para execução, com desempate determinístico. Estimativa e custo calculado não representam billing nem comprovam economia entre provedores.
 

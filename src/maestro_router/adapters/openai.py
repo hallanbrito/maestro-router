@@ -34,16 +34,25 @@ _MISSING = object()
 class OpenAIResponsesAdapter:
     """Translate the neutral execution contract to the OpenAI Responses API."""
 
-    def __init__(self, client: AsyncOpenAI) -> None:
-        self._client = client
+    def __init__(
+        self,
+        client: AsyncOpenAI,
+        *,
+        retry_policy_configured: bool = False,
+    ) -> None:
+        # Freeze the retry policy once when the adapter joins the application
+        # snapshot. Rebuilding SDK options per request could re-read process state.
+        self._client = (
+            client
+            if retry_policy_configured
+            else client.with_options(max_retries=0)
+        )
 
     async def execute(
         self, request: TextExecutionRequest, route: ExecutionRoute
     ) -> TextExecutionResult:
         try:
-            response = await self._client.with_options(
-                max_retries=0
-            ).responses.create(
+            response = await self._client.responses.create(
                 model=route.model,
                 input=_response_input(request),
                 stream=False,
@@ -88,6 +97,7 @@ def _normalize_response(response: object) -> TextExecutionResult:
         return TextExecutionResult(
             content=output_text,
             usage=_normalize_usage(response),
+            observed_model=_normalize_observed_model(response),
         )
     except ExecutionFailedError:
         raise
@@ -125,6 +135,17 @@ def _normalize_usage(response: object) -> NormalizedUsage:
     return NormalizedUsage(
         status="unavailable", reason=USAGE_UNAVAILABLE_REASON
     )
+
+
+def _normalize_observed_model(response: object) -> str | None:
+    model = _read_attribute(response, "model")
+    if (
+        isinstance(model, str)
+        and any(not character.isspace() for character in model)
+        and not any(0xD800 <= ord(character) <= 0xDFFF for character in model)
+    ):
+        return model
+    return None
 
 
 def _read_attribute(value: object, name: str) -> object:

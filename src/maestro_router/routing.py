@@ -215,6 +215,19 @@ class _SelectionContext:
     required_quality: frozenset[str]
     max_estimated_cost: tuple[str, str] | None
     locally_invalid_route_ids: frozenset[str]
+    exclusions: tuple[Exclusion, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RefusalContext:
+    """Authoritative facts used to validate a routing refusal."""
+
+    request: ExecutionRequest
+    candidates: tuple[Route, ...]
+    exclusions: tuple[Exclusion, ...]
+    kind: Literal[
+        "no_candidates", "economic_insufficiency", "ceiling_violations"
+    ]
 
 
 def route_request(
@@ -222,12 +235,13 @@ def route_request(
     catalog: RouteCatalog,
     *,
     locally_invalid_route_ids: frozenset[str] = frozenset(),
+    invalid_execution_route_ids: frozenset[str] = frozenset(),
 ) -> RefusalResponse | SelectedDecision:
     """Evaluate routing and return a refusal or one validated selection.
 
-    Execution-association validity is supplied from the request snapshot and
-    classified as ``invalid_route``. Other local-validity semantics remain an
-    upstream precondition in this slice.
+    Local configuration and execution-association failures are supplied from
+    the request snapshot and remain distinct sanitized causes of
+    ``invalid_route``.
     """
     constraints = request.constraints
     allowed_route_ids = (
@@ -248,6 +262,7 @@ def route_request(
         exclusion = _first_implemented_exclusion(
             route,
             locally_invalid_route_ids,
+            invalid_execution_route_ids,
             allowed_route_ids,
             required_capabilities,
             required_quality,
@@ -265,24 +280,18 @@ def route_request(
                     invalid_id,
                     "invalid_route",
                     "configuration",
-                    (
-                        f"{invalid_id} foi excluída porque sua associação de execução "
-                        "era inválida."
-                    ),
+                    f"{invalid_id} foi excluída por configuração local inválida.",
                 )
             )
 
     if not candidates:
-        return _refusal(
-            request=request,
-            exclusions=exclusions,
-            code="NO_ELIGIBLE_ROUTE",
-            message=(
-                "Nenhuma rota configurada, habilitada e válida satisfaz "
-                "as restrições aplicáveis."
-            ),
-            reason="Todas as rotas foram excluídas antes da comparação econômica.",
-            factors=_factors(exclusions),
+        return _validated_refusal(
+            _RefusalContext(
+                request=request,
+                candidates=(),
+                exclusions=tuple(exclusions),
+                kind="no_candidates",
+            )
         )
 
     return _evaluate_economics(request, candidates, exclusions)
@@ -331,17 +340,11 @@ def _evaluate_economics(
             if route.estimate.status == "available" and route.estimate.comparable
         ]
         if not comparable:
-            return _economic_information_refusal(
-                request, exclusions, [_estimate_factor(route) for route in candidates]
-            )
+            return _economic_information_refusal(request, exclusions, candidates)
 
         currencies = {route.estimate.currency for route in comparable}
         if len(currencies) != 1:
-            return _economic_information_refusal(
-                request,
-                exclusions,
-                [_currency_factor(route) for route in comparable],
-            )
+            return _economic_information_refusal(request, exclusions, candidates)
 
         context = _selection_context(
             request,
@@ -353,7 +356,6 @@ def _evaluate_economics(
     ceiling = Decimal(limit.amount)
     admissible: list[Route] = []
     indeterminate: list[Route] = []
-    violations: list[Route] = []
     for route in candidates:
         estimate = route.estimate
         if (
@@ -364,8 +366,6 @@ def _evaluate_economics(
             indeterminate.append(route)
         elif estimate.decimal_amount() <= ceiling:
             admissible.append(route)
-        else:
-            violations.append(route)
 
     if admissible:
         if len(admissible) == 1:
@@ -414,27 +414,15 @@ def _evaluate_economics(
         )
         return _select_lowest_cost(context, exclusions)
     if indeterminate:
-        factors = [
-            _estimate_factor(route, limit.currency)
-            if route in indeterminate
-            else _ceiling_violation_factor(route, limit.amount)
-            for route in candidates
-        ]
-        return _economic_information_refusal(request, exclusions, factors)
+        return _economic_information_refusal(request, exclusions, candidates)
 
-    return _refusal(
-        request=request,
-        exclusions=exclusions,
-        code="NO_ELIGIBLE_ROUTE",
-        message=(
-            "Nenhuma rota configurada, habilitada e válida satisfaz "
-            "as restrições aplicáveis."
-        ),
-        reason="Todas as rotas restantes excederam o teto econômico aplicável.",
-        factors=(
-            (_factors(exclusions) if exclusions else [])
-            + [_ceiling_violation_factor(route, limit.amount) for route in violations]
-        ),
+    return _validated_refusal(
+        _RefusalContext(
+            request=request,
+            candidates=tuple(candidates),
+            exclusions=tuple(exclusions),
+            kind="ceiling_violations",
+        )
     )
 
 
@@ -511,6 +499,7 @@ def _selection_context(
             for exclusion in exclusions
             if exclusion.reason == "invalid_route"
         ),
+        exclusions=tuple(exclusions),
     )
 
 
@@ -618,9 +607,18 @@ def _validate_selection(
             "Selection requires a reason and determining factors."
         )
 
+    expected_reason, expected_factors = _expected_selection_explanation(
+        context, selected
+    )
+    if decision.reason != expected_reason or decision.factors != expected_factors:
+        raise InvalidDecisionError(
+            "Selection explanation does not match the authoritative facts."
+        )
+
     if _first_implemented_exclusion(
         selected,
         context.locally_invalid_route_ids,
+        frozenset(),
         context.allowed_route_ids,
         context.required_capabilities,
         context.required_quality,
@@ -686,6 +684,222 @@ def _validate_selection(
     return decision
 
 
+def _expected_selection_explanation(
+    context: _SelectionContext, selected: Route
+) -> tuple[str, tuple[DecisionFactor, ...]]:
+    factors = _factors(list(context.exclusions)) if context.exclusions else []
+    if context.max_estimated_cost is None and len(context.candidates) == 1:
+        factors.append(
+            DecisionFactor(
+                category="route",
+                description=f"{selected.id} era a única rota elegível para a decisão.",
+            )
+        )
+        return (
+            f"{selected.id} foi selecionada por ser a única rota elegível.",
+            tuple(factors),
+        )
+
+    if context.max_estimated_cost is not None and len(context.selectable_routes) == 1:
+        ceiling, currency = context.max_estimated_cost
+        for candidate in context.candidates:
+            if candidate is selected:
+                factors.append(_selected_estimate_factor(candidate, ceiling))
+            elif candidate not in context.comparable_routes:
+                factors.append(_estimate_factor(candidate, currency))
+            else:
+                factors.append(_ceiling_violation_factor(candidate, ceiling))
+        return (
+            f"{selected.id} foi selecionada por ser a única rota que "
+            "comprovou admissibilidade econômica.",
+            tuple(factors),
+        )
+
+    for candidate in context.candidates:
+        if (
+            context.max_estimated_cost is not None
+            and candidate not in context.selectable_routes
+        ):
+            ceiling, currency = context.max_estimated_cost
+            if candidate in context.comparable_routes:
+                factors.append(_ceiling_violation_factor(candidate, ceiling))
+            else:
+                factors.append(_estimate_factor(candidate, currency))
+        else:
+            factors.append(_estimate_factor(candidate))
+    factors.append(
+        DecisionFactor(
+            category="strategy",
+            description=(
+                f"{selected.id} tinha a menor estimativa entre as rotas "
+                "economicamente comparáveis."
+            ),
+        )
+    )
+    minimum = min(
+        route.estimate.decimal_amount() for route in context.compared_routes
+    )
+    tied = [
+        route
+        for route in context.compared_routes
+        if route.estimate.decimal_amount() == minimum
+    ]
+    if len(tied) > 1:
+        factors.append(
+            DecisionFactor(
+                category="tie_breaker",
+                description=(
+                    "Estimativas mínimas numericamente equivalentes foram "
+                    "desempatadas pelo menor route.id em ordem lexicográfica "
+                    f"Unicode; {selected.id} venceu."
+                ),
+            )
+        )
+    return (
+        f"{selected.id} foi selecionada pela menor estimativa entre as "
+        "rotas economicamente comparáveis.",
+        tuple(factors),
+    )
+
+
+def _expected_refusal_explanation(
+    context: _RefusalContext,
+) -> tuple[
+    Literal["NO_ELIGIBLE_ROUTE", "INSUFFICIENT_ECONOMIC_INFORMATION"],
+    str,
+    str,
+    list[DecisionFactor],
+]:
+    _validate_refusal_context(context)
+    exclusions = list(context.exclusions)
+    if context.kind == "no_candidates":
+        return (
+            "NO_ELIGIBLE_ROUTE",
+            "Nenhuma rota configurada, habilitada e válida satisfaz "
+            "as restrições aplicáveis.",
+            "Todas as rotas foram excluídas antes da comparação econômica.",
+            _factors(exclusions),
+        )
+
+    factors = _factors(exclusions) if exclusions else []
+    limit = (
+        context.request.constraints.max_estimated_cost
+        if context.request.constraints
+        else None
+    )
+    if context.kind == "ceiling_violations":
+        if limit is None:
+            raise InvalidDecisionError(
+                "A ceiling refusal requires an authoritative economic limit."
+            )
+        factors.extend(
+            _ceiling_violation_factor(route, limit.amount)
+            for route in context.candidates
+        )
+        return (
+            "NO_ELIGIBLE_ROUTE",
+            "Nenhuma rota configurada, habilitada e válida satisfaz "
+            "as restrições aplicáveis.",
+            "Todas as rotas restantes excederam o teto econômico aplicável.",
+            factors,
+        )
+
+    if context.kind != "economic_insufficiency":
+        raise InvalidDecisionError("Unknown authoritative refusal kind.")
+    if limit is not None:
+        for route in context.candidates:
+            estimate = route.estimate
+            if (
+                estimate.status != "available"
+                or not estimate.comparable
+                or estimate.currency != limit.currency
+            ):
+                factors.append(_estimate_factor(route, limit.currency))
+            else:
+                factors.append(_ceiling_violation_factor(route, limit.amount))
+    else:
+        comparable = [
+            route
+            for route in context.candidates
+            if route.estimate.status == "available" and route.estimate.comparable
+        ]
+        if comparable:
+            factors.extend(_currency_factor(route) for route in comparable)
+        else:
+            factors.extend(_estimate_factor(route) for route in context.candidates)
+    return (
+        "INSUFFICIENT_ECONOMIC_INFORMATION",
+        "Não há informação econômica suficiente para decidir a rota.",
+        "O custo era indispensável, mas nenhuma base econômica suficiente "
+        "permitiu continuar para a seleção.",
+        factors,
+    )
+
+
+def _validate_refusal_context(context: _RefusalContext) -> None:
+    limit = (
+        context.request.constraints.max_estimated_cost
+        if context.request.constraints
+        else None
+    )
+    if context.kind == "no_candidates":
+        if context.candidates:
+            raise InvalidDecisionError(
+                "A no-candidates refusal cannot contain selectable candidates."
+            )
+        return
+    if not context.candidates:
+        raise InvalidDecisionError(
+            "An economic refusal requires authoritative candidates."
+        )
+    if context.kind == "ceiling_violations":
+        if limit is None or any(
+            route.estimate.status != "available"
+            or not route.estimate.comparable
+            or route.estimate.currency != limit.currency
+            or route.estimate.decimal_amount() <= Decimal(limit.amount)
+            for route in context.candidates
+        ):
+            raise InvalidDecisionError(
+                "A ceiling refusal is incompatible with the authoritative facts."
+            )
+        return
+    if context.kind != "economic_insufficiency":
+        raise InvalidDecisionError("Unknown authoritative refusal kind.")
+    if limit is not None:
+        admissible = [
+            route
+            for route in context.candidates
+            if route.estimate.status == "available"
+            and route.estimate.comparable
+            and route.estimate.currency == limit.currency
+            and route.estimate.decimal_amount() <= Decimal(limit.amount)
+        ]
+        indeterminate = [
+            route
+            for route in context.candidates
+            if route.estimate.status != "available"
+            or not route.estimate.comparable
+            or route.estimate.currency != limit.currency
+        ]
+        if admissible or not indeterminate:
+            raise InvalidDecisionError(
+                "Economic insufficiency contradicts ceiling precedence."
+            )
+        return
+    comparable = [
+        route
+        for route in context.candidates
+        if route.estimate.status == "available" and route.estimate.comparable
+    ]
+    if len(context.candidates) < 2 or (
+        comparable and len({route.estimate.currency for route in comparable}) == 1
+    ):
+        raise InvalidDecisionError(
+            "Economic insufficiency contradicts comparison precedence."
+        )
+
+
 def _selected_estimate_factor(route: Route, ceiling: str) -> DecisionFactor:
     estimate = route.estimate
     assert estimate.amount is not None
@@ -705,34 +919,23 @@ def _selected_estimate_factor(route: Route, ceiling: str) -> DecisionFactor:
 def _economic_information_refusal(
     request: ExecutionRequest,
     exclusions: list[Exclusion],
-    factors: list[DecisionFactor],
+    candidates: list[Route],
 ) -> RefusalResponse:
-    all_factors = (_factors(exclusions) if exclusions else []) + factors
-    return _refusal(
-        request=request,
-        exclusions=exclusions,
-        code="INSUFFICIENT_ECONOMIC_INFORMATION",
-        message="Não há informação econômica suficiente para decidir a rota.",
-        reason=(
-            "O custo era indispensável, mas nenhuma base econômica suficiente "
-            "permitiu continuar para a seleção."
-        ),
-        factors=all_factors,
+    return _validated_refusal(
+        _RefusalContext(
+            request=request,
+            candidates=tuple(candidates),
+            exclusions=tuple(exclusions),
+            kind="economic_insufficiency",
+        )
     )
 
 
-def _refusal(
-    *,
-    request: ExecutionRequest,
-    exclusions: list[Exclusion],
-    code: Literal["NO_ELIGIBLE_ROUTE", "INSUFFICIENT_ECONOMIC_INFORMATION"],
-    message: str,
-    reason: str,
-    factors: list[DecisionFactor],
-) -> RefusalResponse:
-    applied_constraints = _request_constraints(request)
-    applied_constraints.extend(_configuration_constraints(exclusions))
-    return RefusalResponse(
+def _validated_refusal(context: _RefusalContext) -> RefusalResponse:
+    code, message, reason, factors = _expected_refusal_explanation(context)
+    applied_constraints = _request_constraints(context.request)
+    applied_constraints.extend(_configuration_constraints(list(context.exclusions)))
+    response = RefusalResponse(
         error=PublicError(code=code, message=message),
         decision=RefusedDecision(
             strategy=Strategy(),
@@ -741,6 +944,27 @@ def _refusal(
             factors=factors,
         ),
     )
+    return _validate_refusal(context, response)
+
+
+def _validate_refusal(
+    context: _RefusalContext, response: RefusalResponse
+) -> RefusalResponse:
+    code, message, reason, factors = _expected_refusal_explanation(context)
+    expected_constraints = _request_constraints(context.request)
+    expected_constraints.extend(_configuration_constraints(list(context.exclusions)))
+    if (
+        response.error.code != code
+        or response.error.message != message
+        or response.decision.strategy != Strategy()
+        or response.decision.applied_constraints != expected_constraints
+        or response.decision.reason != reason
+        or response.decision.factors != factors
+    ):
+        raise InvalidDecisionError(
+            "Routing refusal does not match the authoritative facts."
+        )
+    return response
 
 
 def _estimate_factor(
@@ -824,6 +1048,7 @@ def _ceiling_violation_factor(route: Route, ceiling: str) -> DecisionFactor:
 def _first_implemented_exclusion(
     route: Route,
     locally_invalid_route_ids: frozenset[str],
+    invalid_execution_route_ids: frozenset[str],
     allowed_route_ids: frozenset[str] | None,
     required_capabilities: frozenset[str],
     required_quality: frozenset[str],
@@ -836,13 +1061,15 @@ def _first_implemented_exclusion(
             f"{route.id} estava desabilitada na configuração.",
         )
     if route.id in locally_invalid_route_ids:
+        invalid_association = route.id in invalid_execution_route_ids
         return Exclusion(
             route.id,
             "invalid_route",
             "configuration",
             (
-                f"{route.id} foi excluída porque sua associação de execução "
-                "era inválida."
+                f"{route.id} foi excluída porque sua associação de execução era inválida."
+                if invalid_association
+                else f"{route.id} foi excluída por configuração local inválida."
             ),
         )
     if allowed_route_ids is not None and route.id not in allowed_route_ids:
@@ -956,8 +1183,9 @@ def _configuration_constraints(
                     source="configuration",
                     category="route",
                     description=(
-                        f"{exclusion.route_id} possuía associação de execução "
-                        "inválida."
+                        f"{exclusion.route_id} possuía associação de execução inválida."
+                        if "associação de execução" in exclusion.description
+                        else f"{exclusion.route_id} possuía configuração local inválida."
                     ),
                 )
             )

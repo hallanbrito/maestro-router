@@ -34,15 +34,24 @@ SENSITIVE_DETAIL = "secret price source and external payload"
 
 
 class ControlledAdapter:
-    def __init__(self, usage: NormalizedUsage) -> None:
+    def __init__(
+        self,
+        usage: NormalizedUsage,
+        observed_model: str = "model-a",
+    ) -> None:
         self.usage = usage
+        self.observed_model = observed_model
         self.calls: list[tuple[TextExecutionRequest, ExecutionRoute]] = []
 
     async def execute(
         self, request: TextExecutionRequest, route: ExecutionRoute
     ) -> TextExecutionResult:
         self.calls.append((request, route))
-        return TextExecutionResult(content="controlled result", usage=self.usage)
+        return TextExecutionResult(
+            content="controlled result",
+            usage=self.usage,
+            observed_model=self.observed_model,
+        )
 
 
 def complete_usage(
@@ -142,9 +151,12 @@ def response_for(
     estimate: EconomicEstimate | None = None,
     reference: PriceReference | None = None,
     usage: NormalizedUsage | None = None,
+    observed_model: str = "model-a",
 ) -> tuple[dict[str, object], ControlledAdapter]:
     route = configured_route(estimate=estimate, reference=reference)
-    adapter = ControlledAdapter(usage or complete_usage())
+    adapter = ControlledAdapter(
+        usage or complete_usage(), observed_model=observed_model
+    )
     response = TestClient(
         create_app(RouteCatalog((route,)), {route.adapter_id: adapter})
     ).post("/v1/executions", json={"task": "Execute."})
@@ -397,6 +409,29 @@ def test_public_cost_is_available_for_compatible_estimate_states(
         "assumptions": [],
     }
     assert len(adapter.calls) == 1
+
+
+def test_observed_model_mismatch_preserves_result_and_keeps_cost_unavailable() -> None:
+    body, adapter = response_for(
+        reference=price_reference(),
+        observed_model="different-model-returned-by-provider",
+    )
+
+    assert body["result"] == {"content": "controlled result"}
+    assert body["economics"]["usage"]["status"] == "available"  # type: ignore[index]
+    cost = body["economics"]["calculated_cost"]  # type: ignore[index]
+    assert cost["status"] == "unavailable"
+    assert "modelo observado" in cost["reason"]
+    assert "different-model-returned-by-provider" not in str(body)
+    assert len(adapter.calls) == 1
+
+
+def test_compatible_observed_model_preserves_available_cost() -> None:
+    body, _ = response_for(
+        reference=price_reference(), observed_model="model-a"
+    )
+
+    assert body["economics"]["calculated_cost"]["status"] == "available"  # type: ignore[index]
 
 
 def test_public_cost_schema_remains_closed_and_accepts_contractual_uncertain() -> None:

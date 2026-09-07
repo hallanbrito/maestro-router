@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastapi import FastAPI
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, omit
 
 from .adapters import OpenAIResponsesAdapter
 from .api import create_app
@@ -53,6 +53,8 @@ _COMPLETENESS_FIELDS = (
 _UNAVAILABLE_ESTIMATE_REASON = (
     "Não há preço nem método de estimativa aprovados para esta rota."
 )
+_OPENAI_PUBLIC_BASE_URL = "https://api.openai.com/v1"
+_OPENAI_CUSTOM_HEADERS = "OPENAI_CUSTOM_HEADERS"
 
 
 class InvalidRuntimeConfigurationError(ValueError):
@@ -106,8 +108,7 @@ def create_openai_app(
 ) -> FastAPI:
     if _OPENAI_ROUTES_JSON in configuration:
         api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
-        client = client_factory(api_key=api_key)
-        adapter = OpenAIResponsesAdapter(client)
+        adapter = _create_openai_adapter(api_key, client_factory)
         return create_app(
             RouteCatalog(routes, configuration_invalid_route_ids=configuration_invalid_route_ids),
             {"openai-responses": adapter},
@@ -129,8 +130,7 @@ def create_openai_app(
         estimate=estimate,
         price_reference=price_reference,
     )
-    client = client_factory(api_key=api_key)
-    adapter = OpenAIResponsesAdapter(client)
+    adapter = _create_openai_adapter(api_key, client_factory)
     return create_app(
         RouteCatalog((route,)),
         {route.adapter_id: adapter},
@@ -144,6 +144,50 @@ def create_openai_app_from_env() -> FastAPI:
         if name in os.environ
     }
     return create_openai_app(configuration)
+
+
+def _create_openai_adapter(
+    api_key: str,
+    client_factory: Callable[..., AsyncOpenAI],
+) -> OpenAIResponsesAdapter:
+    # The official SDK otherwise infers several unsupported options from the
+    # process environment. All supported inputs are supplied explicitly here.
+    client = client_factory(
+        api_key=api_key,
+        admin_api_key="",
+        organization="",
+        project="",
+        webhook_secret="",
+        base_url=_OPENAI_PUBLIC_BASE_URL,
+        max_retries=0,
+        default_headers=_unapproved_openai_header_omissions(api_key),
+        default_query={},
+    )
+    return OpenAIResponsesAdapter(client, retry_policy_configured=True)
+
+
+def _unapproved_openai_header_omissions(api_key: str) -> dict[str, object]:
+    """Override SDK-only environment headers without mutating process state."""
+
+    headers: dict[str, object] = {
+        "OpenAI-Organization": omit,
+        "OpenAI-Project": omit,
+    }
+    configured = os.environ.get(_OPENAI_CUSTOM_HEADERS)
+    if configured is None:
+        return headers
+
+    for line in configured.split("\n"):
+        name, separator, _ = line.partition(":")
+        if not separator:
+            continue
+        name = name.strip()
+        if not name:
+            continue
+        headers[name] = (
+            f"Bearer {api_key}" if name.lower() == "authorization" else omit
+        )
+    return headers
 
 
 def _validated_configuration(
@@ -167,7 +211,11 @@ def _validated_configuration(
         )
     estimate = EconomicEstimate(
         status="unavailable",
-        reason=_UNAVAILABLE_ESTIMATE_REASON,
+        reason=(
+            "Não há previsão de uso configurada para estimar esta rota."
+            if price_reference is not None
+            else _UNAVAILABLE_ESTIMATE_REASON
+        ),
     )
     if _OPENAI_ESTIMATED_USAGE_JSON in configuration:
         quantities = _parse_estimated_usage(
@@ -441,7 +489,9 @@ def _parse_price_reference(
         if not isinstance(document, dict) or set(document) != _PRICE_REFERENCE_FIELDS:
             raise ValueError
 
-        for field_name in ("id", "version", "source"):
+        if not _is_structurally_valid_string(document["id"]):
+            raise ValueError
+        for field_name in ("version", "source"):
             if not _is_non_blank_string(document[field_name]):
                 raise ValueError
         currency = document["currency"]

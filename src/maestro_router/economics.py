@@ -206,12 +206,21 @@ def calculate_post_execution_cost(
     *,
     route_id: str,
     provider: str,
-    model: str,
+    model: str | None = None,
+    configured_model: str | None = None,
+    observed_model: str | None = None,
     estimate: EconomicEstimate,
     usage: NormalizedUsage | None,
     reference: PriceReference | None,
 ) -> PostExecutionCost:
     """Apply the first conservative post-execution cost policy."""
+
+    # ``model`` keeps the original internal call form meaningful: callers that
+    # provide one identity are asserting it as both configured and observed.
+    if configured_model is None:
+        configured_model = model
+    if observed_model is None and model is not None:
+        observed_model = model
 
     if usage is None or usage.status != "available":
         return _unavailable(
@@ -235,10 +244,18 @@ def calculate_post_execution_cost(
         return _unavailable(
             "A identidade tarifária exata do modelo não foi comprovada."
         )
+    if configured_model is None or observed_model is None:
+        return _unavailable(
+            "A identidade do modelo usado na execução não pôde ser comprovada."
+        )
+    if observed_model != configured_model:
+        return _unavailable(
+            "O modelo observado não corresponde ao modelo configurado na rota."
+        )
     if (
         reference.route_id != route_id
         or reference.provider != provider
-        or reference.model != model
+        or reference.model != configured_model
     ):
         return _unavailable(
             "A referência de preço não corresponde exatamente à rota executada."

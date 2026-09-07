@@ -8,14 +8,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from maestro_router.api import create_app
-from maestro_router.contracts import ExecutionRequest
+from maestro_router.contracts import DecisionFactor, ExecutionRequest
 from maestro_router.execution import TextExecutionResult
 from maestro_router.routing import (
     EconomicEstimate,
     Route,
     RouteCatalog,
     SelectedDecision,
+    InvalidDecisionError,
+    _RefusalContext,
     _selection_context,
+    _validate_refusal,
     _validate_selection,
     route_request,
 )
@@ -59,9 +62,31 @@ class UnexpectedCallAdapter:
         raise AssertionError("Routing refusal must not execute an adapter.")
 
 
+class CountingAdapter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, request: object, route: object) -> TextExecutionResult:
+        self.calls += 1
+        return TextExecutionResult(content="unexpected")
+
+
 def client_for(*routes: Route) -> TestClient:
     adapters = {route.adapter_id: UnexpectedCallAdapter() for route in routes}
     return TestClient(create_app(RouteCatalog(routes), adapters))
+
+
+def client_with_counting_adapter() -> tuple[TestClient, CountingAdapter]:
+    route = configured_route("route-a")
+    adapter = CountingAdapter()
+    return (
+        TestClient(create_app(RouteCatalog([route]), {route.adapter_id: adapter})),
+        adapter,
+    )
+
+
+def nested_json(depth: int, leaf: str = "{}") -> str:
+    return '{"nested":' * depth + leaf + "}" * depth
 
 
 def test_structurally_valid_request_reaches_routing() -> None:
@@ -127,6 +152,34 @@ def test_closed_request_objects_reject_additional_fields(payload: object) -> Non
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"task":"Execute.","unknown":' + nested_json(500) + "}",
+        '{"task":"Execute.","unknown":' + nested_json(500, '"\\ud800"') + "}",
+        '{"task":"Execute.","unknown":' + nested_json(2000) + "}",
+    ],
+    ids=["unknown-field-500", "isolated-surrogate-500", "decoder-limit"],
+)
+def test_deep_json_is_sanitized_without_adapter_execution(body: str) -> None:
+    client, adapter = client_with_counting_adapter()
+
+    response = client.post(
+        "/v1/executions",
+        content=body.encode("utf-8"),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    payload = response.json()
+    assert payload["error"]["code"] == "INVALID_REQUEST"
+    assert "traceback" not in response.text.lower()
+    assert "recursion" not in response.text.lower()
+    assert "detail" not in payload
+    assert adapter.calls == 0
 
 
 def test_empty_catalog_produces_explainable_refusal() -> None:
@@ -560,6 +613,137 @@ def test_incoherent_selection_cannot_pass_validation() -> None:
         _validate_selection(context, incoherent)
 
 
+def test_comparison_requires_authoritative_economic_factors() -> None:
+    route_a = configured_route("route-a", estimate=available("0.01"))
+    route_b = configured_route("route-b", estimate=available("0.02"))
+    request = ExecutionRequest(task="Execute.")
+    decision = route_request(request, RouteCatalog([route_a, route_b]))
+    assert isinstance(decision, SelectedDecision)
+    context = _selection_context(request, [route_a, route_b], [])
+    generic = replace(
+        decision,
+        factors=(
+            DecisionFactor(
+                category="strategy",
+                description="A estratégia escolheu uma rota.",
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(context, generic)
+
+
+def test_single_candidate_unavailable_cost_cannot_claim_economic_advantage() -> None:
+    route = configured_route("route-a")
+    request = ExecutionRequest(task="Execute.")
+    decision = route_request(request, RouteCatalog([route]))
+    assert isinstance(decision, SelectedDecision)
+    context = _selection_context(request, [route], [])
+    false_claim = replace(
+        decision,
+        reason="route-a era a rota mais barata.",
+        factors=(
+            DecisionFactor(
+                category="economics",
+                description="O custo indisponível favoreceu route-a.",
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(context, false_claim)
+
+
+def test_refusal_reason_and_factors_must_match_authoritative_precedence() -> None:
+    route_a = configured_route("route-a")
+    route_b = configured_route("route-b", estimate=uncertain())
+    request = ExecutionRequest(task="Execute.")
+    refusal = route_request(request, RouteCatalog([route_a, route_b]))
+    assert not isinstance(refusal, SelectedDecision)
+    context = _RefusalContext(
+        request=request,
+        candidates=(route_a, route_b),
+        exclusions=(),
+        kind="economic_insufficiency",
+    )
+    incompatible = refusal.model_copy(
+        update={
+            "decision": refusal.decision.model_copy(
+                update={
+                    "reason": "As rotas excederam um teto inexistente.",
+                    "factors": [
+                        DecisionFactor(
+                            category="route",
+                            description="Nenhuma rota estava habilitada.",
+                        )
+                    ],
+                }
+            )
+        }
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_refusal(context, incompatible)
+
+
+def test_determinant_economic_exclusion_cannot_be_omitted() -> None:
+    comparable = configured_route("route-a", estimate=available("0.01"))
+    excluded = configured_route("route-b")
+    request = ExecutionRequest(task="Execute.")
+    decision = route_request(request, RouteCatalog([comparable, excluded]))
+    assert isinstance(decision, SelectedDecision)
+    context = _selection_context(request, [comparable, excluded], [])
+    incomplete = replace(
+        decision,
+        factors=tuple(
+            factor
+            for factor in decision.factors
+            if "route-b" not in factor.description
+        ),
+    )
+
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(context, incomplete)
+
+
+def test_tie_breaker_factor_cannot_be_missing_or_added_without_tie() -> None:
+    tied_a = configured_route("route-a", estimate=available("0.10"))
+    tied_b = configured_route("route-b", estimate=available("0.1"))
+    request = ExecutionRequest(task="Execute.")
+    tied_decision = route_request(request, RouteCatalog([tied_a, tied_b]))
+    assert isinstance(tied_decision, SelectedDecision)
+    tied_context = _selection_context(request, [tied_a, tied_b], [])
+    missing = replace(
+        tied_decision,
+        factors=tuple(
+            factor
+            for factor in tied_decision.factors
+            if factor.category != "tie_breaker"
+        ),
+    )
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(tied_context, missing)
+
+    lower = configured_route("route-a", estimate=available("0.01"))
+    higher = configured_route("route-b", estimate=available("0.02"))
+    untied_decision = route_request(request, RouteCatalog([lower, higher]))
+    assert isinstance(untied_decision, SelectedDecision)
+    untied_context = _selection_context(request, [lower, higher], [])
+    improper = replace(
+        untied_decision,
+        factors=untied_decision.factors
+        + (
+            DecisionFactor(
+                category="tie_breaker",
+                description="Um desempate inexistente foi aplicado.",
+            ),
+        ),
+    )
+    with pytest.raises(InvalidDecisionError, match="authoritative facts"):
+        _validate_selection(untied_context, improper)
+
+
 def test_ceiling_selects_comparable_route_and_preserves_indeterminate_route() -> None:
     request = ExecutionRequest.model_validate(
         {
@@ -655,6 +839,33 @@ def test_duplicate_json_member_is_rejected() -> None:
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        r'{"task":"ok","constraints":{"allowed_route_ids":["\ud800"]}}',
+        r'{"task":"ok","\ud800":1,"\ud800":2}',
+        '{"task":' + "1" * 4301 + "}",
+    ],
+)
+def test_non_representable_or_oversized_json_values_are_invalid_request(
+    content: str,
+) -> None:
+    route = configured_route("route-a")
+    response = client_for(route).post(
+        "/v1/executions",
+        content=content,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body) == {"error"}
+    assert body["error"]["code"] == "INVALID_REQUEST"
+    assert body["error"]["message"] == "A solicitação é inválida."
+    assert body["error"]["issues"]
+    assert "Traceback" not in response.text
 
 
 def test_non_json_media_type_is_rejected() -> None:

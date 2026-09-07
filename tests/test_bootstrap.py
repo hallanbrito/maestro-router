@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import httpx2
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openai import AsyncOpenAI, Omit, omit
 
 import maestro_router.bootstrap as bootstrap_module
 from maestro_router.adapters import OpenAIResponsesAdapter
@@ -37,6 +42,22 @@ SENSITIVE_SENTINELS = (
 UNAVAILABLE_ESTIMATE_REASON = (
     "Não há preço nem método de estimativa aprovados para esta rota."
 )
+PRICE_ONLY_UNAVAILABLE_ESTIMATE_REASON = (
+    "Não há previsão de uso configurada para estimar esta rota."
+)
+APPROVED_CLIENT_OPTIONS = {
+    "admin_api_key": "",
+    "organization": "",
+    "project": "",
+    "webhook_secret": "",
+    "base_url": "https://api.openai.com/v1",
+    "max_retries": 0,
+    "default_headers": {
+        "OpenAI-Organization": omit,
+        "OpenAI-Project": omit,
+    },
+    "default_query": {},
+}
 CONTROLLED_ESTIMATE_ASSUMPTIONS = [
     "A estimativa considera 300 unidades de input_token configuradas pelo operador.",
     "A estimativa considera 500 unidades de output_token configuradas pelo operador.",
@@ -44,9 +65,14 @@ CONTROLLED_ESTIMATE_ASSUMPTIONS = [
 
 
 class FakeResponses:
-    def __init__(self, usage: object | None = None) -> None:
+    def __init__(
+        self,
+        usage: object | None = None,
+        observed_model: str | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self.usage = usage
+        self.observed_model = observed_model
 
     async def create(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
@@ -56,6 +82,7 @@ class FakeResponses:
             status="completed",
             output=[message],
             output_text="controlled result",
+            model=self.observed_model or kwargs["model"],
         )
         if self.usage is not None:
             response.usage = self.usage
@@ -73,14 +100,20 @@ class FakeAsyncOpenAI:
 
 
 class ControlledClientFactory:
-    def __init__(self, usage: object | None = None) -> None:
+    def __init__(
+        self,
+        usage: object | None = None,
+        observed_model: str | None = None,
+    ) -> None:
         self.client: FakeAsyncOpenAI | None = None
         self.calls: list[dict[str, str]] = []
         self.usage = usage
+        self.observed_model = observed_model
 
     def __call__(self, **kwargs: str) -> FakeAsyncOpenAI:
         self.calls.append(kwargs)
         self.client = FakeAsyncOpenAI(self.usage)
+        self.client.responses.observed_model = self.observed_model
         return self.client
 
 
@@ -589,6 +622,182 @@ def test_environment_factory_reads_optional_economics_only_when_present(
     }
 
 
+def test_official_client_ignores_unapproved_environment_and_freezes_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    clients: list[AsyncOpenAI] = []
+
+    async def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            200,
+            request=request,
+            json={
+                "id": "resp_controlled",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": CONTROLLED_MODEL,
+                "output": [
+                    {
+                        "id": "msg_controlled",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "controlled result",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    transport_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(respond)
+    )
+
+    def official_factory(**kwargs: object) -> AsyncOpenAI:
+        client = AsyncOpenAI(**kwargs, http_client=transport_client)
+        clients.append(client)
+        return client
+
+    def reject_second_client(*args: object, **kwargs: object) -> AsyncOpenAI:
+        raise AssertionError("with_options would construct a second AsyncOpenAI")
+
+    monkeypatch.setattr(AsyncOpenAI, "with_options", reject_second_client)
+
+    for name, value in {
+        "OPENAI_BASE_URL": "https://unapproved.invalid/v1",
+        "OPENAI_ORG_ID": "unapproved-organization",
+        "OPENAI_PROJECT_ID": "unapproved-project",
+        "OPENAI_ADMIN_KEY": "unapproved-admin-key",
+        "OPENAI_WEBHOOK_SECRET": "unapproved-webhook-secret",
+        "OPENAI_CUSTOM_HEADERS": (
+            "X-Unapproved: leaked\n"
+            "Authorization: Bearer unapproved\n"
+            "OpenAI-Organization: custom-organization"
+        ),
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    app = create_openai_app(
+        controlled_configuration(), client_factory=official_factory
+    )
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://changed.invalid/v1")
+    monkeypatch.setenv("OPENAI_ORG_ID", "changed-organization")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "changed-project")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Changed: leaked")
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+
+    assert response.status_code == 200
+    assert len(clients) == 1
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == "https://api.openai.com/v1/responses"
+    assert request.headers["authorization"] == f"Bearer {CONTROLLED_KEY}"
+    assert request.headers["x-stainless-retry-count"] == "0"
+    assert "openai-organization" not in request.headers
+    assert "openai-project" not in request.headers
+    assert "x-unapproved" not in request.headers
+    assert "x-changed" not in request.headers
+    assert clients[0].admin_api_key == ""
+    assert clients[0].webhook_secret == ""
+
+
+def test_overlapping_compositions_preserve_environment_and_isolate_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = {
+        "OPENAI_BASE_URL": "https://unapproved.invalid/v1",
+        "OPENAI_ORG_ID": "unapproved-organization",
+        "OPENAI_PROJECT_ID": "unapproved-project",
+        "OPENAI_ADMIN_KEY": "unapproved-admin-key",
+        "OPENAI_WEBHOOK_SECRET": "unapproved-webhook-secret",
+        "OPENAI_CUSTOM_HEADERS": "X-Unapproved: leaked",
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+    entered = Barrier(3)
+    release = Barrier(3)
+    lock = Lock()
+    during: list[dict[str, str]] = []
+    captured: list[tuple[dict[str, object], FakeAsyncOpenAI]] = []
+
+    def overlapping_factory(**kwargs: object) -> FakeAsyncOpenAI:
+        client = FakeAsyncOpenAI()
+        with lock:
+            captured.append((kwargs, client))
+        entered.wait()
+        with lock:
+            during.append(dict(os.environ))
+        release.wait()
+        return client
+
+    def compose() -> FastAPI:
+        return create_openai_app(
+            controlled_configuration(), client_factory=overlapping_factory
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(compose) for _ in range(2)]
+        entered.wait()
+        assert dict(os.environ) == before
+        release.wait()
+        apps = [future.result() for future in futures]
+
+    assert len(apps) == 2
+    assert during == [before, before]
+    assert dict(os.environ) == before
+    assert len(captured) == 2
+    assert captured[0][1] is not captured[1][1]
+    for options, client in captured:
+        assert options["api_key"] == CONTROLLED_KEY
+        assert options["admin_api_key"] == ""
+        assert options["organization"] == ""
+        assert options["project"] == ""
+        assert options["webhook_secret"] == ""
+        assert options["base_url"] == "https://api.openai.com/v1"
+        assert options["max_retries"] == 0
+        assert options["default_query"] == {}
+        headers = options["default_headers"]
+        assert isinstance(headers, dict)
+        assert set(headers) == {
+            "OpenAI-Organization",
+            "OpenAI-Project",
+            "X-Unapproved",
+        }
+        assert all(isinstance(value, Omit) for value in headers.values())
+        assert client.option_calls == []
+
+
+def test_legacy_price_reference_id_with_surrogate_fails_before_client() -> None:
+    document = valid_price_document()
+    document["id"] = "price-\ud800"
+    factory = ControlledClientFactory()
+
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(
+            configuration_with_price(document), client_factory=factory
+        )  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == PRICE_REFERENCE_VARIABLE
+    assert "price-" not in str(caught.value)
+    assert factory.calls == []
+
+
 def test_valid_price_reference_is_bound_ordered_and_frozen_in_route_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -642,7 +851,7 @@ def test_valid_price_reference_is_bound_ordered_and_frozen_in_route_snapshot(
     assert first_reference == second_reference
     with pytest.raises(FrozenInstanceError):
         first_reference.id = "mutated"  # type: ignore[misc]
-    assert factory.calls == [{"api_key": CONTROLLED_KEY}]
+    assert factory.calls == [{"api_key": CONTROLLED_KEY, **APPROVED_CLIENT_OPTIONS}]
 
 
 def test_valid_estimated_usage_is_exact_order_independent_and_frozen(
@@ -704,7 +913,9 @@ def test_economic_configuration_is_not_passed_to_openai_adapter(
     create_openai_app(configuration_with_estimate(), client_factory=factory)  # type: ignore[arg-type]
 
     assert factory.client is not None
-    assert adapter_calls == [((factory.client,), {})]
+    assert adapter_calls == [
+        ((factory.client,), {"retry_policy_configured": True})
+    ]
 
 
 def test_empty_conditions_are_accepted(
@@ -769,7 +980,7 @@ def test_composition_builds_only_the_approved_route_and_association(
     assert isinstance(adapters, dict)
     assert set(adapters) == {"openai-responses"}
     assert isinstance(adapters["openai-responses"], OpenAIResponsesAdapter)
-    assert factory.calls == [{"api_key": CONTROLLED_KEY}]
+    assert factory.calls == [{"api_key": CONTROLLED_KEY, **APPROVED_CLIENT_OPTIONS}]
 
 
 def test_valid_composition_executes_once_and_preserves_unavailable_economics() -> None:
@@ -819,7 +1030,7 @@ def test_valid_price_and_complete_usage_produce_exact_public_cost_once() -> None
     economics = response.json()["economics"]
     assert economics["estimate"] == {
         "status": "unavailable",
-        "reason": UNAVAILABLE_ESTIMATE_REASON,
+        "reason": PRICE_ONLY_UNAVAILABLE_ESTIMATE_REASON,
     }
     assert economics["calculated_cost"] == {
         "status": "available",
@@ -876,6 +1087,27 @@ def test_valid_forecast_and_complete_usage_keep_estimate_and_cost_separate() -> 
         "assumptions": [],
     }
     assert economics["estimate"]["amount"] != economics["calculated_cost"]["amount"]
+    assert len(factory.client.responses.calls) == 1
+
+
+def test_provider_model_divergence_keeps_calculated_cost_unavailable() -> None:
+    factory = ControlledClientFactory(
+        SimpleNamespace(input_tokens=310, output_tokens=86),
+        observed_model="different-model-returned-by-provider",
+    )
+    app = create_openai_app(
+        configuration_with_estimate(), client_factory=factory
+    )  # type: ignore[arg-type]
+
+    response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["decision"]["route"]["model"] == CONTROLLED_MODEL
+    assert body["result"] == {"content": "controlled result"}
+    assert body["economics"]["usage"]["status"] == "available"
+    assert body["economics"]["calculated_cost"]["status"] == "unavailable"
+    assert "different-model-returned-by-provider" not in response.text
     assert len(factory.client.responses.calls) == 1
 
 
@@ -1039,7 +1271,7 @@ def test_configuration_is_snapshotted_during_composition() -> None:
     assert response.status_code == 200
     assert response.json()["decision"]["route"]["id"] == CONTROLLED_ROUTE_ID
     assert response.json()["decision"]["route"]["model"] == CONTROLLED_MODEL
-    assert factory.calls == [{"api_key": CONTROLLED_KEY}]
+    assert factory.calls == [{"api_key": CONTROLLED_KEY, **APPROVED_CLIENT_OPTIONS}]
     assert factory.client.responses.calls[0]["model"] == CONTROLLED_MODEL
     assert "later-key-input" not in response.text
 
@@ -1059,7 +1291,9 @@ def test_non_blank_values_are_preserved_without_normalization() -> None:
     response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
 
     assert response.status_code == 200
-    assert factory.calls == [{"api_key": "  controlled-key-input  "}]
+    assert factory.calls == [
+        {"api_key": "  controlled-key-input  ", **APPROVED_CLIENT_OPTIONS}
+    ]
     assert response.json()["decision"]["route"]["id"] == "  controlled-route  "
     assert response.json()["decision"]["route"]["model"] == "  controlled-model  "
     assert factory.client.responses.calls[0]["model"] == "  controlled-model  "
@@ -1251,7 +1485,7 @@ def test_multiroute_adapter_calls_and_shares() -> None:
     factory = ControlledClientFactory()
     app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
 
-    assert factory.calls == [{"api_key": CONTROLLED_KEY}]
+    assert factory.calls == [{"api_key": CONTROLLED_KEY, **APPROVED_CLIENT_OPTIONS}]
     assert factory.client is not None
 
     response = TestClient(app).post("/v1/executions", json={"task": "Execute."})
@@ -1415,7 +1649,7 @@ def test_multiroute_isolable_failure_and_invalid_route_explanation() -> None:
     assert any(
         c["source"] == "configuration"
         and c["category"] == "route"
-        and "associação de execução inválida" in c["description"]
+        and "configuração local inválida" in c["description"]
         for c in applied_constraints
     )
 
@@ -1495,7 +1729,7 @@ def test_multiroute_local_duplicate_in_price_reference() -> None:
     res_data = response.json()
     assert res_data["decision"]["route"]["id"] == "route-a"
     applied_constraints = res_data["decision"]["applied_constraints"]
-    assert any("associação de execução inválida" in c["description"] for c in applied_constraints)
+    assert any("configuração local inválida" in c["description"] for c in applied_constraints)
 
 
 def test_multiroute_local_duplicate_in_estimated_usage() -> None:
@@ -1764,6 +1998,6 @@ def test_route_catalog_carries_exclusion_to_explanation() -> None:
     assert any(
         c["source"] == "configuration"
         and c["category"] == "route"
-        and "route-b possuía associação de execução inválida" in c["description"]
+        and "route-b possuía configuração local inválida" in c["description"]
         for c in applied_constraints
     )

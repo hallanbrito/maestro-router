@@ -194,9 +194,9 @@ def _create_openai_adapter(
 ) -> OpenAIResponsesAdapter:
     """Construct an OpenAI adapter isolated from ambient SDK options.
 
-    Unsupported options (organization, project, base_url, retries, etc.) are
-    explicitly overridden so the client does not read ambient environment variables,
-    without mutating the process environment.
+    Unsupported options are explicitly overridden or neutralized so ambient
+    SDK variables cannot affect the captured client, without mutating the
+    process environment.
     """
     # The official SDK otherwise infers several unsupported options from the
     # process environment. All supported inputs are supplied explicitly here.

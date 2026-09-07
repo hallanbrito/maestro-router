@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -53,6 +54,16 @@ _COMPLETENESS_FIELDS = (
 _UNAVAILABLE_ESTIMATE_REASON = (
     "Não há preço nem método de estimativa aprovados para esta rota."
 )
+_OPENAI_PUBLIC_BASE_URL = "https://api.openai.com/v1"
+_UNAPPROVED_OPENAI_SDK_VARIABLES = (
+    "OPENAI_ADMIN_KEY",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "OPENAI_WEBHOOK_SECRET",
+    "OPENAI_BASE_URL",
+    "OPENAI_CUSTOM_HEADERS",
+)
+_MISSING_ENVIRONMENT_VALUE = object()
 
 
 class InvalidRuntimeConfigurationError(ValueError):
@@ -106,8 +117,7 @@ def create_openai_app(
 ) -> FastAPI:
     if _OPENAI_ROUTES_JSON in configuration:
         api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
-        client = client_factory(api_key=api_key)
-        adapter = OpenAIResponsesAdapter(client)
+        adapter = _create_openai_adapter(api_key, client_factory)
         return create_app(
             RouteCatalog(routes, configuration_invalid_route_ids=configuration_invalid_route_ids),
             {"openai-responses": adapter},
@@ -129,8 +139,7 @@ def create_openai_app(
         estimate=estimate,
         price_reference=price_reference,
     )
-    client = client_factory(api_key=api_key)
-    adapter = OpenAIResponsesAdapter(client)
+    adapter = _create_openai_adapter(api_key, client_factory)
     return create_app(
         RouteCatalog((route,)),
         {route.adapter_id: adapter},
@@ -144,6 +153,43 @@ def create_openai_app_from_env() -> FastAPI:
         if name in os.environ
     }
     return create_openai_app(configuration)
+
+
+def _create_openai_adapter(
+    api_key: str,
+    client_factory: Callable[..., AsyncOpenAI],
+) -> OpenAIResponsesAdapter:
+    # The official SDK otherwise infers several unsupported options from the
+    # process environment. All supported inputs are supplied explicitly here.
+    with _without_unapproved_openai_environment():
+        client = client_factory(
+            api_key=api_key,
+            base_url=_OPENAI_PUBLIC_BASE_URL,
+            max_retries=0,
+            default_headers={},
+            default_query={},
+        )
+        return OpenAIResponsesAdapter(client)
+
+
+@contextmanager
+def _without_unapproved_openai_environment():
+    """Prevent SDK-only OpenAI variables from entering this bootstrap snapshot."""
+
+    captured = {
+        name: os.environ.get(name, _MISSING_ENVIRONMENT_VALUE)
+        for name in _UNAPPROVED_OPENAI_SDK_VARIABLES
+    }
+    try:
+        for name in captured:
+            os.environ.pop(name, None)
+        yield
+    finally:
+        for name, value in captured.items():
+            if value is _MISSING_ENVIRONMENT_VALUE:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value  # type: ignore[assignment]
 
 
 def _validated_configuration(
@@ -167,7 +213,11 @@ def _validated_configuration(
         )
     estimate = EconomicEstimate(
         status="unavailable",
-        reason=_UNAVAILABLE_ESTIMATE_REASON,
+        reason=(
+            "Não há previsão de uso configurada para estimar esta rota."
+            if price_reference is not None
+            else _UNAVAILABLE_ESTIMATE_REASON
+        ),
     )
     if _OPENAI_ESTIMATED_USAGE_JSON in configuration:
         quantities = _parse_estimated_usage(
@@ -441,7 +491,9 @@ def _parse_price_reference(
         if not isinstance(document, dict) or set(document) != _PRICE_REFERENCE_FIELDS:
             raise ValueError
 
-        for field_name in ("id", "version", "source"):
+        if not _is_structurally_valid_string(document["id"]):
+            raise ValueError
+        for field_name in ("version", "source"):
             if not _is_non_blank_string(document[field_name]):
                 raise ValueError
         currency = document["currency"]

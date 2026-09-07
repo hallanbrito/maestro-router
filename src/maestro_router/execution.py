@@ -90,12 +90,22 @@ USAGE_NOT_PROVIDED = NormalizedUsage(
 class TextExecutionResult:
     content: str
     usage: NormalizedUsage = USAGE_NOT_PROVIDED
+    observed_model: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.content, str):
             raise ValueError("content must be a string.")
         if not isinstance(self.usage, NormalizedUsage):
             raise ValueError("usage must be normalized usage.")
+        if self.observed_model is not None:
+            _require_non_blank(self.observed_model, "observed model")
+            if any(
+                0xD800 <= ord(character) <= 0xDFFF
+                for character in self.observed_model
+            ):
+                raise ValueError(
+                    "observed model must be a well-formed Unicode scalar sequence."
+                )
 
 
 class ExecutionFailedError(RuntimeError):

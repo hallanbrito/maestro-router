@@ -151,6 +151,7 @@ def create_app(
                 execution_request,
                 route_catalog,
                 locally_invalid_route_ids=locally_invalid_route_ids,
+                invalid_execution_route_ids=catalog_invalid_ids,
             )
         except InvalidDecisionError:
             return _internal_error(
@@ -268,7 +269,9 @@ async def _execute_selection(
     response = ExecutionSuccessResponse(
         result=ExecutionResult(content=result.content),
         decision=public_decision,
-        economics=_execution_economics(route, result.usage),
+        economics=_execution_economics(
+            route, result.usage, observed_model=result.observed_model
+        ),
     )
     return JSONResponse(
         status_code=200,
@@ -295,6 +298,8 @@ def _public_decision(decision: SelectedDecision) -> SelectedPublicDecision:
 def _execution_economics(
     route: Route,
     usage: NormalizedUsage | None = None,
+    *,
+    observed_model: str | None = None,
 ) -> ExecutionEconomics:
     estimate = route.estimate
     if estimate.status == "unavailable":
@@ -345,7 +350,8 @@ def _execution_economics(
     calculated_cost = calculate_post_execution_cost(
         route_id=route.id,
         provider=route.provider,
-        model=route.model,
+        configured_model=route.model,
+        observed_model=observed_model,
         estimate=estimate,
         usage=usage,
         reference=route.price_reference,

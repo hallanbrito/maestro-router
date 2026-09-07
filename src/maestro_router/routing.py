@@ -1,3 +1,10 @@
+"""Deterministic provider-neutral route eligibility and economic selection.
+
+Routing is deliberately pure: it evaluates validated request constraints and an
+immutable catalog snapshot, then returns either an explainable refusal or one
+internally validated selection.  It never calls a provider or mutates a route.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -36,6 +43,8 @@ class EconomicEstimate:
     non_comparability_reason: str | None = None
 
     def __post_init__(self) -> None:
+        """Enforce monetary, uncertainty, and comparability state invariants."""
+
         valued_fields = (self.amount, self.currency, self.price_reference)
         if self.status in {"available", "uncertain"}:
             if any(value is None for value in valued_fields) or self.assumptions is None:
@@ -80,12 +89,16 @@ class EconomicEstimate:
             raise ValueError("Non-comparable estimates require a reason.")
 
     def decimal_amount(self) -> Decimal:
+        """Return the exact amount used for comparison, or reject its absence."""
+
         if self.amount is None:
             raise ValueError("This estimate has no amount.")
         return Decimal(self.amount)
 
 
 def _default_estimate() -> EconomicEstimate:
+    """Create the explicit unavailable estimate used by unpriced routes."""
+
     return EconomicEstimate(
         status="unavailable",
         reason="Não há estimativa econômica disponível para a rota.",
@@ -93,11 +106,15 @@ def _default_estimate() -> EconomicEstimate:
 
 
 def _non_blank(value: str | None) -> bool:
+    """Return whether optional text contains a non-whitespace character."""
+
     return value is not None and any(not character.isspace() for character in value)
 
 
 @dataclass(frozen=True, slots=True)
 class Route:
+    """Immutable provider-neutral facts evaluated during route selection."""
+
     id: str
     provider: str
     model: str
@@ -110,6 +127,8 @@ class Route:
     price_reference: PriceReference | None = None
 
     def __post_init__(self) -> None:
+        """Validate route identity and the optional neutral price reference."""
+
         for field_name, value in (
             ("Route IDs", self.id),
             ("Provider IDs", self.provider),
@@ -141,6 +160,8 @@ class RouteCatalog:
         *,
         configuration_invalid_route_ids: Iterable[str] = (),
     ) -> None:
+        """Freeze executable routes and separately tracked invalid route IDs."""
+
         snapshot = tuple(routes)
         route_ids = [route.id for route in snapshot]
         if len(route_ids) != len(set(route_ids)):
@@ -164,11 +185,15 @@ class RouteCatalog:
         self.configuration_invalid_route_ids = frozenset(invalid_ids)
 
     def snapshot(self) -> tuple[Route, ...]:
+        """Return the immutable route tuple used for one routing evaluation."""
+
         return self._routes
 
 
 @dataclass(frozen=True, slots=True)
 class Exclusion:
+    """First applicable reason why one route cannot enter selection."""
+
     route_id: str
     reason: str
     category: FactorCategory
@@ -191,6 +216,8 @@ class SelectedDecision:
 
     @property
     def route(self) -> Route:
+        """Return the single route carried by a validated selection."""
+
         if len(self.selected_routes) != 1:
             raise ValueError("A validated selection must contain exactly one route.")
         return self.selected_routes[0]
@@ -243,6 +270,7 @@ def route_request(
     the request snapshot and remain distinct sanitized causes of
     ``invalid_route``.
     """
+
     constraints = request.constraints
     allowed_route_ids = (
         frozenset(constraints.allowed_route_ids)
@@ -258,6 +286,8 @@ def route_request(
 
     exclusions: list[Exclusion] = []
     candidates: list[Route] = []
+    # Stable route-id order makes both the selected result and its explanations
+    # independent of catalog insertion order.
     for route in sorted(catalog.snapshot(), key=lambda item: item.id):
         exclusion = _first_implemented_exclusion(
             route,
@@ -273,6 +303,9 @@ def route_request(
             exclusions.append(exclusion)
 
     catalog_route_ids = {route.id for route in catalog.snapshot()}
+    # Multiroute bootstrap can preserve the identity of a malformed local entry
+    # without constructing it as an executable Route.  Keep that exclusion in
+    # the decision explanation even though it is absent from the catalog tuple.
     for invalid_id in sorted(locally_invalid_route_ids):
         if invalid_id not in catalog_route_ids:
             exclusions.append(
@@ -302,8 +335,12 @@ def _evaluate_economics(
     candidates: list[Route],
     exclusions: list[Exclusion],
 ) -> RefusalResponse | SelectedDecision:
+    """Apply economic gates and proceed to deterministic selection when safe."""
+
     limit = request.constraints.max_estimated_cost if request.constraints else None
     if limit is None:
+        # With one eligible route there is nothing to compare, so missing price
+        # information cannot alter which route wins.
         if len(candidates) == 1:
             route = candidates[0]
             context = _selection_context(
@@ -334,6 +371,8 @@ def _evaluate_economics(
             )
             return _validate_selection(context, decision)
 
+        # Multiple candidates require comparable available estimates; otherwise
+        # lowest-estimated-cost has no defensible ordering to apply.
         comparable = [
             route
             for route in candidates
@@ -353,6 +392,8 @@ def _evaluate_economics(
         )
         return _select_lowest_cost(context, exclusions)
 
+    # A ceiling requires each winning route to prove amount, comparability, and
+    # matching currency before it can be considered admissible.
     ceiling = Decimal(limit.amount)
     admissible: list[Route] = []
     indeterminate: list[Route] = []
@@ -431,6 +472,8 @@ def _selection_context(
     candidates: list[Route],
     exclusions: list[Exclusion],
 ) -> _SelectionContext:
+    """Freeze authoritative candidate sets and constraints before selection."""
+
     constraints = request.constraints
     limit = constraints.max_estimated_cost if constraints else None
     ordered_candidates = tuple(sorted(candidates, key=lambda route: route.id))
@@ -507,6 +550,8 @@ def _select_lowest_cost(
     context: _SelectionContext,
     exclusions: list[Exclusion],
 ) -> SelectedDecision:
+    """Select the minimum exact estimate and break numeric ties by route ID."""
+
     minimum = min(
         route.estimate.decimal_amount() for route in context.compared_routes
     )
@@ -515,6 +560,8 @@ def _select_lowest_cost(
         for route in context.compared_routes
         if route.estimate.decimal_amount() == minimum
     ]
+    # Decimal establishes numeric equality; Unicode lexicographic route ID is
+    # the approved deterministic tie-breaker.
     selected = min(tied, key=lambda route: route.id)
     removed = [
         route
@@ -573,6 +620,12 @@ def _select_lowest_cost(
 def _validate_selection(
     context: _SelectionContext, decision: SelectedDecision
 ) -> SelectedDecision:
+    """Recheck a proposed selection against frozen authoritative facts.
+
+    This defensive pass ensures strategy construction cannot silently change
+    candidate sets, constraints, estimates, ordering, or the tie-break rule.
+    """
+
     if len(decision.selected_routes) != 1:
         raise InvalidDecisionError("Selection must contain exactly one route.")
     selected = decision.selected_routes[0]
@@ -687,6 +740,8 @@ def _validate_selection(
 def _expected_selection_explanation(
     context: _SelectionContext, selected: Route
 ) -> tuple[str, tuple[DecisionFactor, ...]]:
+    """Derive the authoritative selection reason and determining factors."""
+
     factors = _factors(list(context.exclusions)) if context.exclusions else []
     if context.max_estimated_cost is None and len(context.candidates) == 1:
         factors.append(
@@ -770,6 +825,8 @@ def _expected_refusal_explanation(
     str,
     list[DecisionFactor],
 ]:
+    """Derive the authoritative refusal code, message, reason, and factors."""
+
     _validate_refusal_context(context)
     exclusions = list(context.exclusions)
     if context.kind == "no_candidates":
@@ -837,6 +894,8 @@ def _expected_refusal_explanation(
 
 
 def _validate_refusal_context(context: _RefusalContext) -> None:
+    """Validate that refusal context invariants match the authoritative facts."""
+
     limit = (
         context.request.constraints.max_estimated_cost
         if context.request.constraints
@@ -901,6 +960,8 @@ def _validate_refusal_context(context: _RefusalContext) -> None:
 
 
 def _selected_estimate_factor(route: Route, ceiling: str) -> DecisionFactor:
+    """Explain why the selected route proved compliance with a cost ceiling."""
+
     estimate = route.estimate
     assert estimate.amount is not None
     assert estimate.currency is not None
@@ -921,6 +982,8 @@ def _economic_information_refusal(
     exclusions: list[Exclusion],
     candidates: list[Route],
 ) -> RefusalResponse:
+    """Build a refusal for insufficient comparable economic information."""
+
     return _validated_refusal(
         _RefusalContext(
             request=request,
@@ -932,6 +995,8 @@ def _economic_information_refusal(
 
 
 def _validated_refusal(context: _RefusalContext) -> RefusalResponse:
+    """Assemble one explainable refusal and validate it against authoritative facts."""
+
     code, message, reason, factors = _expected_refusal_explanation(context)
     applied_constraints = _request_constraints(context.request)
     applied_constraints.extend(_configuration_constraints(list(context.exclusions)))
@@ -950,6 +1015,8 @@ def _validated_refusal(context: _RefusalContext) -> RefusalResponse:
 def _validate_refusal(
     context: _RefusalContext, response: RefusalResponse
 ) -> RefusalResponse:
+    """Validate that a constructed refusal matches its expected explanation."""
+
     code, message, reason, factors = _expected_refusal_explanation(context)
     expected_constraints = _request_constraints(context.request)
     expected_constraints.extend(_configuration_constraints(list(context.exclusions)))
@@ -970,6 +1037,8 @@ def _validate_refusal(
 def _estimate_factor(
     route: Route, required_currency: str | None = None
 ) -> DecisionFactor:
+    """Explain the availability and comparability of one route estimate."""
+
     estimate = route.estimate
     if estimate.status == "unavailable":
         return DecisionFactor(
@@ -1014,6 +1083,8 @@ def _estimate_factor(
 
 
 def _currency_factor(route: Route) -> DecisionFactor:
+    """Explain why one available estimate cannot cross currency boundaries."""
+
     estimate = route.estimate
     assert estimate.amount is not None
     assert estimate.currency is not None
@@ -1030,6 +1101,8 @@ def _currency_factor(route: Route) -> DecisionFactor:
 
 
 def _ceiling_violation_factor(route: Route, ceiling: str) -> DecisionFactor:
+    """Explain that one comparable estimate exceeded the request ceiling."""
+
     estimate = route.estimate
     assert estimate.amount is not None
     assert estimate.currency is not None
@@ -1053,6 +1126,12 @@ def _first_implemented_exclusion(
     required_capabilities: frozenset[str],
     required_quality: frozenset[str],
 ) -> Exclusion | None:
+    """Return the first applicable non-economic exclusion in normative order.
+
+    Returning immediately is intentional: one stable primary reason explains
+    each excluded route even when several conditions would reject it.
+    """
+
     if not route.enabled:
         return Exclusion(
             route.id,
@@ -1109,6 +1188,8 @@ def _first_implemented_exclusion(
 
 
 def _request_constraints(request: ExecutionRequest) -> list[AppliedConstraint]:
+    """Project supplied request constraints into deterministic explanations."""
+
     constraints = request.constraints
     if constraints is None:
         return []
@@ -1167,6 +1248,8 @@ def _request_constraints(request: ExecutionRequest) -> list[AppliedConstraint]:
 def _configuration_constraints(
     exclusions: list[Exclusion],
 ) -> list[AppliedConstraint]:
+    """Project configuration-owned exclusions into applied constraints."""
+
     constraints: list[AppliedConstraint] = []
     for exclusion in exclusions:
         if exclusion.reason == "disabled_route":
@@ -1201,6 +1284,8 @@ def _configuration_constraints(
 
 
 def _factors(exclusions: list[Exclusion]) -> list[DecisionFactor]:
+    """Convert route exclusions into public decision factors."""
+
     if not exclusions:
         return [
             DecisionFactor(

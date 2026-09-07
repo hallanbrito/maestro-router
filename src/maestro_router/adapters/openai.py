@@ -1,3 +1,5 @@
+"""OpenAI Responses API implementation of the neutral execution boundary."""
+
 from __future__ import annotations
 
 from openai import (
@@ -40,6 +42,8 @@ class OpenAIResponsesAdapter:
         *,
         retry_policy_configured: bool = False,
     ) -> None:
+        """Store an explicitly constructed asynchronous OpenAI client."""
+
         # Freeze the retry policy once when the adapter joins the application
         # snapshot. Rebuilding SDK options per request could re-read process state.
         self._client = (
@@ -51,7 +55,16 @@ class OpenAIResponsesAdapter:
     async def execute(
         self, request: TextExecutionRequest, route: ExecutionRoute
     ) -> TextExecutionResult:
+        """Execute the selected model and translate failures to neutral errors.
+
+        The adapter does not select routes, infer prices, or expose provider
+        payloads.  It sends one non-streaming Responses API request and returns
+        only validated text and normalized usage.
+        """
+
         try:
+            # SDK retries are disabled (max_retries=0) when the adapter is initialized
+            # to guarantee that the core's single execution authorization is respected.
             response = await self._client.responses.create(
                 model=route.model,
                 input=_response_input(request),
@@ -70,12 +83,16 @@ class OpenAIResponsesAdapter:
         except OpenAIError as error:
             raise ExecutionFailedError(_FAILED_MESSAGE) from error
         except Exception as error:
+            # Unexpected SDK shapes must cross the boundary as the same
+            # sanitized provider-neutral failure, never as raw provider data.
             raise ExecutionFailedError(_FAILED_MESSAGE) from error
 
         return _normalize_response(response)
 
 
 def _response_input(request: TextExecutionRequest) -> list[dict[str, object]]:
+    """Build the narrow Responses API input supported by the MVP."""
+
     content = [{"type": "input_text", "text": request.task}]
     if request.context is not None:
         content.append({"type": "input_text", "text": request.context})
@@ -83,6 +100,8 @@ def _response_input(request: TextExecutionRequest) -> list[dict[str, object]]:
 
 
 def _normalize_response(response: object) -> TextExecutionResult:
+    """Validate a completed text response and project it into the core model."""
+
     try:
         if getattr(response, "status", None) != "completed":
             raise ExecutionFailedError(_FAILED_MESSAGE)
@@ -106,6 +125,13 @@ def _normalize_response(response: object) -> TextExecutionResult:
 
 
 def _normalize_usage(response: object) -> NormalizedUsage:
+    """Map supported OpenAI token counters to provider-neutral usage units.
+
+    Complete input and output counts become ``available`` usage.  One valid
+    count becomes ``uncertain`` usage, while absent or malformed counts become
+    ``unavailable`` rather than being guessed.
+    """
+
     usage = _read_attribute(response, "usage")
     if usage is _MISSING or usage is None:
         return NormalizedUsage(
@@ -138,6 +164,12 @@ def _normalize_usage(response: object) -> NormalizedUsage:
 
 
 def _normalize_observed_model(response: object) -> str | None:
+    """Extract and validate the model identifier reported by the provider.
+
+    Returns the model string if it is non-blank and free of isolated Unicode
+    surrogates; otherwise returns None so post-execution validation rejects
+    unverifiable model identities.
+    """
     model = _read_attribute(response, "model")
     if (
         isinstance(model, str)
@@ -149,6 +181,8 @@ def _normalize_observed_model(response: object) -> str | None:
 
 
 def _read_attribute(value: object, name: str) -> object:
+    """Read an SDK attribute without letting hostile accessors escape."""
+
     try:
         return getattr(value, name)
     except Exception:
@@ -156,6 +190,8 @@ def _read_attribute(value: object, name: str) -> object:
 
 
 def _has_valid_text_output(output: list[object]) -> bool:
+    """Confirm that the provider output contains structurally valid text."""
+
     found_text = False
     for item in output:
         if getattr(item, "type", None) != "message":

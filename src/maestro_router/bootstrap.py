@@ -1,3 +1,11 @@
+"""Explicit OpenAI runtime composition for the Maestro Router MVP.
+
+This module is the only place that reads OpenAI-oriented operational settings.
+It validates either the legacy single-route variables or the multiroute JSON,
+constructs immutable neutral routes, and injects one shared OpenAI adapter into
+the otherwise unconfigured application factory.
+"""
+
 from __future__ import annotations
 
 import json
@@ -58,7 +66,11 @@ _OPENAI_CUSTOM_HEADERS = "OPENAI_CUSTOM_HEADERS"
 
 
 class InvalidRuntimeConfigurationError(ValueError):
+    """Identify one invalid runtime variable without exposing its raw value."""
+
     def __init__(self, variable_name: str, *, invalid_optional: bool = False) -> None:
+        """Build a sanitized message for a missing or malformed variable."""
+
         self.variable_name = variable_name
         message = (
             f"{variable_name} contém uma configuração inválida."
@@ -69,11 +81,17 @@ class InvalidRuntimeConfigurationError(ValueError):
 
 
 class _DuplicateJsonMemberError(ValueError):
+    """Internal signal raised when strict JSON contains a duplicate member."""
+
     pass
 
 
 class DuplicateTrackingDict(dict):
+    """Dictionary created by ``json.loads`` that remembers duplicate keys."""
+
     def __init__(self, pairs: list[tuple[str, Any]]) -> None:
+        """Keep the final JSON values and separately record repeated names."""
+
         self.duplicate_keys = set()
         d = {}
         for k, v in pairs:
@@ -84,6 +102,8 @@ class DuplicateTrackingDict(dict):
 
 
 def _nested_has_duplicates(obj: Any) -> bool:
+    """Recursively detect duplicate members captured anywhere in parsed JSON."""
+
     if isinstance(obj, DuplicateTrackingDict):
         if obj.duplicate_keys:
             return True
@@ -94,6 +114,8 @@ def _nested_has_duplicates(obj: Any) -> bool:
 
 
 def _is_structurally_valid_string(val: Any) -> bool:
+    """Accept non-blank Unicode strings that contain no lone surrogates."""
+
     return (
         isinstance(val, str)
         and any(not c.isspace() for c in val)
@@ -106,7 +128,25 @@ def create_openai_app(
     *,
     client_factory: Callable[..., AsyncOpenAI] = AsyncOpenAI,
 ) -> FastAPI:
+    """Validate OpenAI settings and compose an executable Maestro application.
+
+    Presence of ``MAESTRO_OPENAI_ROUTES_JSON`` selects multiroute mode and makes
+    legacy route variables invalid.  Otherwise, the original single-route mode
+    remains supported.  The client is constructed only after all applicable
+    configuration has passed validation.
+
+    Args:
+        configuration: Explicit runtime settings, normally environment values.
+        client_factory: Injectable OpenAI client constructor used by tests.
+
+    Raises:
+        InvalidRuntimeConfigurationError: If required configuration is missing,
+            ambiguous, structurally invalid, or economically incomplete.
+    """
+
     if _OPENAI_ROUTES_JSON in configuration:
+        # One client and adapter serve every configured OpenAI route; model
+        # identity still remains attached to each neutral Route snapshot.
         api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
         adapter = _create_openai_adapter(api_key, client_factory)
         return create_app(
@@ -138,6 +178,8 @@ def create_openai_app(
 
 
 def create_openai_app_from_env() -> FastAPI:
+    """Compose the OpenAI runtime from only the recognized environment keys."""
+
     configuration = {
         name: os.environ[name]
         for name in (*_REQUIRED_VARIABLES, *_OPTIONAL_VARIABLES, _OPENAI_ROUTES_JSON)
@@ -150,6 +192,12 @@ def _create_openai_adapter(
     api_key: str,
     client_factory: Callable[..., AsyncOpenAI],
 ) -> OpenAIResponsesAdapter:
+    """Construct an OpenAI adapter isolated from ambient SDK options.
+
+    Unsupported options are explicitly overridden or neutralized so ambient
+    SDK variables cannot affect the captured client, without mutating the
+    process environment.
+    """
     # The official SDK otherwise infers several unsupported options from the
     # process environment. All supported inputs are supplied explicitly here.
     client = client_factory(
@@ -193,6 +241,8 @@ def _unapproved_openai_header_omissions(api_key: str) -> dict[str, object]:
 def _validated_configuration(
     configuration: Mapping[str, str],
 ) -> tuple[str, str, str, PriceReference | None, EconomicEstimate]:
+    """Validate legacy single-route configuration and derive its estimate."""
+
     values: list[str] = []
     for variable_name in _REQUIRED_VARIABLES:
         value = configuration.get(variable_name)
@@ -218,6 +268,8 @@ def _validated_configuration(
         ),
     )
     if _OPENAI_ESTIMATED_USAGE_JSON in configuration:
+        # A usage forecast alone is not monetary.  It becomes an estimate only
+        # when the same route also has a complete approved price reference.
         quantities = _parse_estimated_usage(
             configuration[_OPENAI_ESTIMATED_USAGE_JSON]
         )
@@ -256,6 +308,14 @@ def _validated_configuration(
 def _validated_multiroute_configuration(
     configuration: Mapping[str, str],
 ) -> tuple[str, list[Route], list[str]]:
+    """Validate multiroute JSON and return usable routes plus local exclusions.
+
+    Document-wide ambiguity, such as duplicate route identifiers or mixing
+    legacy settings, invalidates startup.  A malformed individual route with a
+    trustworthy unique ``route_id`` is excluded locally when at least one other
+    complete route remains usable.
+    """
+
     api_key = configuration.get(_OPENAI_API_KEY)
     if not isinstance(api_key, str) or not any(not c.isspace() for c in api_key):
         raise InvalidRuntimeConfigurationError(_OPENAI_API_KEY)
@@ -309,6 +369,8 @@ def _validated_multiroute_configuration(
     if len(route_ids) != len(set(route_ids)):
         raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
 
+    # Models and price-reference identifiers are collected before local route
+    # validation because their uniqueness is a document-wide invariant.
     models = []
     price_ref_ids = []
     for route_entry in routes_list:
@@ -341,6 +403,8 @@ def _validated_multiroute_configuration(
         route_id = route_entry["route_id"]
         local_failed = False
 
+        # From this point onward, failures belong to a known unique route and can
+        # be represented as an explicit configuration exclusion.
         if _nested_has_duplicates(route_entry):
             local_failed = True
 
@@ -427,11 +491,14 @@ def _validated_multiroute_configuration(
     if num_valid_routes == 0:
         raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
 
+    # Canonical ordering makes selection inputs independent of JSON array order.
     routes.sort(key=lambda r: r.id)
     return api_key, routes, configuration_invalid_route_ids
 
 
 def _parse_estimated_usage(raw_value: object) -> dict[str, int]:
+    """Parse the closed, positive two-unit operator usage forecast."""
+
     try:
         if not isinstance(raw_value, str) or not any(
             not character.isspace() for character in raw_value
@@ -464,6 +531,8 @@ def _parse_estimated_usage(raw_value: object) -> dict[str, int]:
 
 
 def _estimated_usage_assumption(unit: str, quantity: int) -> str:
+    """Describe one operator-supplied forecast quantity in public language."""
+
     return (
         f"A estimativa considera {quantity} unidades de {unit} "
         "configuradas pelo operador."
@@ -476,6 +545,13 @@ def _parse_price_reference(
     route_id: str,
     model: str,
 ) -> PriceReference:
+    """Parse one closed and fully confirmed operator price reference.
+
+    The parser accepts no partial completeness state: every approved evidence
+    flag must be explicitly true and rates must cover exactly the two units in
+    the first cost policy.
+    """
+
     try:
         if not isinstance(raw_value, str) or not any(
             not character.isspace() for character in raw_value
@@ -542,6 +618,8 @@ def _parse_price_reference(
 def _object_without_duplicate_members(
     pairs: list[tuple[str, Any]],
 ) -> dict[str, Any]:
+    """Construct a strict JSON object or reject its first duplicate member."""
+
     result: dict[str, Any] = {}
     for name, value in pairs:
         if name in result:
@@ -551,16 +629,22 @@ def _object_without_duplicate_members(
 
 
 def _reject_non_json_constant(_: str) -> None:
+    """Reject NaN and infinity spellings accepted by Python's JSON parser."""
+
     raise ValueError
 
 
 def _is_non_blank_string(value: object) -> bool:
+    """Return whether a value is a string with visible content."""
+
     return isinstance(value, str) and any(
         not character.isspace() for character in value
     )
 
 
 def _parse_unit_price(value: object) -> UnitPrice:
+    """Parse one closed rate entry for a currently supported usage unit."""
+
     if not isinstance(value, dict) or set(value) != _RATE_FIELDS:
         raise ValueError
     unit = value["unit"]

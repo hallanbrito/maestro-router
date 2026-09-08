@@ -176,7 +176,7 @@ Regras normativas do documento global:
 
 ### 10.1 Exemplo completo de rota estendida em `MAESTRO_OPENAI_ROUTES_JSON`
 
-O fragmento abaixo ilustra uma rota completa e sanitizada respeitando simultaneamente as ADRs 0006, 0007, 0008 e 0009:
+O documento de exemplo abaixo ilustra uma rota completa e sanitizada respeitando simultaneamente as ADRs 0006, 0007, 0008 e 0009:
 
 ```json
 {
@@ -313,7 +313,7 @@ Tratamento da rota afetada:
 ## 14. Snapshot e imutabilidade
 
 1. **Captura única:** A fábrica da aplicação captura as variáveis do ambiente uma única vez no bootstrap. Ambas as variáveis (`MAESTRO_OPENAI_ROUTES_JSON` e `MAESTRO_ROUTING_CONSTRAINTS_JSON`) são parseadas e validadas a partir dessa captura única.
-2. **Congelamento imutável:** Todas as rotas válidas, associações, capacidades, qualidades, referências de evidência, requisitos obrigatórios globais, allowlist global, múltiplos tetos, defaults e fatos econômicos são convertidos em estruturas imutáveis em memória (`tuple`, `frozenset`).
+2. **Congelamento imutável:** Todas as rotas válidas, associações, capacidades, qualidades, referências de evidência, requisitos obrigatórios globais, allowlist global, múltiplos tetos, defaults e fatos econômicos serão materializados em estruturas imutáveis ou cópias defensivas equivalentes. Na implementação Python atual, `tuple` e `frozenset` são opções possíveis, mas esta ADR não transforma tipos concretos da linguagem em requisito arquitetural.
 3. **Independência de ambiente:** Alterações posteriores nas variáveis de ambiente do processo não afetam uma aplicação já inicializada.
 4. **Determinismo:** O mesmo par de documentos JSON produzirá sempre o mesmo snapshot ordenado (ordenado por `route_id` via valores escalares Unicode). A mesma solicitação avaliada contra o mesmo snapshot produzirá deterministicamente a mesma decisão, os mesmos fatores e a mesma explicação.
 
@@ -388,8 +388,18 @@ A explicabilidade das decisões utiliza exclusivamente o contrato público exist
    * Não é permitida a criação de origens sintéticas como `source = "combined"`. Se uma capacidade foi exigida tanto pela configuração global quanto pela requisição, ambas são projetadas como itens distintos em `applied_constraints`.
    * A redução interna de tetos na mesma moeda não apaga a origem de cada limite: tanto o teto da requisição quanto o teto da configuração são mantidos na explicação se tiverem sido determinantes.
 2. **Projeção em `decision.factors`:**
-   * Fatores explicativos usam as categorias públicas já aprovadas: `route`, `capability`, `quality`, `availability`, `preference`, `economics`, `strategy`, `tie_breaker`.
-   * Quando a exclusão ou seleção envolver critérios de qualidade, o array `references` de `DecisionFactor` é preenchido com as `evidence_references` configuradas na rota para aquele critério, assegurando transparência auditável sem expor o conteúdo bruto de benchmarks.
+   * Fatores explicativos usam as categorias públicas já aprovadas para `DecisionFactor`:
+     * `route`;
+     * `capability`;
+     * `quality`;
+     * `availability`;
+     * `preference`;
+     * `economics`;
+     * `configuration`;
+     * `strategy`;
+     * `tie_breaker`.
+     (Essa especificação aplica-se estritamente às categorias de `DecisionFactor`; `configuration` não é adicionada às categorias de `AppliedConstraint`, cujo contrato em `docs/05-API.md` permanece distinto e inalterado).
+   * Quando referências forem necessárias para compreender um fator determinante de qualidade, `DecisionFactor.references` será preenchido com as `evidence_references` aplicáveis da rota. A projeção não expõe o conteúdo bruto das evidências e não torna `references` obrigatório em fatores nos quais essas referências não sejam necessárias para compreender a decisão. Permanece preservada separadamente a regra operacional de que todo critério declarado pela rota deve possuir ao menos uma referência configurada.
 
 ## 19. Compatibilidade com a ADR 0008
 
@@ -426,9 +436,9 @@ A explicabilidade das decisões utiliza exclusivamente o contrato público exist
 ## 22. Consequências positivas
 
 * **Resolução documental de G01:** Fecha a especificação necessária para governança de restrições operacionais sem ambiguidades de arquitetura.
-* **Neutralidade e controle:** O operador passa a dispor de mecanismos formais para impor requisitos corporativos (capacidades e qualidades mínimas) independentemente do comportamento das aplicações clientes.
-* **Auditabilidade por evidências:** Critérios de qualidade passam a ser acompanhados de referências explícitas de evidência, atendendo diretamente ao princípio do Manifesto.
-* **Isolamento de falhas:** Rotas individuais com definições malformadas de capacidade ou qualidade podem ser isoladas sem derrubar o serviço, desde que o restante da configuração seja suficiente.
+* **Neutralidade e controle:** A implementação futura permitirá ao operador impor requisitos mínimos de capacidade e qualidade sem depender das restrições enviadas pelas aplicações clientes.
+* **Auditabilidade por evidências:** O schema aprovado exige que cada critério de qualidade declarado seja acompanhado de referências explícitas de evidência.
+* **Isolamento de falhas:** A implementação futura poderá isolar rotas com capacidades ou critérios de qualidade malformados, desde que o restante da configuração preserve um universo confiável e ao menos uma rota localmente válida.
 * **Evolução segura:** Prepara a base exata para a implementação executável na W20, sem improvisações em tempo de código.
 
 ## 23. Consequências negativas
@@ -446,15 +456,15 @@ A explicabilidade das decisões utiliza exclusivamente o contrato público exist
 
 ## 25. Alternativas rejeitadas
 
-1. **Incorporar políticas globais dentro de `MAESTRO_OPENAI_ROUTES_JSON`:** Rejeitada por acoplar governança global a um documento específico de um único provedor, ferindo o princípio de neutralidade arquitetural.
+1. **Incorporar políticas globais dentro de `MAESTRO_OPENAI_ROUTES_JSON`:** rejeitada porque acoplaria a política global a uma entrada nominalmente específica da OpenAI e dificultaria sua reutilização em futuras composições, sem que isso signifique que a alternativa violaria automaticamente a neutralidade do núcleo.
 2. **Omitir configuração global e fechar apenas capacidades por rota:** Rejeitada por deixar a lacuna G01 sem resolução completa e adiar decisões de defaults e monotonicidade.
-3. **Critérios de qualidade sem referência de evidência:** Rejeitada por violar frontalmente o princípio de qualidade sustentada por evidências estabelecido no Manifesto (`docs/00-MANIFESTO.md`).
+3. **Critérios de qualidade sem referência de evidência associada:** rejeitada porque o Product Owner aprovou associação explícita por critério, fortalecendo a auditabilidade e evitando declarações operacionais sem sustentação identificável.
 4. **Estrutura separada para catálogo de evidências desvinculada dos critérios:** Rejeitada por adicionar complexidade relacional desnecessária ao MVP e risco de referências órfãs.
 5. **Permitir moedas duplicadas no array global de tetos:** Rejeitada por criar ambiguidade na declaração do operador; a duplicação deve falhar cedo.
-6. **Limitar todo o snapshot a uma única moeda:** Rejeitada por impedir que diferentes rotas operem em moedas distintas quando não houver teto conflitante.
+6. **Exigir uma única moeda em `max_estimated_costs`:** rejeitada porque o Product Owner aprovou a presença de tetos globais em moedas diferentes, com aplicação cumulativa e indeterminação quando não houver base comparável.
 7. **Eliminar valores padrão (`defaults`):** Rejeitada por ignorar o requisito aprovado desde a arquitetura conceitual (`docs/03-ARQUITETURA.md`, seção 10).
-8. **Aplicar a nova configuração ao modo legado de rota única:** Rejeitada por violar o princípio de estabilidade do modo legado e exigir criação de múltiplas variáveis primitivas ad hoc.
-9. **Adoção de YAML, TOML, arquivos externos ou bancos de dados:** Rejeitada por violar a decisão de manter configuração estritamente via variáveis de ambiente com JSON UTF-8 fechado.
+8. **Aplicar a nova configuração ao modo legado de rota única:** rejeitada nesta fatia porque o modo legado não possui o novo schema de metadados por rota e seu suporte ampliaria a W20 além do mínimo aprovado. Configurações legadas permanecem inalteradas quando a nova variável está ausente.
+9. **Adotar YAML, TOML, arquivo externo, banco de dados ou serviço remoto:** rejeitada para esta fatia por simplicidade, coerência com a composição operacional existente e ausência de necessidade demonstrada.
 10. **Conversão cambial implícita ou orçamentos acumulados:** Rejeitada por estar categoricamente fora do escopo do MVP.
 11. **Alteração do contrato público ou acréscimo de campos na API:** Rejeitada por desrespeitar a precedência rígida de `docs/05-API.md`.
 

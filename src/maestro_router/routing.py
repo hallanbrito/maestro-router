@@ -191,17 +191,19 @@ class Route:
             self.price_reference, PriceReference
         ):
             raise ValueError("Route price reference must be provider-neutral.")
+        frozen_refs: dict[str, tuple[str, ...]] = {}
         if self.quality_evidence_references:
             for crit, refs in self.quality_evidence_references.items():
                 if not _non_blank(crit):
                     raise ValueError("Quality criteria must be non-blank.")
                 if not refs or any(not _non_blank(r) for r in refs):
                     raise ValueError("Evidence references must be non-blank.")
-            object.__setattr__(
-                self,
-                "quality_evidence_references",
-                MappingProxyType(dict(self.quality_evidence_references)),
-            )
+                frozen_refs[crit] = tuple(sorted(refs))
+        object.__setattr__(
+            self,
+            "quality_evidence_references",
+            MappingProxyType(frozen_refs),
+        )
 
 
 class RouteCatalog:
@@ -602,7 +604,8 @@ def _quality_factors(
     factors: list[DecisionFactor] = []
     if required_quality:
         for criterion in sorted(required_quality):
-            refs = list(route.quality_evidence_references.get(criterion, ()))
+            raw_refs = route.quality_evidence_references.get(criterion, ())
+            refs = list(sorted(raw_refs))
             factors.append(
                 DecisionFactor(
                     category="quality",
@@ -1360,13 +1363,18 @@ def _expected_refusal_explanation(
         for route in context.candidates:
             estimate = route.estimate
             if (
-                estimate.status != "available"
-                or not estimate.comparable
-                or estimate.currency not in effective_ceilings_map
-                or len(effective_ceilings_map) > 1
-                or estimate.decimal_amount()
-                <= effective_ceilings_dec[estimate.currency]
+                estimate.status == "available"
+                and estimate.comparable
+                and estimate.currency in effective_ceilings_dec
+                and estimate.decimal_amount()
+                > effective_ceilings_dec[estimate.currency]
             ):
+                factors.append(
+                    _ceiling_violation_factor(
+                        route, effective_ceilings_map[estimate.currency]
+                    )
+                )
+            else:
                 missing = sorted(
                     c for c in effective_ceilings_map if c != estimate.currency
                 )
@@ -1376,12 +1384,6 @@ def _expected_refusal_explanation(
                     else (", ".join(missing) if missing else None)
                 )
                 factors.append(_estimate_factor(route, req_c))
-            else:
-                factors.append(
-                    _ceiling_violation_factor(
-                        route, effective_ceilings_map[estimate.currency]
-                    )
-                )
     else:
         comparable = [
             route
@@ -1445,6 +1447,15 @@ def _validate_refusal_context(context: _RefusalContext) -> None:
         raise InvalidDecisionError("Unknown authoritative refusal kind.")
 
     if effective_ceilings_dec:
+        conclusive_violation = [
+            route
+            for route in context.candidates
+            if route.estimate.status == "available"
+            and route.estimate.comparable
+            and route.estimate.currency in effective_ceilings_dec
+            and route.estimate.decimal_amount()
+            > effective_ceilings_dec[route.estimate.currency]
+        ]
         admissible = [
             route
             for route in context.candidates
@@ -1458,10 +1469,7 @@ def _validate_refusal_context(context: _RefusalContext) -> None:
         indeterminate = [
             route
             for route in context.candidates
-            if route.estimate.status != "available"
-            or not route.estimate.comparable
-            or route.estimate.currency not in effective_ceilings_dec
-            or len(effective_ceilings_dec) > 1
+            if route not in conclusive_violation and route not in admissible
         ]
         if admissible or not indeterminate:
             raise InvalidDecisionError(

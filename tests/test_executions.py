@@ -1336,6 +1336,201 @@ def test_exactly_one_call_to_selected_route_on_success() -> None:
     route_b = configured_route("route-b", estimate=available("0.0080", "USD"))
     catalog = RouteCatalog([route_a, route_b])
     adapter_a = CountingAdapter()
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_request_ceiling_more_restrictive_takes_effect() -> None:
+    route_a = configured_route("route-a", estimate=available("0.0150"))
+    catalog = RouteCatalog(
+        [route_a],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(MoneyCeiling("0.0200", "USD"),)
+        ),
+    )
+    client = client_with_catalog(catalog)
+
+    response = client.post(
+        "/v1/executions",
+        json={
+            "task": "Run.",
+            "constraints": {"max_estimated_cost": {"amount": "0.0100", "currency": "USD"}},
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_multi_currency_ceilings_conclusive_violation() -> None:
+    route_a = configured_route("route-a", estimate=available("0.0200", "USD"))
+    catalog = RouteCatalog(
+        [route_a],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(
+                MoneyCeiling("0.0100", "USD"),
+                MoneyCeiling("0.0100", "EUR"),
+            )
+        ),
+    )
+    client = client_with_catalog(catalog)
+
+    response = client.post("/v1/executions", json={"task": "Run."})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_multi_currency_ceilings_indeterminate_scenario() -> None:
+    route_a = configured_route("route-a", estimate=available("0.0050", "USD"))
+    catalog = RouteCatalog(
+        [route_a],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(
+                MoneyCeiling("0.0100", "USD"),
+                MoneyCeiling("0.0100", "EUR"),
+            )
+        ),
+    )
+    client = client_with_catalog(catalog)
+
+    response = client.post("/v1/executions", json={"task": "Run."})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INSUFFICIENT_ECONOMIC_INFORMATION"
+
+
+def test_multi_currency_ceilings_admissible_route_wins_over_indeterminate() -> None:
+    route_a = configured_route("route-a", estimate=available("0.0050", "USD"))
+    route_b = configured_route(
+        "route-b",
+        estimate=EconomicEstimate(
+            status="available",
+            amount="0.0020",
+            currency="USD",
+            price_reference="ref-b",
+            assumptions=(),
+            comparable=False,
+            non_comparability_reason="Base não comparável.",
+        ),
+    )
+    catalog = RouteCatalog(
+        [route_a, route_b],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(MoneyCeiling("0.0100", "USD"),)
+        ),
+    )
+    client = client_with_catalog(catalog)
+
+    response = client.post("/v1/executions", json={"task": "Run."})
+    assert response.status_code == 200
+    res = response.json()
+    assert res["decision"]["route"]["id"] == "route-a"
+
+
+def test_determinism_under_permutations() -> None:
+    route_a = configured_route(
+        "route-a",
+        estimate=available("0.0050", "USD"),
+        capabilities=frozenset({"fast", "vision"}),
+        quality_criteria=frozenset({"code", "math"}),
+        quality_evidence_references={"code": ("ref-c1", "ref-c2"), "math": ("ref-m1",)},
+    )
+    route_b = configured_route(
+        "route-b",
+        estimate=available("0.0060", "USD"),
+        capabilities=frozenset({"fast", "vision"}),
+        quality_criteria=frozenset({"code", "math"}),
+        quality_evidence_references={"code": ("ref-c1", "ref-c2"), "math": ("ref-m1",)},
+    )
+
+    catalog_1 = RouteCatalog(
+        [route_a, route_b],
+        operational_constraints=OperationalConstraints(
+            required_capabilities=frozenset({"vision", "fast"}),
+            required_quality_criteria=frozenset({"math", "code"}),
+            max_estimated_costs=(
+                MoneyCeiling("0.0100", "USD"),
+                MoneyCeiling("0.0200", "EUR"),
+            ),
+        ),
+    )
+    catalog_2 = RouteCatalog(
+        [route_b, route_a],
+        operational_constraints=OperationalConstraints(
+            required_capabilities=frozenset({"fast", "vision"}),
+            required_quality_criteria=frozenset({"code", "math"}),
+            max_estimated_costs=(
+                MoneyCeiling("0.0200", "EUR"),
+                MoneyCeiling("0.0100", "USD"),
+            ),
+        ),
+    )
+
+    client_1 = client_with_catalog(catalog_1)
+    client_2 = client_with_catalog(catalog_2)
+
+    req_payload = {
+        "task": "Test determinism.",
+        "constraints": {
+            "required_capabilities": ["vision", "fast"],
+            "required_quality_criteria": ["math", "code"],
+        },
+    }
+    res_1 = client_1.post("/v1/executions", json=req_payload).json()
+    res_2 = client_2.post("/v1/executions", json=req_payload).json()
+
+    assert res_1["decision"] == res_2["decision"]
+
+
+def test_invalid_decision_validation_rejects_tampered_selection() -> None:
+    from maestro_router.routing import _compose_effective_constraints
+
+    route_a = configured_route(
+        "route-a",
+        capabilities=frozenset({"mandatory-cap"}),
+        estimate=available("0.0050", "USD"),
+    )
+    catalog = RouteCatalog(
+        [route_a],
+        operational_constraints=OperationalConstraints(
+            required_capabilities=frozenset({"mandatory-cap"})
+        ),
+    )
+    req = ExecutionRequest.model_validate(
+        {"task": "Run.", "constraints": {"required_capabilities": ["mandatory-cap"]}}
+    )
+    composed = _compose_effective_constraints(req, catalog.operational_constraints)
+    context = _selection_context(req, [route_a], [], composed=composed)
+    decision = route_request(req, catalog)
+    assert isinstance(decision, SelectedDecision)
+
+    tampered = replace(
+        decision,
+        applied_constraints=(),  # Tampered: empty instead of expected
+    )
+    with pytest.raises(InvalidDecisionError):
+        _validate_selection(context, tampered)
+
+
+def test_no_external_calls_after_refusal() -> None:
+    route_a = configured_route("route-a", estimate=available("0.0500", "USD"))
+    catalog = RouteCatalog(
+        [route_a],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(MoneyCeiling("0.0100", "USD"),)
+        ),
+    )
+    adapter = CountingAdapter()
+    client = TestClient(create_app(catalog, {route_a.adapter_id: adapter}))
+
+    response = client.post("/v1/executions", json={"task": "Run."})
+    assert response.status_code == 422
+    assert adapter.calls == 0
+
+
+def test_exactly_one_call_to_selected_route_on_success() -> None:
+    route_a = configured_route("route-a", estimate=available("0.0050", "USD"))
+    route_b = configured_route("route-b", estimate=available("0.0080", "USD"))
+    catalog = RouteCatalog([route_a, route_b])
+    adapter_a = CountingAdapter()
     adapter_b = CountingAdapter()
     client = TestClient(
         create_app(catalog, {route_a.adapter_id: adapter_a, route_b.adapter_id: adapter_b})
@@ -1346,3 +1541,254 @@ def test_exactly_one_call_to_selected_route_on_success() -> None:
     assert response.json()["decision"]["route"]["id"] == "route-a"
     assert adapter_a.calls == 1
     assert adapter_b.calls == 0
+
+
+def test_tampered_economic_insufficiency_refusal_rejected_when_all_violate_conclusively() -> None:
+    from maestro_router.routing import _validated_refusal
+
+    route_a = configured_route(
+        "route-a",
+        estimate=available("0.0200", "USD", reference="price-ref-a"),
+    )
+    ceilings = (("0.0100", "USD"), ("0.0100", "EUR"))
+    req = ExecutionRequest.model_validate({"task": "Run economic test."})
+    tampered_context = _RefusalContext(
+        request=req,
+        candidates=(route_a,),
+        exclusions=(),
+        kind="economic_insufficiency",
+        effective_ceilings=ceilings,
+    )
+    with pytest.raises(InvalidDecisionError) as caught:
+        _validated_refusal(tampered_context)
+
+    assert "Economic insufficiency contradicts ceiling precedence." in str(caught.value)
+
+
+def test_mixed_ceiling_scenario_preserves_conclusive_violation_factors() -> None:
+    route_a = configured_route(
+        "route-a",
+        estimate=available("0.0200", "USD", reference="price-ref-a"),
+    )
+    route_b = configured_route(
+        "route-b",
+        estimate=available("0.0050", "USD", reference="price-ref-b"),
+    )
+    catalog = RouteCatalog(
+        [route_a, route_b],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(
+                MoneyCeiling("0.0100", "USD"),
+                MoneyCeiling("0.0100", "EUR"),
+            )
+        ),
+    )
+    req = ExecutionRequest.model_validate({"task": "Mixed evaluation task."})
+    decision = route_request(req, catalog)
+
+    assert decision.error.code == "INSUFFICIENT_ECONOMIC_INFORMATION"
+    factors = decision.decision.factors
+    assert len(factors) == 2
+
+    factor_a = next(f for f in factors if "route-a" in f.description)
+    factor_b = next(f for f in factors if "route-b" in f.description)
+
+    assert factor_a.category == "economics"
+    assert factor_a.references == ["price-ref-a"]
+    assert "acima do teto USD 0.0100" in factor_a.description
+    assert "USD 0.0200" in factor_a.description
+
+    assert factor_b.category == "economics"
+    assert factor_b.references == ["price-ref-b"]
+    assert "a moeda não comprovava o teto em EUR" in factor_b.description
+    assert "USD 0.0050" in factor_b.description
+
+
+def test_legitimate_indetermination_when_no_conclusive_violation_exists() -> None:
+    route_a = configured_route(
+        "route-a",
+        estimate=available("0.0050", "USD", reference="price-ref-a"),
+    )
+    route_b = configured_route(
+        "route-b",
+        estimate=available("0.0080", "USD", reference="price-ref-b"),
+    )
+    catalog = RouteCatalog(
+        [route_a, route_b],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(
+                MoneyCeiling("0.0100", "USD"),
+                MoneyCeiling("0.0100", "EUR"),
+            )
+        ),
+    )
+    req = ExecutionRequest.model_validate({"task": "Indetermination task."})
+    decision = route_request(req, catalog)
+
+    assert decision.error.code == "INSUFFICIENT_ECONOMIC_INFORMATION"
+    factors = decision.decision.factors
+    assert len(factors) == 2
+    for factor in factors:
+        assert factor.category == "economics"
+        assert "a moeda não comprovava o teto em EUR" in factor.description
+        assert "acima do teto" not in factor.description
+
+
+def test_no_external_execution_after_economic_refusal_or_invalid_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_a = configured_route(
+        "route-a",
+        estimate=available("0.0200", "USD", reference="price-ref-a"),
+    )
+    route_b = configured_route(
+        "route-b",
+        estimate=available("0.0050", "USD", reference="price-ref-b"),
+    )
+    catalog = RouteCatalog(
+        [route_a, route_b],
+        operational_constraints=OperationalConstraints(
+            max_estimated_costs=(
+                MoneyCeiling("0.0100", "USD"),
+                MoneyCeiling("0.0100", "EUR"),
+            )
+        ),
+    )
+    adapter_a = CountingAdapter()
+    adapter_b = CountingAdapter()
+    client = TestClient(
+        create_app(catalog, {route_a.adapter_id: adapter_a, route_b.adapter_id: adapter_b})
+    )
+
+    response = client.post("/v1/executions", json={"task": "Run mixed refusal."})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INSUFFICIENT_ECONOMIC_INFORMATION"
+    assert adapter_a.calls == 0
+    assert adapter_b.calls == 0
+
+    import maestro_router.api as api_module
+
+    def raise_invalid_decision(*args: Any, **kwargs: Any) -> Any:
+        raise InvalidDecisionError("Authoritative decision verification failed.")
+
+    monkeypatch.setattr(api_module, "route_request", raise_invalid_decision)
+
+    response_invalid = client.post("/v1/executions", json={"task": "Run invalid decision."})
+    assert response_invalid.status_code == 500
+    assert response_invalid.json()["error"]["code"] == "INVALID_DECISION"
+    assert adapter_a.calls == 0
+    assert adapter_b.calls == 0
+
+
+def test_successful_selection_references_projection_identical_under_permutations() -> None:
+    from maestro_router.bootstrap import create_openai_app
+
+    def make_config(refs: list[str]) -> dict[str, str]:
+        route_json = {
+            "routes": [
+                {
+                    "route_id": "route-a",
+                    "model": "model-a",
+                    "price_reference": {
+                        "id": "price-a",
+                        "currency": "USD",
+                        "version": "v1",
+                        "source": "operator",
+                        "rates": [
+                            {"unit": "input_token", "rate": "0.0010", "base": 1000},
+                            {"unit": "output_token", "rate": "0.0020", "base": 1000},
+                        ],
+                        "conditions": ["standard"],
+                        "context_complete": True,
+                        "units_exhaustive": True,
+                        "no_double_counting": True,
+                        "model_identity_exact": True,
+                    },
+                    "estimated_usage": {
+                        "input_token": 100,
+                        "output_token": 100,
+                        "applicability_confirmed": True,
+                    },
+                    "quality_criteria": [
+                        {
+                            "criterion": "math",
+                            "evidence_references": refs,
+                        }
+                    ],
+                }
+            ]
+        }
+        return {
+            "OPENAI_API_KEY": "controlled-key",
+            "MAESTRO_OPENAI_ROUTES_JSON": json.dumps(route_json),
+        }
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def create(self, **kwargs: Any) -> object:
+            from types import SimpleNamespace
+            self.calls.append(kwargs)
+            text_part = SimpleNamespace(type="output_text", text="controlled result")
+            msg = SimpleNamespace(type="message", content=[text_part])
+            return SimpleNamespace(
+                status="completed",
+                output=[msg],
+                output_text="controlled result",
+                model=kwargs["model"],
+                usage=None,
+            )
+
+    class DummyAsyncOpenAI:
+        def __init__(self) -> None:
+            self.responses = DummyClient()
+
+    class ControlledFactory:
+        def __init__(self) -> None:
+            self.client: DummyAsyncOpenAI | None = None
+
+        def __call__(self, **kwargs: Any) -> DummyAsyncOpenAI:
+            self.client = DummyAsyncOpenAI()
+            return self.client
+
+    factory_1 = ControlledFactory()
+    factory_2 = ControlledFactory()
+
+    app_1 = create_openai_app(make_config(["evidence-1", "evidence-2"]), client_factory=factory_1)
+    app_2 = create_openai_app(make_config(["evidence-2", "evidence-1"]), client_factory=factory_2)
+
+    client_1 = TestClient(app_1)
+    client_2 = TestClient(app_2)
+
+    req_payload = {
+        "task": "Execute math task.",
+        "constraints": {
+            "required_quality_criteria": ["math"],
+        },
+    }
+
+    resp_1 = client_1.post("/v1/executions", json=req_payload)
+    resp_2 = client_2.post("/v1/executions", json=req_payload)
+
+    assert resp_1.status_code == 200
+    assert resp_2.status_code == 200
+
+    data_1 = resp_1.json()
+    data_2 = resp_2.json()
+
+    assert data_1["decision"] == data_2["decision"]
+
+    quality_factors_1 = [
+        f for f in data_1["decision"]["factors"] if f["category"] == "quality"
+    ]
+    quality_factors_2 = [
+        f for f in data_2["decision"]["factors"] if f["category"] == "quality"
+    ]
+    assert len(quality_factors_1) == 1
+    assert len(quality_factors_2) == 1
+    assert quality_factors_1[0]["references"] == ["evidence-1", "evidence-2"]
+    assert quality_factors_2[0]["references"] == ["evidence-1", "evidence-2"]
+
+    assert factory_1.client is not None and len(factory_1.client.responses.calls) == 1
+    assert factory_2.client is not None and len(factory_2.client.responses.calls) == 1

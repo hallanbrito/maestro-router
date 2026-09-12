@@ -23,7 +23,7 @@ from maestro_router.bootstrap import (
     create_openai_app,
     create_openai_app_from_env,
 )
-from maestro_router.routing import RouteCatalog
+from maestro_router.routing import Route, RouteCatalog
 
 CONTROLLED_KEY = "controlled-key-input"
 CONTROLLED_MODEL = "controlled-model"
@@ -2389,18 +2389,24 @@ def test_snapshot_immutability_against_environment_mutation(monkeypatch: pytest.
 
     import maestro_router.bootstrap as bm
 
-    orig_create_app = bm.create_app
-    bm.create_app = mock_create_app
-    try:
-        create_openai_app_from_env()
-    finally:
-        bm.create_app = orig_create_app
+    factory = ControlledClientFactory()
+    orig_create_adapter = bm._create_openai_adapter
+    monkeypatch.setattr(bm, "create_app", mock_create_app)
+    monkeypatch.setattr(
+        bm,
+        "_create_openai_adapter",
+        lambda api_key, client_factory=None: orig_create_adapter(api_key, factory),
+    )
+
+    create_openai_app_from_env()
 
     # Mutate environment
     monkeypatch.setenv(ROUTING_CONSTRAINTS_VARIABLE, json.dumps({"required_capabilities": ["mutated"]}))
 
     cat = captured_catalog[0]
     assert cat.operational_constraints.required_capabilities == frozenset({"cap1"})
+    assert len(factory.calls) == 1
+    assert factory.calls[0]["api_key"] == CONTROLLED_KEY
 
 
 def test_snapshot_immutability_against_input_mutation() -> None:
@@ -2432,3 +2438,188 @@ def test_snapshot_immutability_against_input_mutation() -> None:
 
     cat = captured_catalog[0]
     assert cat.operational_constraints.required_capabilities == frozenset({"cap1"})
+
+
+def test_route_quality_evidence_references_empty_map_defense() -> None:
+    refs: dict[str, tuple[str, ...]] = {}
+    route = Route(
+        id="route-r",
+        provider="openai",
+        model="model-m",
+        adapter_id="openai-responses",
+        quality_evidence_references=refs,
+    )
+    # Mutate source dict
+    refs["injected"] = ("bad-evidence",)
+    assert route.quality_evidence_references == {}
+    assert len(route.quality_evidence_references) == 0
+
+    # Attempt modification via route attribute
+    with pytest.raises(TypeError):
+        route.quality_evidence_references["injected"] = ("bad-evidence",)  # type: ignore[index]
+
+
+def test_route_quality_evidence_references_filled_map_defense() -> None:
+    source_list = ["ref-z", "ref-a"]
+    refs = {"quality-crit": source_list}
+    route = Route(
+        id="route-r",
+        provider="openai",
+        model="model-m",
+        adapter_id="openai-responses",
+        quality_evidence_references=refs,
+    )
+    # Mutate source structures
+    source_list.append("ref-injected")
+    refs["new-crit"] = ["ref-other"]
+
+    assert route.quality_evidence_references["quality-crit"] == ("ref-a", "ref-z")
+    assert isinstance(route.quality_evidence_references["quality-crit"], tuple)
+    assert "new-crit" not in route.quality_evidence_references
+
+    # Attempt modification via route attribute
+    with pytest.raises(TypeError):
+        route.quality_evidence_references["quality-crit"] = ("mutated",)  # type: ignore[index]
+    with pytest.raises(TypeError):
+        route.quality_evidence_references["new-crit"] = ("other",)  # type: ignore[index]
+
+
+def test_route_quality_evidence_references_default_compatibility() -> None:
+    route = Route(
+        id="route-r",
+        provider="openai",
+        model="model-m",
+        adapter_id="openai-responses",
+    )
+    assert route.quality_evidence_references == {}
+    assert len(route.quality_evidence_references) == 0
+    with pytest.raises(TypeError):
+        route.quality_evidence_references["q"] = ("val",)  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("invalid_constraints", "expected_path", "sensitive_values"),
+    [
+        (
+            {"defaults": {"max_estimated_cost": {"currency": "USD", "amount": "invalid-amt"}}},
+            "defaults.max_estimated_cost.amount",
+            ["invalid-amt"],
+        ),
+        (
+            {"defaults": {"max_estimated_cost": {"currency": "invalid-curr", "amount": "1.0000"}}},
+            "defaults.max_estimated_cost.currency",
+            ["invalid-curr"],
+        ),
+        (
+            {
+                "max_estimated_costs": [
+                    {"currency": "USD", "amount": "1.0000"},
+                    {"currency": "EUR", "amount": "sensitive-eur-amount-999"},
+                ]
+            },
+            "max_estimated_costs[1].amount",
+            ["sensitive-eur-amount-999"],
+        ),
+        (
+            {"required_capabilities": ["   "]},
+            "required_capabilities[0]",
+            ["   "],
+        ),
+        (
+            {"defaults": {"required_quality_criteria": ["valid-crit", "   "]}},
+            "defaults.required_quality_criteria[1]",
+            ["   "],
+        ),
+        (
+            {
+                "max_estimated_costs": [
+                    {"currency": "USD", "amount": "1.0000"},
+                    {"currency": "USD", "amount": "2.0000"},
+                ]
+            },
+            "max_estimated_costs[1].currency",
+            ["2.0000"],
+        ),
+        (
+            {"required_capabilities": ["sensitive-cap-1", "sensitive-cap-1"]},
+            "required_capabilities[1]",
+            ["sensitive-cap-1"],
+        ),
+        (
+            {"defaults": {"unknown_operator_setting_xyz": "sensitive-value-secret"}},
+            "defaults",
+            ["unknown_operator_setting_xyz", "sensitive-value-secret"],
+        ),
+        (
+            {
+                "defaults": {
+                    "max_estimated_cost": {
+                        "currency": "USD",
+                        "amount": "1.0000",
+                        "operator_private_secret_field": "secret-val",
+                    }
+                }
+            },
+            "defaults.max_estimated_cost",
+            ["operator_private_secret_field", "secret-val"],
+        ),
+        (
+            {
+                "max_estimated_costs": [
+                    {
+                        "currency": "USD",
+                        "amount": "1.0000",
+                        "operator_custom_annotation": "do-not-leak",
+                    }
+                ]
+            },
+            "max_estimated_costs[0]",
+            ["operator_custom_annotation", "do-not-leak"],
+        ),
+    ],
+)
+def test_routing_constraints_sanitized_error_locations_and_no_leakage(
+    invalid_constraints: dict[str, Any],
+    expected_path: str,
+    sensitive_values: list[str],
+) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        ROUTING_CONSTRAINTS_VARIABLE: json.dumps(invalid_constraints),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    error = caught.value
+    assert error.variable_name == ROUTING_CONSTRAINTS_VARIABLE
+    assert error.path == expected_path
+    msg = str(error)
+    assert f"{ROUTING_CONSTRAINTS_VARIABLE} contém uma configuração inválida em {expected_path}." == msg
+    for sensitive in sensitive_values:
+        assert sensitive not in msg
+
+
+def test_routing_constraints_duplicate_json_keys_sanitized() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    raw_json = (
+        '{"defaults": {"max_estimated_cost": {'
+        '"currency": "USD", "amount": "1.0000", "amount": "sensitive-amount-2.0000"'
+        "}},"
+        '"allowed_route_ids": ["route-a"]}'
+    )
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        ROUTING_CONSTRAINTS_VARIABLE: raw_json,
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    error = caught.value
+    assert error.variable_name == ROUTING_CONSTRAINTS_VARIABLE
+    assert error.path == "defaults.max_estimated_cost.amount"
+    msg = str(error)
+    assert "defaults.max_estimated_cost.amount" in msg
+    assert "sensitive-amount-2.0000" not in msg

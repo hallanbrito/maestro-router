@@ -2001,3 +2001,434 @@ def test_route_catalog_carries_exclusion_to_explanation() -> None:
         and "route-b possuía configuração local inválida" in c["description"]
         for c in applied_constraints
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR 0009: Operational Routing Constraints & Extended Route Bootstrap Tests
+# ---------------------------------------------------------------------------
+
+ROUTING_CONSTRAINTS_VARIABLE = "MAESTRO_ROUTING_CONSTRAINTS_JSON"
+
+
+def make_extended_route_json(
+    route_id: str,
+    model: str,
+    price_id: str,
+    input_rate: str = "0.001",
+    output_rate: str = "0.004",
+    input_tokens: int = 1500,
+    output_tokens: int = 200,
+    currency: str = "USD",
+    capabilities: list[str] | None = None,
+    quality_criteria: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    base = make_route_json(
+        route_id=route_id,
+        model=model,
+        price_id=price_id,
+        input_rate=input_rate,
+        output_rate=output_rate,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        currency=currency,
+    )
+    if capabilities is not None:
+        base["capabilities"] = capabilities
+    if quality_criteria is not None:
+        base["quality_criteria"] = quality_criteria
+    return base
+
+
+def test_routing_constraints_requires_multiroute_mode() -> None:
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        ROUTING_CONSTRAINTS_VARIABLE: json.dumps({"required_capabilities": ["chat"]}),
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ROUTING_CONSTRAINTS_VARIABLE
+    assert factory.calls == []
+    assert factory.client is None
+
+
+@pytest.mark.parametrize(
+    "legacy_key,legacy_val",
+    [
+        ("MAESTRO_OPENAI_ROUTE_ID", "legacy-id"),
+        ("MAESTRO_OPENAI_ROUTE_ID", ""),
+        ("MAESTRO_OPENAI_ROUTE_ID", "   "),
+        ("MAESTRO_OPENAI_MODEL", "gpt-4"),
+        ("MAESTRO_OPENAI_PRICE_REFERENCE_JSON", "{}"),
+        ("MAESTRO_OPENAI_ESTIMATED_USAGE_JSON", "{}"),
+    ],
+)
+def test_routing_constraints_rejects_legacy_variables(legacy_key: str, legacy_val: str) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        ROUTING_CONSTRAINTS_VARIABLE: json.dumps({"required_capabilities": ["chat"]}),
+        legacy_key: legacy_val,
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ROUTING_CONSTRAINTS_VARIABLE
+    assert factory.calls == []
+    assert factory.client is None
+
+
+def test_routing_constraints_sanitized_error_message() -> None:
+    raw_payload = '{"required_capabilities": ["sensitive-secret-value-99"]}'
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        ROUTING_CONSTRAINTS_VARIABLE: raw_payload,
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+
+    msg = str(caught.value)
+    assert ROUTING_CONSTRAINTS_VARIABLE in msg
+    assert "sensitive-secret-value-99" not in msg
+    assert raw_payload not in msg
+
+
+def test_routing_constraints_valid_configuration_passes_to_catalog() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    constraints_doc = {
+        "required_capabilities": ["global-cap"],
+        "required_quality_criteria": ["global-crit"],
+        "allowed_route_ids": ["route-a"],
+        "max_estimated_costs": [{"currency": "USD", "amount": "1.0000"}],
+        "defaults": {
+            "required_capabilities": ["default-cap"],
+            "required_quality_criteria": ["default-crit"],
+            "allowed_route_ids": ["default-route"],
+            "max_estimated_cost": {"currency": "USD", "amount": "0.5000"},
+        },
+    }
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        ROUTING_CONSTRAINTS_VARIABLE: json.dumps(constraints_doc),
+    }
+
+    captured_catalog: list[RouteCatalog] = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_catalog.append(catalog)
+        return default_app
+
+    import maestro_router.bootstrap as bm
+
+    orig_create_app = bm.create_app
+    bm.create_app = mock_create_app
+    try:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    finally:
+        bm.create_app = orig_create_app
+
+    assert len(captured_catalog) == 1
+    cat = captured_catalog[0]
+    oc = cat.operational_constraints
+    assert oc.required_capabilities == frozenset({"global-cap"})
+    assert oc.required_quality_criteria == frozenset({"global-crit"})
+    assert oc.allowed_route_ids == frozenset({"route-a"})
+    assert len(oc.max_estimated_costs) == 1
+    assert oc.max_estimated_costs[0].amount == "1.0000"
+    assert oc.max_estimated_costs[0].currency == "USD"
+    assert oc.defaults.required_capabilities == frozenset({"default-cap"})
+    assert oc.defaults.required_quality_criteria == frozenset({"default-crit"})
+    assert oc.defaults.allowed_route_ids == frozenset({"default-route"})
+    assert oc.defaults.max_estimated_cost is not None
+    assert oc.defaults.max_estimated_cost.amount == "0.5000"
+    assert oc.defaults.max_estimated_cost.currency == "USD"
+
+
+@pytest.mark.parametrize(
+    "invalid_constraints_raw",
+    [
+        "",
+        "   ",
+        "invalid json",
+        "123",
+        '"string"',
+        "[]",
+        "{}",
+        '{"defaults": {}}',
+        '{"unknown_top_field": 1}',
+        '{"defaults": {"unknown_sub_field": 1}}',
+        '{"required_capabilities": []}',
+        '{"required_quality_criteria": []}',
+        '{"allowed_route_ids": []}',
+        '{"max_estimated_costs": []}',
+        '{"defaults": {"required_capabilities": []}}',
+        '{"defaults": {"required_quality_criteria": []}}',
+        '{"defaults": {"allowed_route_ids": []}}',
+        '{"required_capabilities": null}',
+        '{"defaults": null}',
+        '{"max_estimated_costs": null}',
+        '{"required_capabilities": [123]}',
+        '{"required_capabilities": ["   "]}',
+        '{"required_capabilities": ["\\ud800"]}',
+        '{"required_capabilities": ["dup", "dup"]}',
+        '{"required_quality_criteria": ["qc", "qc"]}',
+        '{"allowed_route_ids": ["r1", "r1"]}',
+        '{"defaults": {"required_capabilities": ["dup", "dup"]}}',
+        '{"max_estimated_costs": [{"currency": "USD", "amount": "1.0000", "extra": 1}]}',
+        '{"max_estimated_costs": [{"currency": "usd", "amount": "1.0000"}]}',
+        '{"max_estimated_costs": [{"currency": "USDT", "amount": "1.0000"}]}',
+        '{"max_estimated_costs": [{"currency": "USD", "amount": 1.0}]}',
+        '{"max_estimated_costs": [{"currency": "USD", "amount": "not-decimal"}]}',
+        '{"max_estimated_costs": [{"currency": "USD", "amount": "1.0000"}, {"currency": "USD", "amount": "2.0000"}]}',
+        '{"defaults": {"max_estimated_cost": {"currency": "USD", "amount": 1.0}}}',
+        '{"defaults": {"max_estimated_cost": {"currency": "US", "amount": "1.0000"}}}',
+        '{"defaults": {"max_estimated_cost": {"currency": "USD", "amount": "abc"}}}',
+        '{"defaults": {"max_estimated_cost": {}}}',
+        '{"required_capabilities": ["c1"], "required_capabilities": ["c2"]}',
+        '{"defaults": {"required_capabilities": ["c1"], "required_capabilities": ["c2"]}}',
+        '{"max_estimated_costs": [{"currency": "USD", "currency": "USD", "amount": "1.0000"}]}',
+        '{"max_estimated_costs": [{"currency": "USD", "amount": NaN}]}',
+    ],
+)
+def test_routing_constraints_strict_parsing_rejections(invalid_constraints_raw: str) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        ROUTING_CONSTRAINTS_VARIABLE: invalid_constraints_raw,
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == ROUTING_CONSTRAINTS_VARIABLE
+    assert factory.calls == []
+    assert factory.client is None
+
+
+def test_route_extended_fields_valid() -> None:
+    route_a = make_extended_route_json(
+        "route-a",
+        "model-a",
+        "price-a",
+        capabilities=["fast", "vision"],
+        quality_criteria=[
+            {"criterion": "math", "evidence_references": ["gsm8k-ref", "math-ref"]},
+            {"criterion": "coding", "evidence_references": ["humaneval-ref"]},
+        ],
+    )
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    captured_routes: list[tuple[Any, ...]] = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_routes.append(catalog.snapshot())
+        return default_app
+
+    import maestro_router.bootstrap as bm
+
+    orig_create_app = bm.create_app
+    bm.create_app = mock_create_app
+    try:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    finally:
+        bm.create_app = orig_create_app
+
+    assert len(captured_routes) == 1
+    r = captured_routes[0][0]
+    assert r.capabilities == frozenset({"fast", "vision"})
+    assert r.quality_criteria == frozenset({"math", "coding"})
+    assert r.quality_evidence_references == {
+        "math": ("gsm8k-ref", "math-ref"),
+        "coding": ("humaneval-ref",),
+    }
+
+
+def test_route_extended_fields_omitted_defaults_to_empty() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    captured_routes: list[tuple[Any, ...]] = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_routes.append(catalog.snapshot())
+        return default_app
+
+    import maestro_router.bootstrap as bm
+
+    orig_create_app = bm.create_app
+    bm.create_app = mock_create_app
+    try:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    finally:
+        bm.create_app = orig_create_app
+
+    assert len(captured_routes) == 1
+    r = captured_routes[0][0]
+    assert r.capabilities == frozenset()
+    assert r.quality_criteria == frozenset()
+    assert r.quality_evidence_references == {}
+
+
+@pytest.mark.parametrize(
+    "malformed_route_extra",
+    [
+        {"capabilities": []},
+        {"capabilities": [123]},
+        {"capabilities": ["   "]},
+        {"capabilities": ["\ud800"]},
+        {"capabilities": ["dup", "dup"]},
+        {"quality_criteria": []},
+        {"quality_criteria": ["not-a-dict"]},
+        {"quality_criteria": [{"criterion": "c"}]},
+        {"quality_criteria": [{"evidence_references": ["ref1"]}]},
+        {"quality_criteria": [{"criterion": "c", "evidence_references": []}]},
+        {"quality_criteria": [{"criterion": "c", "evidence_references": [123]}]},
+        {"quality_criteria": [{"criterion": "c", "evidence_references": ["   "]}]},
+        {"quality_criteria": [{"criterion": "c", "evidence_references": ["\ud800"]}]},
+        {"quality_criteria": [{"criterion": "c", "evidence_references": ["ref1", "ref1"]}]},
+        {"quality_criteria": [{"criterion": "   ", "evidence_references": ["ref1"]}]},
+        {"quality_criteria": [{"criterion": "\ud800", "evidence_references": ["ref1"]}]},
+        {
+            "quality_criteria": [
+                {"criterion": "dup", "evidence_references": ["ref1"]},
+                {"criterion": "dup", "evidence_references": ["ref2"]},
+            ]
+        },
+        {"quality_criteria": [{"criterion": "c", "evidence_references": ["ref1"], "extra": 1}]},
+        {"unknown_field": "val"},
+    ],
+)
+def test_route_local_isolation_for_malformed_extended_fields(malformed_route_extra: dict[str, Any]) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a.update(malformed_route_extra)
+    route_b = make_route_json("route-b", "model-b", "price-b")
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    captured_catalogs: list[RouteCatalog] = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_catalogs.append(catalog)
+        return default_app
+
+    import maestro_router.bootstrap as bm
+
+    orig_create_app = bm.create_app
+    bm.create_app = mock_create_app
+    try:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    finally:
+        bm.create_app = orig_create_app
+
+    assert len(captured_catalogs) == 1
+    cat = captured_catalogs[0]
+    assert [r.id for r in cat.snapshot()] == ["route-b"]
+    assert cat.configuration_invalid_route_ids == frozenset({"route-a"})
+
+
+def test_all_routes_locally_invalid_fails_startup() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["capabilities"] = []
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["quality_criteria"] = []
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert factory.calls == []
+    assert factory.client is None
+
+
+def test_global_uniqueness_still_enforced_with_extended_fields() -> None:
+    route_a = make_extended_route_json("route-dup", "model-a", "price-a", capabilities=["cap1"])
+    route_b = make_extended_route_json("route-dup", "model-b", "price-b", capabilities=["cap2"])
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert factory.calls == []
+    assert factory.client is None
+
+
+def test_snapshot_immutability_against_environment_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    constraints = {"required_capabilities": ["cap1"]}
+
+    monkeypatch.setenv("OPENAI_API_KEY", CONTROLLED_KEY)
+    monkeypatch.setenv("MAESTRO_OPENAI_ROUTES_JSON", json.dumps({"routes": [route_a]}))
+    monkeypatch.setenv(ROUTING_CONSTRAINTS_VARIABLE, json.dumps(constraints))
+
+    captured_catalog: list[RouteCatalog] = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_catalog.append(catalog)
+        return default_app
+
+    import maestro_router.bootstrap as bm
+
+    orig_create_app = bm.create_app
+    bm.create_app = mock_create_app
+    try:
+        create_openai_app_from_env()
+    finally:
+        bm.create_app = orig_create_app
+
+    # Mutate environment
+    monkeypatch.setenv(ROUTING_CONSTRAINTS_VARIABLE, json.dumps({"required_capabilities": ["mutated"]}))
+
+    cat = captured_catalog[0]
+    assert cat.operational_constraints.required_capabilities == frozenset({"cap1"})
+
+
+def test_snapshot_immutability_against_input_mutation() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    constraints = {"required_capabilities": ["cap1"]}
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+        ROUTING_CONSTRAINTS_VARIABLE: json.dumps(constraints),
+    }
+
+    captured_catalog: list[RouteCatalog] = []
+
+    def mock_create_app(catalog: RouteCatalog, adapters: Any) -> FastAPI:
+        captured_catalog.append(catalog)
+        return default_app
+
+    import maestro_router.bootstrap as bm
+
+    orig_create_app = bm.create_app
+    bm.create_app = mock_create_app
+    try:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    finally:
+        bm.create_app = orig_create_app
+
+    # Mutate input dict
+    config[ROUTING_CONSTRAINTS_VARIABLE] = json.dumps({"required_capabilities": ["mutated"]})
+
+    cat = captured_catalog[0]
+    assert cat.operational_constraints.required_capabilities == frozenset({"cap1"})

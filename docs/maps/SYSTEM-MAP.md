@@ -47,6 +47,7 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Uso normalizado da OpenAI | `input_tokens` e `output_tokens` são traduzidos para unidades neutras e projetados como uso completo, parcial ou indisponível, sem detalhes externos. |
 | ✅ Implementado | Estimativa operacional pré-execução | A composição OpenAI suporta múltiplas rotas (via `MAESTRO_OPENAI_ROUTES_JSON`). No modo legado, aceita uma previsão estática opcional; no modo multirrota, a previsão é obrigatória para cada entrada. Produz estimativas decimais exatas no bootstrap para limites econômicos sem chamadas externas. |
 | ✅ Implementado | Custo calculado | A primeira política posterior calcula somente `input_token` e `output_token` com aritmética decimal exata. A composição OpenAI aceita uma referência opcional fornecida pelo operador, sem preço padrão, consulta ou atualização automática; o custo posterior só fica disponível com configuração válida e uso completo. O valor não representa billing nem comprova economia entre provedores. |
+| ✅ Implementado | Restrições operacionais e composição monotônica | Configuração de capacidades e critérios de qualidade com referências de evidência por rota (`MAESTRO_OPENAI_ROUTES_JSON`), requisitos globais, allowlist, múltiplos tetos econômicos cumulativos e defaults (`MAESTRO_ROUTING_CONSTRAINTS_JSON`), com composição monotônica e projeção explicativa (ADR 0009). |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.
 

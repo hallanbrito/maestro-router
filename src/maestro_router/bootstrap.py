@@ -18,9 +18,16 @@ from openai import AsyncOpenAI, omit
 
 from .adapters import OpenAIResponsesAdapter
 from .api import create_app
-from .contracts import CURRENCY_PATTERN
+from .contracts import CURRENCY_PATTERN, DECIMAL_PATTERN
 from .economics import PriceReference, UnitPrice, calculate_pre_execution_amount
-from .routing import EconomicEstimate, Route, RouteCatalog
+from .routing import (
+    EconomicEstimate,
+    MoneyCeiling,
+    OperationalConstraints,
+    OperationalDefaults,
+    Route,
+    RouteCatalog,
+)
 
 _OPENAI_API_KEY = "OPENAI_API_KEY"
 _OPENAI_MODEL = "MAESTRO_OPENAI_MODEL"
@@ -28,10 +35,12 @@ _OPENAI_ROUTE_ID = "MAESTRO_OPENAI_ROUTE_ID"
 _OPENAI_PRICE_REFERENCE_JSON = "MAESTRO_OPENAI_PRICE_REFERENCE_JSON"
 _OPENAI_ESTIMATED_USAGE_JSON = "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON"
 _OPENAI_ROUTES_JSON = "MAESTRO_OPENAI_ROUTES_JSON"
+_ROUTING_CONSTRAINTS_JSON = "MAESTRO_ROUTING_CONSTRAINTS_JSON"
 _REQUIRED_VARIABLES = (_OPENAI_API_KEY, _OPENAI_MODEL, _OPENAI_ROUTE_ID)
 _OPTIONAL_VARIABLES = (
     _OPENAI_PRICE_REFERENCE_JSON,
     _OPENAI_ESTIMATED_USAGE_JSON,
+    _ROUTING_CONSTRAINTS_JSON,
 )
 _PRICE_REFERENCE_FIELDS = frozenset(
     {
@@ -144,13 +153,36 @@ def create_openai_app(
             ambiguous, structurally invalid, or economically incomplete.
     """
 
+    legacy_keys = {
+        _OPENAI_ROUTE_ID,
+        _OPENAI_MODEL,
+        _OPENAI_PRICE_REFERENCE_JSON,
+        _OPENAI_ESTIMATED_USAGE_JSON,
+    }
+    if _ROUTING_CONSTRAINTS_JSON in configuration:
+        if _OPENAI_ROUTES_JSON not in configuration or any(
+            key in configuration for key in legacy_keys
+        ):
+            raise InvalidRuntimeConfigurationError(
+                _ROUTING_CONSTRAINTS_JSON, invalid_optional=True
+            )
+
     if _OPENAI_ROUTES_JSON in configuration:
         # One client and adapter serve every configured OpenAI route; model
         # identity still remains attached to each neutral Route snapshot.
         api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
+        operational_constraints = None
+        if _ROUTING_CONSTRAINTS_JSON in configuration:
+            operational_constraints = _parse_routing_constraints(
+                configuration[_ROUTING_CONSTRAINTS_JSON]
+            )
         adapter = _create_openai_adapter(api_key, client_factory)
         return create_app(
-            RouteCatalog(routes, configuration_invalid_route_ids=configuration_invalid_route_ids),
+            RouteCatalog(
+                routes,
+                configuration_invalid_route_ids=configuration_invalid_route_ids,
+                operational_constraints=operational_constraints,
+            ),
             {"openai-responses": adapter},
         )
 
@@ -408,12 +440,73 @@ def _validated_multiroute_configuration(
         if _nested_has_duplicates(route_entry):
             local_failed = True
 
-        if set(route_entry.keys()) != {"route_id", "model", "price_reference", "estimated_usage"}:
+        allowed_keys = {
+            "route_id",
+            "model",
+            "price_reference",
+            "estimated_usage",
+            "capabilities",
+            "quality_criteria",
+        }
+        required_keys = {"route_id", "model", "price_reference", "estimated_usage"}
+        if not required_keys.issubset(route_entry.keys()) or not set(route_entry.keys()).issubset(allowed_keys):
             local_failed = True
 
         model = route_entry.get("model")
         if not _is_structurally_valid_string(model):
             local_failed = True
+
+        capabilities: frozenset[str] = frozenset()
+        if "capabilities" in route_entry:
+            cap_val = route_entry["capabilities"]
+            if (
+                not isinstance(cap_val, list)
+                or len(cap_val) == 0
+                or any(not _is_structurally_valid_string(c) for c in cap_val)
+                or len(set(cap_val)) != len(cap_val)
+            ):
+                local_failed = True
+            else:
+                capabilities = frozenset(cap_val)
+
+        quality_criteria_set: frozenset[str] = frozenset()
+        quality_evidence_refs: dict[str, tuple[str, ...]] = {}
+        if "quality_criteria" in route_entry:
+            qc_val = route_entry["quality_criteria"]
+            if not isinstance(qc_val, list) or len(qc_val) == 0:
+                local_failed = True
+            else:
+                seen_criteria: list[str] = []
+                for item in qc_val:
+                    if not isinstance(item, dict):
+                        local_failed = True
+                        break
+                    if _nested_has_duplicates(item):
+                        local_failed = True
+                        break
+                    if set(item.keys()) != {"criterion", "evidence_references"}:
+                        local_failed = True
+                        break
+                    crit = item["criterion"]
+                    if not _is_structurally_valid_string(crit):
+                        local_failed = True
+                        break
+                    refs = item["evidence_references"]
+                    if (
+                        not isinstance(refs, list)
+                        or len(refs) == 0
+                        or any(not _is_structurally_valid_string(r) for r in refs)
+                        or len(set(refs)) != len(refs)
+                    ):
+                        local_failed = True
+                        break
+                    seen_criteria.append(crit)
+                    quality_evidence_refs[crit] = tuple(refs)
+                if not local_failed:
+                    if len(set(seen_criteria)) != len(seen_criteria):
+                        local_failed = True
+                    else:
+                        quality_criteria_set = frozenset(seen_criteria)
 
         price_ref_val = route_entry.get("price_reference")
         price_reference = None
@@ -480,8 +573,9 @@ def _validated_multiroute_configuration(
                 model=model,
                 adapter_id="openai-responses",
                 enabled=True,
-                capabilities=frozenset(),
-                quality_criteria=frozenset(),
+                capabilities=capabilities,
+                quality_criteria=quality_criteria_set,
+                quality_evidence_references=quality_evidence_refs,
                 known_unavailable=False,
                 estimate=estimate,
                 price_reference=price_reference,
@@ -653,3 +747,148 @@ def _parse_unit_price(value: object) -> UnitPrice:
     if unit not in _SUPPORTED_UNITS:
         raise ValueError
     return UnitPrice(unit=unit, rate=rate, base=base)
+
+
+_ROUTING_CONSTRAINTS_ALLOWED_KEYS = frozenset(
+    {
+        "required_capabilities",
+        "required_quality_criteria",
+        "allowed_route_ids",
+        "max_estimated_costs",
+        "defaults",
+    }
+)
+_DEFAULTS_ALLOWED_KEYS = frozenset(
+    {
+        "required_capabilities",
+        "required_quality_criteria",
+        "allowed_route_ids",
+        "max_estimated_cost",
+    }
+)
+
+
+def _parse_unique_string_list(val: object) -> frozenset[str]:
+    """Parse a non-empty JSON list of unique, structurally valid strings."""
+
+    if not isinstance(val, list) or len(val) == 0:
+        raise ValueError
+    for item in val:
+        if not _is_structurally_valid_string(item):
+            raise ValueError
+    if len(set(val)) != len(val):
+        raise ValueError
+    return frozenset(val)
+
+
+def _parse_routing_constraints(raw_value: object) -> OperationalConstraints:
+    """Parse the closed, strict operational routing constraints JSON document."""
+
+    try:
+        if not isinstance(raw_value, str) or not any(
+            not character.isspace() for character in raw_value
+        ):
+            raise ValueError
+        document = json.loads(
+            raw_value,
+            object_pairs_hook=DuplicateTrackingDict,
+            parse_constant=_reject_non_json_constant,
+        )
+        if not isinstance(document, dict) or _nested_has_duplicates(document):
+            raise ValueError
+
+        doc_keys = set(document.keys())
+        if len(doc_keys) == 0 or not doc_keys.issubset(_ROUTING_CONSTRAINTS_ALLOWED_KEYS):
+            raise ValueError
+
+        required_capabilities: frozenset[str] = frozenset()
+        if "required_capabilities" in document:
+            required_capabilities = _parse_unique_string_list(
+                document["required_capabilities"]
+            )
+
+        required_quality_criteria: frozenset[str] = frozenset()
+        if "required_quality_criteria" in document:
+            required_quality_criteria = _parse_unique_string_list(
+                document["required_quality_criteria"]
+            )
+
+        allowed_route_ids: frozenset[str] | None = None
+        if "allowed_route_ids" in document:
+            allowed_route_ids = _parse_unique_string_list(
+                document["allowed_route_ids"]
+            )
+
+        max_estimated_costs: list[MoneyCeiling] = []
+        if "max_estimated_costs" in document:
+            costs_val = document["max_estimated_costs"]
+            if not isinstance(costs_val, list) or len(costs_val) == 0:
+                raise ValueError
+            currencies: list[str] = []
+            for item in costs_val:
+                if not isinstance(item, dict) or set(item.keys()) != {"currency", "amount"}:
+                    raise ValueError
+                curr = item["currency"]
+                amt = item["amount"]
+                if not isinstance(curr, str) or not CURRENCY_PATTERN.fullmatch(curr):
+                    raise ValueError
+                if not isinstance(amt, str) or not DECIMAL_PATTERN.fullmatch(amt):
+                    raise ValueError
+                currencies.append(curr)
+                max_estimated_costs.append(MoneyCeiling(amount=amt, currency=curr))
+            if len(currencies) != len(set(currencies)):
+                raise ValueError
+
+        defaults = OperationalDefaults()
+        if "defaults" in document:
+            def_doc = document["defaults"]
+            if not isinstance(def_doc, dict):
+                raise ValueError
+            def_keys = set(def_doc.keys())
+            if len(def_keys) == 0 or not def_keys.issubset(_DEFAULTS_ALLOWED_KEYS):
+                raise ValueError
+
+            def_caps: frozenset[str] = frozenset()
+            if "required_capabilities" in def_doc:
+                def_caps = _parse_unique_string_list(def_doc["required_capabilities"])
+
+            def_qual: frozenset[str] = frozenset()
+            if "required_quality_criteria" in def_doc:
+                def_qual = _parse_unique_string_list(def_doc["required_quality_criteria"])
+
+            def_routes: frozenset[str] | None = None
+            if "allowed_route_ids" in def_doc:
+                def_routes = _parse_unique_string_list(def_doc["allowed_route_ids"])
+
+            def_cost: MoneyCeiling | None = None
+            if "max_estimated_cost" in def_doc:
+                cost_item = def_doc["max_estimated_cost"]
+                if not isinstance(cost_item, dict) or set(cost_item.keys()) != {"currency", "amount"}:
+                    raise ValueError
+                curr = cost_item["currency"]
+                amt = cost_item["amount"]
+                if not isinstance(curr, str) or not CURRENCY_PATTERN.fullmatch(curr):
+                    raise ValueError
+                if not isinstance(amt, str) or not DECIMAL_PATTERN.fullmatch(amt):
+                    raise ValueError
+                def_cost = MoneyCeiling(amount=amt, currency=curr)
+
+            defaults = OperationalDefaults(
+                required_capabilities=def_caps,
+                required_quality_criteria=def_qual,
+                allowed_route_ids=def_routes,
+                max_estimated_cost=def_cost,
+            )
+
+        return OperationalConstraints(
+            required_capabilities=required_capabilities,
+            required_quality_criteria=required_quality_criteria,
+            allowed_route_ids=allowed_route_ids,
+            max_estimated_costs=tuple(max_estimated_costs),
+            defaults=defaults,
+        )
+    except (TypeError, ValueError):
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON,
+            invalid_optional=True,
+        ) from None

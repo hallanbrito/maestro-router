@@ -25,16 +25,17 @@ O estado executável atual cobre:
   de preço explícita e contexto tarifário completo;
 - projeção pública normalizada de sucesso e dos erros de execução;
 - recusas normativas `NO_ELIGIBLE_ROUTE` e
-  `INSUFFICIENT_ECONOMIC_INFORMATION`.
+  `INSUFFICIENT_ECONOMIC_INFORMATION`;
+- configuração operacional de capacidades e critérios de qualidade por rota com
+  referências de evidência, requisitos globais, allowlists operacionais,
+  múltiplos tetos econômicos cumulativos e valores padrão com composição
+  monotônica (ADR 0009).
 
 Ainda não estão implementados ou configurados por padrão:
 
 - rota, provedora ou modelo padrão;
 - gestão de credenciais e configuração operacional padrão;
 - preço padrão ou configuração automática de referência de preço;
-- composição operacional de capacidades e critérios de qualidade obrigatórios,
-  allowlists obrigatórias, múltiplos tetos, valores padrão e sua combinação
-  monotônica com as restrições da solicitação;
 - timeout concreto, retry ou fallback;
 - tabela ou atualização automática de preços.
 
@@ -80,7 +81,8 @@ uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
 A composição operacional OpenAI possui dois modos de configuração:
 
 1. **Modo Legado (Rota única)**: Exige que o ambiente contenha valores não brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e `MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON` (conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md)) e uma previsão estática em `MAESTRO_OPENAI_ESTIMATED_USAGE_JSON` (conforme a [ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md)).
-2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido. O valor é um objeto JSON de nível superior contendo exatamente o membro obrigatório `routes`; `routes` contém o array não vazio de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md)). Cada entrada exige os membros `route_id`, `model`, `price_reference` e `estimated_usage`. Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
+2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido. O valor é um objeto JSON de nível superior contendo exatamente o membro obrigatório `routes`; `routes` contém o array não vazio de rotas (conforme a [ADR 0008](docs/decisions/0008-multiple-openai-route-configuration.md) e [ADR 0009](docs/decisions/0009-operational-routing-constraints.md)). Cada entrada exige os membros `route_id`, `model`, `price_reference` e `estimated_usage`, e aceita opcionalmente `capabilities` (array de strings) e `quality_criteria` (array de objetos fechados com `criterion` e `evidence_references`). Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
+3. **Restrições Operacionais de Roteamento**: Configuração opcional neutra do operador via `MAESTRO_ROUTING_CONSTRAINTS_JSON` em modo multirrota (conforme a [ADR 0009](docs/decisions/0009-operational-routing-constraints.md)). Permite definir `required_capabilities`, `required_quality_criteria`, `allowed_route_ids`, `max_estimated_costs` e `defaults`. Suas regras combinam-se monotonicamente com as restrições da solicitação pública, de modo que uma requisição nunca enfraquece as políticas obrigatórias globais.
 
 No modo multirrota, JSON ou estrutura superior inválidos e ambiguidades que
 impedem identificar o universo com segurança invalidam todo o snapshot. A mesma

@@ -2623,3 +2623,135 @@ def test_routing_constraints_duplicate_json_keys_sanitized() -> None:
     msg = str(error)
     assert "defaults.max_estimated_cost.amount" in msg
     assert "sensitive-amount-2.0000" not in msg
+
+
+@pytest.mark.parametrize(
+    ("route_modifier", "expected_path"),
+    [
+        (
+            lambda r: r.update({"quality_criteria": [{"criterion": "math", "evidence_references": []}]}),
+            "routes[0].quality_criteria[0].evidence_references",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": [{"criterion": "math", "evidence_references": ["ref1", "   "]}]}),
+            "routes[0].quality_criteria[0].evidence_references[1]",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": [{"criterion": "math", "evidence_references": ["ref1", "ref1"]}]}),
+            "routes[0].quality_criteria[0].evidence_references",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": [{"criterion": "", "evidence_references": ["ref1"]}]}),
+            "routes[0].quality_criteria[0].criterion",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": [{"criterion": "   ", "evidence_references": ["ref1"]}]}),
+            "routes[0].quality_criteria[0].criterion",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": [{"criterion": "math\ud800bad", "evidence_references": ["ref1"]}]}),
+            "routes[0].quality_criteria[0].criterion",
+        ),
+        (
+            lambda r: r.update({
+                "quality_criteria": [
+                    {"criterion": "math", "evidence_references": ["ref1"]},
+                    {"criterion": "math", "evidence_references": ["ref2"]},
+                ]
+            }),
+            "routes[0].quality_criteria[1].criterion",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": []}),
+            "routes[0].quality_criteria",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": "not-a-list"}),
+            "routes[0].quality_criteria",
+        ),
+        (
+            lambda r: r.update({"quality_criteria": ["not-a-dict"]}),
+            "routes[0].quality_criteria[0]",
+        ),
+        (
+            lambda r: r.update({"capabilities": []}),
+            "routes[0].capabilities",
+        ),
+        (
+            lambda r: r.update({"capabilities": "not-a-list"}),
+            "routes[0].capabilities",
+        ),
+        (
+            lambda r: r.update({"capabilities": ["fast", ""]}),
+            "routes[0].capabilities[1]",
+        ),
+        (
+            lambda r: r.update({"capabilities": ["fast", "   "]}),
+            "routes[0].capabilities[1]",
+        ),
+        (
+            lambda r: r.update({"capabilities": ["fast\ud800bad"]}),
+            "routes[0].capabilities[0]",
+        ),
+        (
+            lambda r: r.update({"capabilities": ["fast", "fast"]}),
+            "routes[0].capabilities",
+        ),
+    ],
+)
+def test_multiroute_new_fields_sanitized_error_locations_and_no_client_construction(
+    route_modifier: Callable[[dict[str, Any]], None],
+    expected_path: str,
+) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_modifier(route_a)
+
+    secret_key = "sensitive-api-key-998877"
+    config = {
+        "OPENAI_API_KEY": secret_key,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    error = caught.value
+    assert error.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert error.path == expected_path
+    msg = str(error)
+    assert f"MAESTRO_OPENAI_ROUTES_JSON contém uma configuração inválida em {expected_path}." == msg
+    assert secret_key not in msg
+    assert "route-a" not in msg
+    assert "model-a" not in msg
+    assert factory.calls == []
+
+
+@pytest.mark.parametrize(
+    "malformed_field",
+    [
+        {"quality_criteria": [{"criterion": "math", "evidence_references": []}]},
+        {"quality_criteria": [{"criterion": "", "evidence_references": ["ref1"]}]},
+        {"capabilities": ["fast", ""]},
+        {"capabilities": []},
+    ],
+)
+def test_multiroute_new_fields_isolation_preserved_for_all_malformations(
+    malformed_field: dict[str, Any],
+) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a.update(malformed_field)
+
+    route_b = make_route_json("route-b", "model-b", "price-b")
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    assert len(factory.calls) == 1
+    client = TestClient(app)
+    resp = client.post("/v1/executions", json={"task": "Run valid route."})
+    assert resp.status_code == 200
+    assert resp.json()["decision"]["route"]["id"] == "route-b"

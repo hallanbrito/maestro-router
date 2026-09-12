@@ -454,10 +454,12 @@ def _validated_multiroute_configuration(
     routes: list[Route] = []
     configuration_invalid_route_ids: list[str] = []
     num_valid_routes = 0
+    first_error_path: str | None = None
 
-    for route_entry in routes_list:
+    for i, route_entry in enumerate(routes_list):
         route_id = route_entry["route_id"]
         local_failed = False
+        local_error_path: str | None = None
 
         # From this point onward, failures belong to a known unique route and can
         # be represented as an explicit configuration exclusion.
@@ -483,15 +485,25 @@ def _validated_multiroute_configuration(
         capabilities: frozenset[str] = frozenset()
         if "capabilities" in route_entry:
             cap_val = route_entry["capabilities"]
-            if (
-                not isinstance(cap_val, list)
-                or len(cap_val) == 0
-                or any(not _is_structurally_valid_string(c) for c in cap_val)
-                or len(set(cap_val)) != len(cap_val)
-            ):
+            if not isinstance(cap_val, list) or len(cap_val) == 0:
                 local_failed = True
+                if local_error_path is None:
+                    local_error_path = f"routes[{i}].capabilities"
             else:
-                capabilities = frozenset(cap_val)
+                invalid_cap_idx = next(
+                    (idx for idx, c in enumerate(cap_val) if not _is_structurally_valid_string(c)),
+                    None,
+                )
+                if invalid_cap_idx is not None:
+                    local_failed = True
+                    if local_error_path is None:
+                        local_error_path = f"routes[{i}].capabilities[{invalid_cap_idx}]"
+                elif len(set(cap_val)) != len(cap_val):
+                    local_failed = True
+                    if local_error_path is None:
+                        local_error_path = f"routes[{i}].capabilities"
+                else:
+                    capabilities = frozenset(cap_val)
 
         quality_criteria_set: frozenset[str] = frozenset()
         quality_evidence_refs: dict[str, tuple[str, ...]] = {}
@@ -499,38 +511,87 @@ def _validated_multiroute_configuration(
             qc_val = route_entry["quality_criteria"]
             if not isinstance(qc_val, list) or len(qc_val) == 0:
                 local_failed = True
+                if local_error_path is None:
+                    local_error_path = f"routes[{i}].quality_criteria"
             else:
                 seen_criteria: list[str] = []
-                for item in qc_val:
+                for j, item in enumerate(qc_val):
                     if not isinstance(item, dict):
                         local_failed = True
+                        if local_error_path is None:
+                            local_error_path = f"routes[{i}].quality_criteria[{j}]"
                         break
                     if _nested_has_duplicates(item):
                         local_failed = True
+                        if local_error_path is None:
+                            if (
+                                isinstance(item, DuplicateTrackingDict)
+                                and "criterion" in item.duplicate_keys
+                            ):
+                                local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
+                            elif (
+                                isinstance(item, DuplicateTrackingDict)
+                                and "evidence_references" in item.duplicate_keys
+                            ):
+                                local_error_path = (
+                                    f"routes[{i}].quality_criteria[{j}].evidence_references"
+                                )
+                            else:
+                                local_error_path = f"routes[{i}].quality_criteria[{j}]"
                         break
                     if set(item.keys()) != {"criterion", "evidence_references"}:
                         local_failed = True
+                        if local_error_path is None:
+                            if "criterion" not in item:
+                                local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
+                            elif "evidence_references" not in item:
+                                local_error_path = (
+                                    f"routes[{i}].quality_criteria[{j}].evidence_references"
+                                )
+                            else:
+                                local_error_path = f"routes[{i}].quality_criteria[{j}]"
                         break
                     crit = item["criterion"]
                     if not _is_structurally_valid_string(crit):
                         local_failed = True
+                        if local_error_path is None:
+                            local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
                         break
                     refs = item["evidence_references"]
-                    if (
-                        not isinstance(refs, list)
-                        or len(refs) == 0
-                        or any(not _is_structurally_valid_string(r) for r in refs)
-                        or len(set(refs)) != len(refs)
-                    ):
+                    if not isinstance(refs, list) or len(refs) == 0:
                         local_failed = True
+                        if local_error_path is None:
+                            local_error_path = (
+                                f"routes[{i}].quality_criteria[{j}].evidence_references"
+                            )
+                        break
+                    invalid_ref_idx = next(
+                        (k for k, r in enumerate(refs) if not _is_structurally_valid_string(r)),
+                        None,
+                    )
+                    if invalid_ref_idx is not None:
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = (
+                                f"routes[{i}].quality_criteria[{j}].evidence_references[{invalid_ref_idx}]"
+                            )
+                        break
+                    if len(set(refs)) != len(refs):
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = (
+                                f"routes[{i}].quality_criteria[{j}].evidence_references"
+                            )
+                        break
+                    if crit in seen_criteria:
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
                         break
                     seen_criteria.append(crit)
                     quality_evidence_refs[crit] = tuple(sorted(refs))
                 if not local_failed:
-                    if len(set(seen_criteria)) != len(seen_criteria):
-                        local_failed = True
-                    else:
-                        quality_criteria_set = frozenset(seen_criteria)
+                    quality_criteria_set = frozenset(seen_criteria)
 
         price_ref_val = route_entry.get("price_reference")
         price_reference = None
@@ -590,6 +651,8 @@ def _validated_multiroute_configuration(
 
         if local_failed:
             configuration_invalid_route_ids.append(route_id)
+            if first_error_path is None and local_error_path is not None:
+                first_error_path = local_error_path
         else:
             route = Route(
                 id=route_id,
@@ -608,7 +671,9 @@ def _validated_multiroute_configuration(
 
     if num_valid_routes == 0:
         raise InvalidRuntimeConfigurationError(
-            _OPENAI_ROUTES_JSON, invalid_optional=True, path="routes"
+            _OPENAI_ROUTES_JSON,
+            invalid_optional=True,
+            path=first_error_path or "routes",
         )
 
     # Canonical ordering makes selection inputs independent of JSON array order.

@@ -18,9 +18,16 @@ from openai import AsyncOpenAI, omit
 
 from .adapters import OpenAIResponsesAdapter
 from .api import create_app
-from .contracts import CURRENCY_PATTERN
+from .contracts import CURRENCY_PATTERN, DECIMAL_PATTERN
 from .economics import PriceReference, UnitPrice, calculate_pre_execution_amount
-from .routing import EconomicEstimate, Route, RouteCatalog
+from .routing import (
+    EconomicEstimate,
+    MoneyCeiling,
+    OperationalConstraints,
+    OperationalDefaults,
+    Route,
+    RouteCatalog,
+)
 
 _OPENAI_API_KEY = "OPENAI_API_KEY"
 _OPENAI_MODEL = "MAESTRO_OPENAI_MODEL"
@@ -28,10 +35,12 @@ _OPENAI_ROUTE_ID = "MAESTRO_OPENAI_ROUTE_ID"
 _OPENAI_PRICE_REFERENCE_JSON = "MAESTRO_OPENAI_PRICE_REFERENCE_JSON"
 _OPENAI_ESTIMATED_USAGE_JSON = "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON"
 _OPENAI_ROUTES_JSON = "MAESTRO_OPENAI_ROUTES_JSON"
+_ROUTING_CONSTRAINTS_JSON = "MAESTRO_ROUTING_CONSTRAINTS_JSON"
 _REQUIRED_VARIABLES = (_OPENAI_API_KEY, _OPENAI_MODEL, _OPENAI_ROUTE_ID)
 _OPTIONAL_VARIABLES = (
     _OPENAI_PRICE_REFERENCE_JSON,
     _OPENAI_ESTIMATED_USAGE_JSON,
+    _ROUTING_CONSTRAINTS_JSON,
 )
 _PRICE_REFERENCE_FIELDS = frozenset(
     {
@@ -68,15 +77,23 @@ _OPENAI_CUSTOM_HEADERS = "OPENAI_CUSTOM_HEADERS"
 class InvalidRuntimeConfigurationError(ValueError):
     """Identify one invalid runtime variable without exposing its raw value."""
 
-    def __init__(self, variable_name: str, *, invalid_optional: bool = False) -> None:
+    def __init__(
+        self,
+        variable_name: str,
+        *,
+        invalid_optional: bool = False,
+        path: str | None = None,
+    ) -> None:
         """Build a sanitized message for a missing or malformed variable."""
 
         self.variable_name = variable_name
-        message = (
-            f"{variable_name} contém uma configuração inválida."
-            if invalid_optional
-            else f"{variable_name} é obrigatória e deve conter valor não branco."
-        )
+        self.path = path
+        if path:
+            message = f"{variable_name} contém uma configuração inválida em {path}."
+        elif invalid_optional:
+            message = f"{variable_name} contém uma configuração inválida."
+        else:
+            message = f"{variable_name} é obrigatória e deve conter valor não branco."
         super().__init__(message)
 
 
@@ -144,13 +161,36 @@ def create_openai_app(
             ambiguous, structurally invalid, or economically incomplete.
     """
 
+    legacy_keys = {
+        _OPENAI_ROUTE_ID,
+        _OPENAI_MODEL,
+        _OPENAI_PRICE_REFERENCE_JSON,
+        _OPENAI_ESTIMATED_USAGE_JSON,
+    }
+    if _ROUTING_CONSTRAINTS_JSON in configuration:
+        if _OPENAI_ROUTES_JSON not in configuration or any(
+            key in configuration for key in legacy_keys
+        ):
+            raise InvalidRuntimeConfigurationError(
+                _ROUTING_CONSTRAINTS_JSON, invalid_optional=True
+            )
+
     if _OPENAI_ROUTES_JSON in configuration:
         # One client and adapter serve every configured OpenAI route; model
         # identity still remains attached to each neutral Route snapshot.
         api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
+        operational_constraints = None
+        if _ROUTING_CONSTRAINTS_JSON in configuration:
+            operational_constraints = _parse_routing_constraints(
+                configuration[_ROUTING_CONSTRAINTS_JSON]
+            )
         adapter = _create_openai_adapter(api_key, client_factory)
         return create_app(
-            RouteCatalog(routes, configuration_invalid_route_ids=configuration_invalid_route_ids),
+            RouteCatalog(
+                routes,
+                configuration_invalid_route_ids=configuration_invalid_route_ids,
+                operational_constraints=operational_constraints,
+            ),
             {"openai-responses": adapter},
         )
 
@@ -347,27 +387,39 @@ def _validated_multiroute_configuration(
 
     routes_list = document["routes"]
     if not isinstance(routes_list, list) or len(routes_list) == 0:
-        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        raise InvalidRuntimeConfigurationError(
+            _OPENAI_ROUTES_JSON, invalid_optional=True, path="routes"
+        )
 
     route_ids = []
-    for route_entry in routes_list:
+    for i, route_entry in enumerate(routes_list):
         if not isinstance(route_entry, dict):
-            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ROUTES_JSON, invalid_optional=True, path=f"routes[{i}]"
+            )
         if isinstance(route_entry, DuplicateTrackingDict) and "route_id" in route_entry.duplicate_keys:
-            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ROUTES_JSON, invalid_optional=True, path=f"routes[{i}].route_id"
+            )
         if "route_id" not in route_entry:
-            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ROUTES_JSON, invalid_optional=True, path=f"routes[{i}].route_id"
+            )
         route_id = route_entry["route_id"]
         if (
             not isinstance(route_id, str)
             or not any(not c.isspace() for c in route_id)
             or any(0xD800 <= ord(c) <= 0xDFFF for c in route_id)
         ):
-            raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ROUTES_JSON, invalid_optional=True, path=f"routes[{i}].route_id"
+            )
         route_ids.append(route_id)
 
     if len(route_ids) != len(set(route_ids)):
-        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        raise InvalidRuntimeConfigurationError(
+            _OPENAI_ROUTES_JSON, invalid_optional=True, path="routes"
+        )
 
     # Models and price-reference identifiers are collected before local route
     # validation because their uniqueness is a document-wide invariant.
@@ -391,29 +443,155 @@ def _validated_multiroute_configuration(
                         price_ref_ids.append(ref_id)
 
     if len(models) != len(set(models)):
-        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        raise InvalidRuntimeConfigurationError(
+            _OPENAI_ROUTES_JSON, invalid_optional=True, path="routes"
+        )
     if len(price_ref_ids) != len(set(price_ref_ids)):
-        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        raise InvalidRuntimeConfigurationError(
+            _OPENAI_ROUTES_JSON, invalid_optional=True, path="routes"
+        )
 
     routes: list[Route] = []
     configuration_invalid_route_ids: list[str] = []
     num_valid_routes = 0
+    first_error_path: str | None = None
 
-    for route_entry in routes_list:
+    for i, route_entry in enumerate(routes_list):
         route_id = route_entry["route_id"]
         local_failed = False
+        local_error_path: str | None = None
 
         # From this point onward, failures belong to a known unique route and can
         # be represented as an explicit configuration exclusion.
         if _nested_has_duplicates(route_entry):
             local_failed = True
 
-        if set(route_entry.keys()) != {"route_id", "model", "price_reference", "estimated_usage"}:
+        allowed_keys = {
+            "route_id",
+            "model",
+            "price_reference",
+            "estimated_usage",
+            "capabilities",
+            "quality_criteria",
+        }
+        required_keys = {"route_id", "model", "price_reference", "estimated_usage"}
+        if not required_keys.issubset(route_entry.keys()) or not set(route_entry.keys()).issubset(allowed_keys):
             local_failed = True
 
         model = route_entry.get("model")
         if not _is_structurally_valid_string(model):
             local_failed = True
+
+        capabilities: frozenset[str] = frozenset()
+        if "capabilities" in route_entry:
+            cap_val = route_entry["capabilities"]
+            if not isinstance(cap_val, list) or len(cap_val) == 0:
+                local_failed = True
+                if local_error_path is None:
+                    local_error_path = f"routes[{i}].capabilities"
+            else:
+                invalid_cap_idx = next(
+                    (idx for idx, c in enumerate(cap_val) if not _is_structurally_valid_string(c)),
+                    None,
+                )
+                if invalid_cap_idx is not None:
+                    local_failed = True
+                    if local_error_path is None:
+                        local_error_path = f"routes[{i}].capabilities[{invalid_cap_idx}]"
+                elif len(set(cap_val)) != len(cap_val):
+                    local_failed = True
+                    if local_error_path is None:
+                        local_error_path = f"routes[{i}].capabilities"
+                else:
+                    capabilities = frozenset(cap_val)
+
+        quality_criteria_set: frozenset[str] = frozenset()
+        quality_evidence_refs: dict[str, tuple[str, ...]] = {}
+        if "quality_criteria" in route_entry:
+            qc_val = route_entry["quality_criteria"]
+            if not isinstance(qc_val, list) or len(qc_val) == 0:
+                local_failed = True
+                if local_error_path is None:
+                    local_error_path = f"routes[{i}].quality_criteria"
+            else:
+                seen_criteria: list[str] = []
+                for j, item in enumerate(qc_val):
+                    if not isinstance(item, dict):
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = f"routes[{i}].quality_criteria[{j}]"
+                        break
+                    if _nested_has_duplicates(item):
+                        local_failed = True
+                        if local_error_path is None:
+                            if (
+                                isinstance(item, DuplicateTrackingDict)
+                                and "criterion" in item.duplicate_keys
+                            ):
+                                local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
+                            elif (
+                                isinstance(item, DuplicateTrackingDict)
+                                and "evidence_references" in item.duplicate_keys
+                            ):
+                                local_error_path = (
+                                    f"routes[{i}].quality_criteria[{j}].evidence_references"
+                                )
+                            else:
+                                local_error_path = f"routes[{i}].quality_criteria[{j}]"
+                        break
+                    if set(item.keys()) != {"criterion", "evidence_references"}:
+                        local_failed = True
+                        if local_error_path is None:
+                            if "criterion" not in item:
+                                local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
+                            elif "evidence_references" not in item:
+                                local_error_path = (
+                                    f"routes[{i}].quality_criteria[{j}].evidence_references"
+                                )
+                            else:
+                                local_error_path = f"routes[{i}].quality_criteria[{j}]"
+                        break
+                    crit = item["criterion"]
+                    if not _is_structurally_valid_string(crit):
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
+                        break
+                    refs = item["evidence_references"]
+                    if not isinstance(refs, list) or len(refs) == 0:
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = (
+                                f"routes[{i}].quality_criteria[{j}].evidence_references"
+                            )
+                        break
+                    invalid_ref_idx = next(
+                        (k for k, r in enumerate(refs) if not _is_structurally_valid_string(r)),
+                        None,
+                    )
+                    if invalid_ref_idx is not None:
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = (
+                                f"routes[{i}].quality_criteria[{j}].evidence_references[{invalid_ref_idx}]"
+                            )
+                        break
+                    if len(set(refs)) != len(refs):
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = (
+                                f"routes[{i}].quality_criteria[{j}].evidence_references"
+                            )
+                        break
+                    if crit in seen_criteria:
+                        local_failed = True
+                        if local_error_path is None:
+                            local_error_path = f"routes[{i}].quality_criteria[{j}].criterion"
+                        break
+                    seen_criteria.append(crit)
+                    quality_evidence_refs[crit] = tuple(sorted(refs))
+                if not local_failed:
+                    quality_criteria_set = frozenset(seen_criteria)
 
         price_ref_val = route_entry.get("price_reference")
         price_reference = None
@@ -473,6 +651,8 @@ def _validated_multiroute_configuration(
 
         if local_failed:
             configuration_invalid_route_ids.append(route_id)
+            if first_error_path is None and local_error_path is not None:
+                first_error_path = local_error_path
         else:
             route = Route(
                 id=route_id,
@@ -480,8 +660,9 @@ def _validated_multiroute_configuration(
                 model=model,
                 adapter_id="openai-responses",
                 enabled=True,
-                capabilities=frozenset(),
-                quality_criteria=frozenset(),
+                capabilities=capabilities,
+                quality_criteria=quality_criteria_set,
+                quality_evidence_references=quality_evidence_refs,
                 known_unavailable=False,
                 estimate=estimate,
                 price_reference=price_reference,
@@ -489,7 +670,11 @@ def _validated_multiroute_configuration(
             routes.append(route)
 
     if num_valid_routes == 0:
-        raise InvalidRuntimeConfigurationError(_OPENAI_ROUTES_JSON, invalid_optional=True)
+        raise InvalidRuntimeConfigurationError(
+            _OPENAI_ROUTES_JSON,
+            invalid_optional=True,
+            path=first_error_path or "routes",
+        )
 
     # Canonical ordering makes selection inputs independent of JSON array order.
     routes.sort(key=lambda r: r.id)
@@ -653,3 +838,271 @@ def _parse_unit_price(value: object) -> UnitPrice:
     if unit not in _SUPPORTED_UNITS:
         raise ValueError
     return UnitPrice(unit=unit, rate=rate, base=base)
+
+
+_ROUTING_CONSTRAINTS_ALLOWED_KEYS = frozenset(
+    {
+        "required_capabilities",
+        "required_quality_criteria",
+        "allowed_route_ids",
+        "max_estimated_costs",
+        "defaults",
+    }
+)
+_DEFAULTS_ALLOWED_KEYS = frozenset(
+    {
+        "required_capabilities",
+        "required_quality_criteria",
+        "allowed_route_ids",
+        "max_estimated_cost",
+    }
+)
+
+
+def _parse_unique_string_list(val: object, path_prefix: str) -> frozenset[str]:
+    """Parse a non-empty JSON list of unique, structurally valid strings."""
+
+    if not isinstance(val, list) or len(val) == 0:
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON, invalid_optional=True, path=path_prefix
+        )
+    seen: set[str] = set()
+    for i, item in enumerate(val):
+        if not _is_structurally_valid_string(item):
+            raise InvalidRuntimeConfigurationError(
+                _ROUTING_CONSTRAINTS_JSON,
+                invalid_optional=True,
+                path=f"{path_prefix}[{i}]",
+            )
+        if item in seen:
+            raise InvalidRuntimeConfigurationError(
+                _ROUTING_CONSTRAINTS_JSON,
+                invalid_optional=True,
+                path=f"{path_prefix}[{i}]",
+            )
+        seen.add(item)
+    return frozenset(seen)
+
+
+def _parse_routing_constraints(raw_value: object) -> OperationalConstraints:
+    """Parse the closed, strict operational routing constraints JSON document."""
+
+    if not isinstance(raw_value, str) or not any(
+        not character.isspace() for character in raw_value
+    ):
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON, invalid_optional=True
+        )
+
+    try:
+        document = json.loads(
+            raw_value,
+            object_pairs_hook=DuplicateTrackingDict,
+            parse_constant=_reject_non_json_constant,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON, invalid_optional=True
+        ) from None
+
+    if not isinstance(document, dict):
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON, invalid_optional=True
+        )
+
+    if isinstance(document, DuplicateTrackingDict) and document.duplicate_keys:
+        dup_key = next((k for k in document.duplicate_keys if k in _ROUTING_CONSTRAINTS_ALLOWED_KEYS), None)
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON,
+            invalid_optional=True,
+            path=dup_key,
+        )
+
+    doc_keys = set(document.keys())
+    if len(doc_keys) == 0 or not doc_keys.issubset(_ROUTING_CONSTRAINTS_ALLOWED_KEYS):
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON, invalid_optional=True
+        )
+
+    try:
+        required_capabilities: frozenset[str] = frozenset()
+        if "required_capabilities" in document:
+            required_capabilities = _parse_unique_string_list(
+                document["required_capabilities"], "required_capabilities"
+            )
+
+        required_quality_criteria: frozenset[str] = frozenset()
+        if "required_quality_criteria" in document:
+            required_quality_criteria = _parse_unique_string_list(
+                document["required_quality_criteria"], "required_quality_criteria"
+            )
+
+        allowed_route_ids: frozenset[str] | None = None
+        if "allowed_route_ids" in document:
+            allowed_route_ids = _parse_unique_string_list(
+                document["allowed_route_ids"], "allowed_route_ids"
+            )
+
+        max_estimated_costs: list[MoneyCeiling] = []
+        if "max_estimated_costs" in document:
+            costs_val = document["max_estimated_costs"]
+            if not isinstance(costs_val, list) or len(costs_val) == 0:
+                raise InvalidRuntimeConfigurationError(
+                    _ROUTING_CONSTRAINTS_JSON,
+                    invalid_optional=True,
+                    path="max_estimated_costs",
+                )
+            seen_currencies: set[str] = set()
+            for i, item in enumerate(costs_val):
+                if not isinstance(item, dict):
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=f"max_estimated_costs[{i}]",
+                    )
+                if isinstance(item, DuplicateTrackingDict) and item.duplicate_keys:
+                    dup_key = next((k for k in item.duplicate_keys if k in {"currency", "amount"}), None)
+                    dup_path = f"max_estimated_costs[{i}].{dup_key}" if dup_key else f"max_estimated_costs[{i}]"
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=dup_path,
+                    )
+                if set(item.keys()) != {"currency", "amount"}:
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=f"max_estimated_costs[{i}]",
+                    )
+                curr = item["currency"]
+                amt = item["amount"]
+                if not isinstance(curr, str) or not CURRENCY_PATTERN.fullmatch(curr):
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=f"max_estimated_costs[{i}].currency",
+                    )
+                if not isinstance(amt, str) or not DECIMAL_PATTERN.fullmatch(amt):
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=f"max_estimated_costs[{i}].amount",
+                    )
+                if curr in seen_currencies:
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=f"max_estimated_costs[{i}].currency",
+                    )
+                seen_currencies.add(curr)
+                max_estimated_costs.append(MoneyCeiling(amount=amt, currency=curr))
+
+        defaults = OperationalDefaults()
+        if "defaults" in document:
+            def_doc = document["defaults"]
+            if not isinstance(def_doc, dict):
+                raise InvalidRuntimeConfigurationError(
+                    _ROUTING_CONSTRAINTS_JSON,
+                    invalid_optional=True,
+                    path="defaults",
+                )
+            if isinstance(def_doc, DuplicateTrackingDict) and def_doc.duplicate_keys:
+                dup_key = next((k for k in def_doc.duplicate_keys if k in _DEFAULTS_ALLOWED_KEYS), None)
+                dup_path = f"defaults.{dup_key}" if dup_key else "defaults"
+                raise InvalidRuntimeConfigurationError(
+                    _ROUTING_CONSTRAINTS_JSON,
+                    invalid_optional=True,
+                    path=dup_path,
+                )
+            def_keys = set(def_doc.keys())
+            if len(def_keys) == 0 or not def_keys.issubset(_DEFAULTS_ALLOWED_KEYS):
+                raise InvalidRuntimeConfigurationError(
+                    _ROUTING_CONSTRAINTS_JSON,
+                    invalid_optional=True,
+                    path="defaults",
+                )
+
+            def_caps: frozenset[str] = frozenset()
+            if "required_capabilities" in def_doc:
+                def_caps = _parse_unique_string_list(
+                    def_doc["required_capabilities"], "defaults.required_capabilities"
+                )
+
+            def_qual: frozenset[str] = frozenset()
+            if "required_quality_criteria" in def_doc:
+                def_qual = _parse_unique_string_list(
+                    def_doc["required_quality_criteria"], "defaults.required_quality_criteria"
+                )
+
+            def_routes: frozenset[str] | None = None
+            if "allowed_route_ids" in def_doc:
+                def_routes = _parse_unique_string_list(
+                    def_doc["allowed_route_ids"], "defaults.allowed_route_ids"
+                )
+
+            def_cost: MoneyCeiling | None = None
+            if "max_estimated_cost" in def_doc:
+                cost_item = def_doc["max_estimated_cost"]
+                if not isinstance(cost_item, dict):
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path="defaults.max_estimated_cost",
+                    )
+                if isinstance(cost_item, DuplicateTrackingDict) and cost_item.duplicate_keys:
+                    dup_key = next((k for k in cost_item.duplicate_keys if k in {"currency", "amount"}), None)
+                    dup_path = f"defaults.max_estimated_cost.{dup_key}" if dup_key else "defaults.max_estimated_cost"
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path=dup_path,
+                    )
+                if set(cost_item.keys()) != {"currency", "amount"}:
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path="defaults.max_estimated_cost",
+                    )
+                curr = cost_item["currency"]
+                amt = cost_item["amount"]
+                if not isinstance(curr, str) or not CURRENCY_PATTERN.fullmatch(curr):
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path="defaults.max_estimated_cost.currency",
+                    )
+                if not isinstance(amt, str) or not DECIMAL_PATTERN.fullmatch(amt):
+                    raise InvalidRuntimeConfigurationError(
+                        _ROUTING_CONSTRAINTS_JSON,
+                        invalid_optional=True,
+                        path="defaults.max_estimated_cost.amount",
+                    )
+                def_cost = MoneyCeiling(amount=amt, currency=curr)
+
+            defaults = OperationalDefaults(
+                required_capabilities=def_caps,
+                required_quality_criteria=def_qual,
+                allowed_route_ids=def_routes,
+                max_estimated_cost=def_cost,
+            )
+
+        if _nested_has_duplicates(document):
+            raise InvalidRuntimeConfigurationError(
+                _ROUTING_CONSTRAINTS_JSON,
+                invalid_optional=True,
+            )
+
+        return OperationalConstraints(
+            required_capabilities=required_capabilities,
+            required_quality_criteria=required_quality_criteria,
+            allowed_route_ids=allowed_route_ids,
+            max_estimated_costs=tuple(max_estimated_costs),
+            defaults=defaults,
+        )
+    except InvalidRuntimeConfigurationError:
+        raise
+    except (TypeError, ValueError):
+        raise InvalidRuntimeConfigurationError(
+            _ROUTING_CONSTRAINTS_JSON,
+            invalid_optional=True,
+        ) from None

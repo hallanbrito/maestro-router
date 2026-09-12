@@ -7,9 +7,11 @@ internally validated selection.  It never calls a provider or mutates a route.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Iterable, Literal
+from types import MappingProxyType
+from typing import Literal
 
 from .contracts import (
     AppliedConstraint,
@@ -24,6 +26,47 @@ from .contracts import (
     Strategy,
 )
 from .economics import PriceReference
+
+
+@dataclass(frozen=True, slots=True)
+class MoneyCeiling:
+    """Exact economic limit and ISO-like uppercase currency."""
+
+    amount: str
+    currency: str
+
+    def __post_init__(self) -> None:
+        """Validate decimal grammar and uppercase currency code."""
+        if not DECIMAL_PATTERN.fullmatch(self.amount):
+            raise ValueError("Ceiling amount must be a non-negative decimal string.")
+        if not CURRENCY_PATTERN.fullmatch(self.currency):
+            raise ValueError("Ceiling currency must be three uppercase letters.")
+
+    def decimal_amount(self) -> Decimal:
+        """Return the exact decimal value used in economic comparisons."""
+        return Decimal(self.amount)
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalDefaults:
+    """Operational default constraints applied when omitted by the request."""
+
+    required_capabilities: frozenset[str] = field(default_factory=frozenset)
+    required_quality_criteria: frozenset[str] = field(default_factory=frozenset)
+    allowed_route_ids: frozenset[str] | None = None
+    max_estimated_cost: MoneyCeiling | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalConstraints:
+    """Operator-governed global constraints, ceilings, and default values."""
+
+    required_capabilities: frozenset[str] = field(default_factory=frozenset)
+    required_quality_criteria: frozenset[str] = field(default_factory=frozenset)
+    allowed_route_ids: frozenset[str] | None = None
+    max_estimated_costs: tuple[MoneyCeiling, ...] = ()
+    defaults: OperationalDefaults = field(default_factory=OperationalDefaults)
+
 
 
 EstimateStatus = Literal["available", "uncertain", "unavailable"]
@@ -125,6 +168,9 @@ class Route:
     known_unavailable: bool = False
     estimate: EconomicEstimate = field(default_factory=_default_estimate)
     price_reference: PriceReference | None = None
+    quality_evidence_references: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         """Validate route identity and the optional neutral price reference."""
@@ -145,13 +191,27 @@ class Route:
             self.price_reference, PriceReference
         ):
             raise ValueError("Route price reference must be provider-neutral.")
+        frozen_refs: dict[str, tuple[str, ...]] = {}
+        if self.quality_evidence_references:
+            for crit, refs in self.quality_evidence_references.items():
+                if not _non_blank(crit):
+                    raise ValueError("Quality criteria must be non-blank.")
+                if not refs or any(not _non_blank(r) for r in refs):
+                    raise ValueError("Evidence references must be non-blank.")
+                frozen_refs[crit] = tuple(sorted(refs))
+        object.__setattr__(
+            self,
+            "quality_evidence_references",
+            MappingProxyType(frozen_refs),
+        )
 
 
 class RouteCatalog:
     """In-memory route snapshot used by the routing decision.
 
     This slice contains valid and executable routes, alongside explicitly tracked
-    configuration-isolated invalid route IDs necessary for routing explanations.
+    configuration-isolated invalid route IDs necessary for routing explanations,
+    and frozen operational routing constraints.
     """
 
     def __init__(
@@ -159,8 +219,9 @@ class RouteCatalog:
         routes: Iterable[Route] = (),
         *,
         configuration_invalid_route_ids: Iterable[str] = (),
+        operational_constraints: OperationalConstraints | None = None,
     ) -> None:
-        """Freeze executable routes and separately tracked invalid route IDs."""
+        """Freeze executable routes, invalid route IDs, and operational constraints."""
 
         snapshot = tuple(routes)
         route_ids = [route.id for route in snapshot]
@@ -183,6 +244,11 @@ class RouteCatalog:
             raise ValueError("Configuration invalid route IDs must not overlap with executable route IDs.")
 
         self.configuration_invalid_route_ids = frozenset(invalid_ids)
+        self.operational_constraints = (
+            operational_constraints
+            if operational_constraints is not None
+            else OperationalConstraints()
+        )
 
     def snapshot(self) -> tuple[Route, ...]:
         """Return the immutable route tuple used for one routing evaluation."""
@@ -241,6 +307,7 @@ class _SelectionContext:
     required_capabilities: frozenset[str]
     required_quality: frozenset[str]
     max_estimated_cost: tuple[str, str] | None
+    effective_ceilings: tuple[tuple[str, str], ...]
     locally_invalid_route_ids: frozenset[str]
     exclusions: tuple[Exclusion, ...]
 
@@ -255,6 +322,298 @@ class _RefusalContext:
     kind: Literal[
         "no_candidates", "economic_insufficiency", "ceiling_violations"
     ]
+    applied_constraints: tuple[AppliedConstraint, ...] = ()
+    effective_ceilings: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _ComposedConstraints:
+    """Monotonically composed operational and request constraints."""
+
+    effective_allowed_route_ids: frozenset[str] | None
+    effective_required_capabilities: frozenset[str]
+    effective_required_quality: frozenset[str]
+    effective_ceilings: tuple[tuple[str, str], ...]
+    all_applicable_ceilings: tuple[tuple[str, str], ...]
+    applied_constraints: tuple[AppliedConstraint, ...]
+
+
+def _compose_effective_constraints(
+    request: ExecutionRequest,
+    operational_constraints: OperationalConstraints,
+) -> _ComposedConstraints:
+    """Form effective constraints monotonically from configuration and request."""
+
+    constraints = request.constraints
+    defaults = operational_constraints.defaults
+
+    req_allowed_specified = (
+        constraints is not None and constraints.allowed_route_ids is not None
+    )
+    req_allowed = (
+        frozenset(constraints.allowed_route_ids)
+        if req_allowed_specified
+        else None
+    )
+    default_allowed = defaults.allowed_route_ids
+    config_allowed = operational_constraints.allowed_route_ids
+
+    if req_allowed_specified:
+        candidate_allowed = req_allowed
+    elif default_allowed is not None:
+        candidate_allowed = default_allowed
+    else:
+        candidate_allowed = None
+
+    if config_allowed is not None and candidate_allowed is not None:
+        effective_allowed = config_allowed & candidate_allowed
+    elif config_allowed is not None:
+        effective_allowed = config_allowed
+    elif candidate_allowed is not None:
+        effective_allowed = candidate_allowed
+    else:
+        effective_allowed = None
+
+    req_caps_specified = (
+        constraints is not None and constraints.required_capabilities is not None
+    )
+    if req_caps_specified:
+        assert constraints is not None
+        assert constraints.required_capabilities is not None
+        req_caps = frozenset(constraints.required_capabilities)
+    elif defaults.required_capabilities:
+        req_caps = defaults.required_capabilities
+    else:
+        req_caps = frozenset()
+    effective_caps = operational_constraints.required_capabilities | req_caps
+
+    req_qual_specified = (
+        constraints is not None and constraints.required_quality_criteria is not None
+    )
+    if req_qual_specified:
+        assert constraints is not None
+        assert constraints.required_quality_criteria is not None
+        req_qual = frozenset(constraints.required_quality_criteria)
+    elif defaults.required_quality_criteria:
+        req_qual = defaults.required_quality_criteria
+    else:
+        req_qual = frozenset()
+    effective_qual = operational_constraints.required_quality_criteria | req_qual
+
+    req_cost_specified = (
+        constraints is not None and constraints.max_estimated_cost is not None
+    )
+    if req_cost_specified:
+        assert constraints is not None
+        assert constraints.max_estimated_cost is not None
+        req_ceiling = (
+            constraints.max_estimated_cost.amount,
+            constraints.max_estimated_cost.currency,
+        )
+    elif defaults.max_estimated_cost is not None:
+        req_ceiling = (
+            defaults.max_estimated_cost.amount,
+            defaults.max_estimated_cost.currency,
+        )
+    else:
+        req_ceiling = None
+
+    config_ceilings = tuple(
+        (c.amount, c.currency) for c in operational_constraints.max_estimated_costs
+    )
+
+    all_applicable: list[tuple[str, str]] = list(config_ceilings)
+    if req_ceiling is not None:
+        all_applicable.append(req_ceiling)
+
+    effective_ceiling_map: dict[str, str] = {}
+    for amount, currency in all_applicable:
+        dec_amount = Decimal(amount)
+        if currency not in effective_ceiling_map:
+            effective_ceiling_map[currency] = amount
+        else:
+            if dec_amount < Decimal(effective_ceiling_map[currency]):
+                effective_ceiling_map[currency] = amount
+
+    effective_ceilings_tuple = tuple(
+        (effective_ceiling_map[curr], curr)
+        for curr in sorted(effective_ceiling_map.keys())
+    )
+
+    applied: list[AppliedConstraint] = []
+    if req_allowed_specified:
+        assert constraints is not None
+        assert constraints.allowed_route_ids is not None
+        applied.append(
+            AppliedConstraint(
+                source="request",
+                category="route",
+                description=(
+                    "Somente "
+                    + ", ".join(sorted(constraints.allowed_route_ids))
+                    + " podiam ser consideradas."
+                ),
+            )
+        )
+    if req_caps_specified:
+        assert constraints is not None
+        assert constraints.required_capabilities is not None
+        applied.append(
+            AppliedConstraint(
+                source="request",
+                category="capability",
+                description=(
+                    "A rota precisava declarar "
+                    + ", ".join(sorted(constraints.required_capabilities))
+                    + "."
+                ),
+            )
+        )
+    if req_qual_specified:
+        assert constraints is not None
+        assert constraints.required_quality_criteria is not None
+        applied.append(
+            AppliedConstraint(
+                source="request",
+                category="quality",
+                description=(
+                    "A rota precisava satisfazer "
+                    + ", ".join(sorted(constraints.required_quality_criteria))
+                    + "."
+                ),
+            )
+        )
+    if req_cost_specified:
+        assert constraints is not None
+        assert constraints.max_estimated_cost is not None
+        limit = constraints.max_estimated_cost
+        applied.append(
+            AppliedConstraint(
+                source="request",
+                category="economics",
+                description=f"A estimativa não podia exceder {limit.currency} {limit.amount}.",
+            )
+        )
+
+    if operational_constraints.allowed_route_ids is not None:
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="route",
+                description=(
+                    "Somente "
+                    + ", ".join(sorted(operational_constraints.allowed_route_ids))
+                    + " podiam ser consideradas."
+                ),
+            )
+        )
+    if operational_constraints.required_capabilities:
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="capability",
+                description=(
+                    "A rota precisava declarar "
+                    + ", ".join(sorted(operational_constraints.required_capabilities))
+                    + "."
+                ),
+            )
+        )
+    if operational_constraints.required_quality_criteria:
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="quality",
+                description=(
+                    "A rota precisava satisfazer "
+                    + ", ".join(sorted(operational_constraints.required_quality_criteria))
+                    + "."
+                ),
+            )
+        )
+    for ceiling in sorted(operational_constraints.max_estimated_costs, key=lambda c: c.currency):
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="economics",
+                description=f"A estimativa não podia exceder {ceiling.currency} {ceiling.amount}.",
+            )
+        )
+
+    if not req_allowed_specified and default_allowed is not None:
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="route",
+                description=(
+                    "Somente "
+                    + ", ".join(sorted(default_allowed))
+                    + " podiam ser consideradas."
+                ),
+            )
+        )
+    if not req_caps_specified and defaults.required_capabilities:
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="capability",
+                description=(
+                    "A rota precisava declarar "
+                    + ", ".join(sorted(defaults.required_capabilities))
+                    + "."
+                ),
+            )
+        )
+    if not req_qual_specified and defaults.required_quality_criteria:
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="quality",
+                description=(
+                    "A rota precisava satisfazer "
+                    + ", ".join(sorted(defaults.required_quality_criteria))
+                    + "."
+                ),
+            )
+        )
+    if not req_cost_specified and defaults.max_estimated_cost is not None:
+        def_limit = defaults.max_estimated_cost
+        applied.append(
+            AppliedConstraint(
+                source="configuration",
+                category="economics",
+                description=f"A estimativa não podia exceder {def_limit.currency} {def_limit.amount}.",
+            )
+        )
+
+    return _ComposedConstraints(
+        effective_allowed_route_ids=effective_allowed,
+        effective_required_capabilities=effective_caps,
+        effective_required_quality=effective_qual,
+        effective_ceilings=effective_ceilings_tuple,
+        all_applicable_ceilings=tuple(all_applicable),
+        applied_constraints=tuple(applied),
+    )
+
+
+def _quality_factors(
+    route: Route, required_quality: frozenset[str]
+) -> list[DecisionFactor]:
+    """Generate determining quality factors for a route satisfying required criteria."""
+
+    factors: list[DecisionFactor] = []
+    if required_quality:
+        for criterion in sorted(required_quality):
+            raw_refs = route.quality_evidence_references.get(criterion, ())
+            refs = list(sorted(raw_refs))
+            factors.append(
+                DecisionFactor(
+                    category="quality",
+                    description=f"{route.id} satisfez o critério de qualidade {criterion}.",
+                    references=refs if refs else None,
+                )
+            )
+    return factors
 
 
 def route_request(
@@ -263,6 +622,7 @@ def route_request(
     *,
     locally_invalid_route_ids: frozenset[str] = frozenset(),
     invalid_execution_route_ids: frozenset[str] = frozenset(),
+    operational_constraints: OperationalConstraints | None = None,
 ) -> RefusalResponse | SelectedDecision:
     """Evaluate routing and return a refusal or one validated selection.
 
@@ -271,18 +631,12 @@ def route_request(
     ``invalid_route``.
     """
 
-    constraints = request.constraints
-    allowed_route_ids = (
-        frozenset(constraints.allowed_route_ids)
-        if constraints and constraints.allowed_route_ids
-        else None
-    )
-    required_capabilities = frozenset(
-        constraints.required_capabilities or [] if constraints else []
-    )
-    required_quality = frozenset(
-        constraints.required_quality_criteria or [] if constraints else []
-    )
+    if operational_constraints is None:
+        operational_constraints = getattr(
+            catalog, "operational_constraints", OperationalConstraints()
+        )
+
+    composed = _compose_effective_constraints(request, operational_constraints)
 
     exclusions: list[Exclusion] = []
     candidates: list[Route] = []
@@ -293,9 +647,9 @@ def route_request(
             route,
             locally_invalid_route_ids,
             invalid_execution_route_ids,
-            allowed_route_ids,
-            required_capabilities,
-            required_quality,
+            composed.effective_allowed_route_ids,
+            composed.effective_required_capabilities,
+            composed.effective_required_quality,
         )
         if exclusion is None:
             candidates.append(route)
@@ -317,6 +671,11 @@ def route_request(
                 )
             )
 
+    applied_constraints = tuple(
+        list(composed.applied_constraints)
+        + _configuration_constraints(exclusions)
+    )
+
     if not candidates:
         return _validated_refusal(
             _RefusalContext(
@@ -324,21 +683,29 @@ def route_request(
                 candidates=(),
                 exclusions=tuple(exclusions),
                 kind="no_candidates",
+                applied_constraints=applied_constraints,
+                effective_ceilings=composed.effective_ceilings,
             )
         )
 
-    return _evaluate_economics(request, candidates, exclusions)
+    return _evaluate_economics(request, candidates, exclusions, composed)
 
 
 def _evaluate_economics(
     request: ExecutionRequest,
     candidates: list[Route],
     exclusions: list[Exclusion],
+    composed: _ComposedConstraints,
 ) -> RefusalResponse | SelectedDecision:
     """Apply economic gates and proceed to deterministic selection when safe."""
 
-    limit = request.constraints.max_estimated_cost if request.constraints else None
-    if limit is None:
+    ceilings = composed.effective_ceilings
+    applied_constraints = tuple(
+        list(composed.applied_constraints)
+        + _configuration_constraints(exclusions)
+    )
+
+    if not ceilings:
         # With one eligible route there is nothing to compare, so missing price
         # information cannot alter which route wins.
         if len(candidates) == 1:
@@ -347,6 +714,10 @@ def _evaluate_economics(
                 request,
                 candidates,
                 exclusions,
+                composed,
+            )
+            quality_factors = _quality_factors(
+                route, composed.effective_required_quality
             )
             decision = SelectedDecision(
                 selected_routes=(route,),
@@ -356,6 +727,7 @@ def _evaluate_economics(
                 reason=f"{route.id} foi selecionada por ser a única rota elegível.",
                 factors=tuple(
                     (_factors(exclusions) if exclusions else [])
+                    + quality_factors
                     + [
                         DecisionFactor(
                             category="route",
@@ -379,34 +751,51 @@ def _evaluate_economics(
             if route.estimate.status == "available" and route.estimate.comparable
         ]
         if not comparable:
-            return _economic_information_refusal(request, exclusions, candidates)
+            return _economic_information_refusal(
+                request,
+                exclusions,
+                candidates,
+                applied_constraints=applied_constraints,
+            )
 
         currencies = {route.estimate.currency for route in comparable}
         if len(currencies) != 1:
-            return _economic_information_refusal(request, exclusions, candidates)
+            return _economic_information_refusal(
+                request,
+                exclusions,
+                candidates,
+                applied_constraints=applied_constraints,
+            )
 
         context = _selection_context(
             request,
             candidates,
             exclusions,
+            composed,
         )
-        return _select_lowest_cost(context, exclusions)
+        return _select_lowest_cost(context, exclusions, composed)
 
-    # A ceiling requires each winning route to prove amount, comparability, and
-    # matching currency before it can be considered admissible.
-    ceiling = Decimal(limit.amount)
+    # Ceilings exist
+    ceiling_map = {curr: Decimal(amt) for amt, curr in ceilings}
+    ceiling_str_map = {curr: amt for amt, curr in ceilings}
+
     admissible: list[Route] = []
     indeterminate: list[Route] = []
+    conclusive_violation: list[Route] = []
+
     for route in candidates:
         estimate = route.estimate
-        if (
-            estimate.status != "available"
-            or not estimate.comparable
-            or estimate.currency != limit.currency
-        ):
+        if estimate.status != "available" or not estimate.comparable:
             indeterminate.append(route)
-        elif estimate.decimal_amount() <= ceiling:
-            admissible.append(route)
+        elif estimate.currency not in ceiling_map:
+            indeterminate.append(route)
+        elif estimate.decimal_amount() > ceiling_map[estimate.currency]:
+            conclusive_violation.append(route)
+        else:
+            if len(ceiling_map) == 1:
+                admissible.append(route)
+            else:
+                indeterminate.append(route)
 
     if admissible:
         if len(admissible) == 1:
@@ -415,20 +804,36 @@ def _evaluate_economics(
                 request,
                 candidates,
                 exclusions,
+                composed,
+            )
+            quality_factors = _quality_factors(
+                route, composed.effective_required_quality
             )
             economic_factors = []
             for candidate in candidates:
                 if candidate is route:
                     economic_factors.append(
-                        _selected_estimate_factor(candidate, limit.amount)
+                        _selected_estimate_factor(
+                            candidate, ceiling_str_map[candidate.estimate.currency]
+                        )
                     )
                 elif candidate in indeterminate:
+                    missing = sorted(
+                        c for c in ceiling_map if c != candidate.estimate.currency
+                    )
+                    req_c = (
+                        missing[0]
+                        if len(missing) == 1
+                        else (", ".join(missing) if missing else None)
+                    )
                     economic_factors.append(
-                        _estimate_factor(candidate, limit.currency)
+                        _estimate_factor(candidate, req_c)
                     )
                 else:
                     economic_factors.append(
-                        _ceiling_violation_factor(candidate, limit.amount)
+                        _ceiling_violation_factor(
+                            candidate, ceiling_str_map[candidate.estimate.currency]
+                        )
                     )
             decision = SelectedDecision(
                 selected_routes=(route,),
@@ -441,6 +846,7 @@ def _evaluate_economics(
                 ),
                 factors=tuple(
                     (_factors(exclusions) if exclusions else [])
+                    + quality_factors
                     + economic_factors
                 ),
                 selectable_routes=context.selectable_routes,
@@ -448,14 +854,23 @@ def _evaluate_economics(
                 evaluated_estimates=context.evaluated_estimates,
             )
             return _validate_selection(context, decision)
+
         context = _selection_context(
             request,
             candidates,
             exclusions,
+            composed,
         )
-        return _select_lowest_cost(context, exclusions)
+        return _select_lowest_cost(context, exclusions, composed)
+
     if indeterminate:
-        return _economic_information_refusal(request, exclusions, candidates)
+        return _economic_information_refusal(
+            request,
+            exclusions,
+            candidates,
+            applied_constraints=applied_constraints,
+            effective_ceilings=ceilings,
+        )
 
     return _validated_refusal(
         _RefusalContext(
@@ -463,6 +878,8 @@ def _evaluate_economics(
             candidates=tuple(candidates),
             exclusions=tuple(exclusions),
             kind="ceiling_violations",
+            applied_constraints=applied_constraints,
+            effective_ceilings=ceilings,
         )
     )
 
@@ -471,36 +888,63 @@ def _selection_context(
     request: ExecutionRequest,
     candidates: list[Route],
     exclusions: list[Exclusion],
+    composed: _ComposedConstraints | None = None,
 ) -> _SelectionContext:
     """Freeze authoritative candidate sets and constraints before selection."""
 
-    constraints = request.constraints
-    limit = constraints.max_estimated_cost if constraints else None
-    ordered_candidates = tuple(sorted(candidates, key=lambda route: route.id))
-    comparable_routes = [
-        route
-        for route in ordered_candidates
-        if (
-            route.estimate.status == "available"
-            and route.estimate.comparable
-            and (limit is None or route.estimate.currency == limit.currency)
+    if composed is None:
+        composed = _compose_effective_constraints(
+            request, OperationalConstraints()
         )
-    ]
-    if limit is None:
+
+    ordered_candidates = tuple(sorted(candidates, key=lambda route: route.id))
+    ceilings = composed.effective_ceilings
+    ceiling_map = {curr: Decimal(amt) for amt, curr in ceilings}
+
+    if not ceilings:
+        comparable_routes = [
+            route
+            for route in ordered_candidates
+            if route.estimate.status == "available" and route.estimate.comparable
+        ]
         selectable_routes = (
             list(ordered_candidates)
             if len(ordered_candidates) == 1
             else comparable_routes
         )
-        compared_routes = comparable_routes if len(ordered_candidates) > 1 else []
+        compared_routes = (
+            comparable_routes if len(ordered_candidates) > 1 else []
+        )
     else:
-        ceiling = Decimal(limit.amount)
+        comparable_routes = [
+            route
+            for route in ordered_candidates
+            if (
+                route.estimate.status == "available"
+                and route.estimate.comparable
+                and route.estimate.currency in ceiling_map
+            )
+        ]
         selectable_routes = [
             route
             for route in comparable_routes
-            if route.estimate.decimal_amount() <= ceiling
+            if (
+                len(ceiling_map) == 1
+                and route.estimate.decimal_amount()
+                <= ceiling_map[route.estimate.currency]
+            )
         ]
-        compared_routes = selectable_routes if len(selectable_routes) > 1 else []
+        compared_routes = (
+            selectable_routes if len(selectable_routes) > 1 else []
+        )
+
+    applied_constraints = tuple(
+        list(composed.applied_constraints)
+        + _configuration_constraints(exclusions)
+    )
+    max_est_cost = (
+        (ceilings[0][0], ceilings[0][1]) if len(ceilings) == 1 else None
+    )
 
     return _SelectionContext(
         candidates=ordered_candidates,
@@ -520,23 +964,12 @@ def _selection_context(
                 key=lambda route: (route.estimate.decimal_amount(), route.id),
             )
         ),
-        applied_constraints=tuple(
-            _request_constraints(request) + _configuration_constraints(exclusions)
-        ),
-        allowed_route_ids=(
-            frozenset(constraints.allowed_route_ids)
-            if constraints and constraints.allowed_route_ids
-            else None
-        ),
-        required_capabilities=frozenset(
-            constraints.required_capabilities or [] if constraints else []
-        ),
-        required_quality=frozenset(
-            constraints.required_quality_criteria or [] if constraints else []
-        ),
-        max_estimated_cost=(
-            (limit.amount, limit.currency) if limit is not None else None
-        ),
+        applied_constraints=applied_constraints,
+        allowed_route_ids=composed.effective_allowed_route_ids,
+        required_capabilities=composed.effective_required_capabilities,
+        required_quality=composed.effective_required_quality,
+        max_estimated_cost=max_est_cost,
+        effective_ceilings=ceilings,
         locally_invalid_route_ids=frozenset(
             exclusion.route_id
             for exclusion in exclusions
@@ -549,6 +982,7 @@ def _selection_context(
 def _select_lowest_cost(
     context: _SelectionContext,
     exclusions: list[Exclusion],
+    composed: _ComposedConstraints | None = None,
 ) -> SelectedDecision:
     """Select the minimum exact estimate and break numeric ties by route ID."""
 
@@ -570,13 +1004,27 @@ def _select_lowest_cost(
     ]
 
     factors = (_factors(exclusions) if exclusions else [])
+    factors.extend(_quality_factors(selected, context.required_quality))
+
+    ceiling_str_map = {curr: amt for amt, curr in context.effective_ceilings}
     for route in context.candidates:
-        if context.max_estimated_cost is not None and route in removed:
-            ceiling, currency = context.max_estimated_cost
+        if ceiling_str_map and route in removed:
             if route in context.comparable_routes:
-                factors.append(_ceiling_violation_factor(route, ceiling))
+                factors.append(
+                    _ceiling_violation_factor(
+                        route, ceiling_str_map[route.estimate.currency]
+                    )
+                )
                 continue
-            factors.append(_estimate_factor(route, currency))
+            missing = sorted(
+                c for c in ceiling_str_map if c != route.estimate.currency
+            )
+            req_c = (
+                missing[0]
+                if len(missing) == 1
+                else (", ".join(missing) if missing else None)
+            )
+            factors.append(_estimate_factor(route, req_c))
             continue
         factors.append(_estimate_factor(route))
     factors.append(
@@ -679,14 +1127,23 @@ def _validate_selection(
         raise InvalidDecisionError(
             "Selected route violates an applicable constraint."
         )
-    if context.max_estimated_cost is not None:
-        ceiling, currency = context.max_estimated_cost
+
+    ceilings_to_check = (
+        context.effective_ceilings
+        if context.effective_ceilings
+        else (
+            ((context.max_estimated_cost[0], context.max_estimated_cost[1]),)
+            if context.max_estimated_cost is not None
+            else ()
+        )
+    )
+    for ceiling_amount, ceiling_currency in ceilings_to_check:
         estimate = selected.estimate
         if (
             estimate.status != "available"
             or not estimate.comparable
-            or estimate.currency != currency
-            or estimate.decimal_amount() > Decimal(ceiling)
+            or estimate.currency != ceiling_currency
+            or estimate.decimal_amount() > Decimal(ceiling_amount)
         ):
             raise InvalidDecisionError(
                 "Selected route did not prove ceiling compliance."
@@ -743,7 +1200,10 @@ def _expected_selection_explanation(
     """Derive the authoritative selection reason and determining factors."""
 
     factors = _factors(list(context.exclusions)) if context.exclusions else []
-    if context.max_estimated_cost is None and len(context.candidates) == 1:
+    factors.extend(_quality_factors(selected, context.required_quality))
+    ceiling_str_map = {curr: amt for amt, curr in context.effective_ceilings}
+
+    if not ceiling_str_map and len(context.candidates) == 1:
         factors.append(
             DecisionFactor(
                 category="route",
@@ -755,15 +1215,30 @@ def _expected_selection_explanation(
             tuple(factors),
         )
 
-    if context.max_estimated_cost is not None and len(context.selectable_routes) == 1:
-        ceiling, currency = context.max_estimated_cost
+    if ceiling_str_map and len(context.selectable_routes) == 1:
         for candidate in context.candidates:
             if candidate is selected:
-                factors.append(_selected_estimate_factor(candidate, ceiling))
+                factors.append(
+                    _selected_estimate_factor(
+                        candidate, ceiling_str_map[candidate.estimate.currency]
+                    )
+                )
             elif candidate not in context.comparable_routes:
-                factors.append(_estimate_factor(candidate, currency))
+                missing = sorted(
+                    c for c in ceiling_str_map if c != candidate.estimate.currency
+                )
+                req_c = (
+                    missing[0]
+                    if len(missing) == 1
+                    else (", ".join(missing) if missing else None)
+                )
+                factors.append(_estimate_factor(candidate, req_c))
             else:
-                factors.append(_ceiling_violation_factor(candidate, ceiling))
+                factors.append(
+                    _ceiling_violation_factor(
+                        candidate, ceiling_str_map[candidate.estimate.currency]
+                    )
+                )
         return (
             f"{selected.id} foi selecionada por ser a única rota que "
             "comprovou admissibilidade econômica.",
@@ -772,14 +1247,25 @@ def _expected_selection_explanation(
 
     for candidate in context.candidates:
         if (
-            context.max_estimated_cost is not None
+            ceiling_str_map
             and candidate not in context.selectable_routes
         ):
-            ceiling, currency = context.max_estimated_cost
             if candidate in context.comparable_routes:
-                factors.append(_ceiling_violation_factor(candidate, ceiling))
+                factors.append(
+                    _ceiling_violation_factor(
+                        candidate, ceiling_str_map[candidate.estimate.currency]
+                    )
+                )
             else:
-                factors.append(_estimate_factor(candidate, currency))
+                missing = sorted(
+                    c for c in ceiling_str_map if c != candidate.estimate.currency
+                )
+                req_c = (
+                    missing[0]
+                    if len(missing) == 1
+                    else (", ".join(missing) if missing else None)
+                )
+                factors.append(_estimate_factor(candidate, req_c))
         else:
             factors.append(_estimate_factor(candidate))
     factors.append(
@@ -844,13 +1330,19 @@ def _expected_refusal_explanation(
         if context.request.constraints
         else None
     )
+    effective_ceilings_map = {curr: amt for amt, curr in context.effective_ceilings}
+    if not effective_ceilings_map and limit is not None:
+        effective_ceilings_map = {limit.currency: limit.amount}
+
     if context.kind == "ceiling_violations":
-        if limit is None:
+        if not effective_ceilings_map:
             raise InvalidDecisionError(
                 "A ceiling refusal requires an authoritative economic limit."
             )
         factors.extend(
-            _ceiling_violation_factor(route, limit.amount)
+            _ceiling_violation_factor(
+                route, effective_ceilings_map[route.estimate.currency]
+            )
             for route in context.candidates
         )
         return (
@@ -863,17 +1355,35 @@ def _expected_refusal_explanation(
 
     if context.kind != "economic_insufficiency":
         raise InvalidDecisionError("Unknown authoritative refusal kind.")
-    if limit is not None:
+
+    if effective_ceilings_map:
+        effective_ceilings_dec = {
+            curr: Decimal(amt) for curr, amt in effective_ceilings_map.items()
+        }
         for route in context.candidates:
             estimate = route.estimate
             if (
-                estimate.status != "available"
-                or not estimate.comparable
-                or estimate.currency != limit.currency
+                estimate.status == "available"
+                and estimate.comparable
+                and estimate.currency in effective_ceilings_dec
+                and estimate.decimal_amount()
+                > effective_ceilings_dec[estimate.currency]
             ):
-                factors.append(_estimate_factor(route, limit.currency))
+                factors.append(
+                    _ceiling_violation_factor(
+                        route, effective_ceilings_map[estimate.currency]
+                    )
+                )
             else:
-                factors.append(_ceiling_violation_factor(route, limit.amount))
+                missing = sorted(
+                    c for c in effective_ceilings_map if c != estimate.currency
+                )
+                req_c = (
+                    missing[0]
+                    if len(missing) == 1
+                    else (", ".join(missing) if missing else None)
+                )
+                factors.append(_estimate_factor(route, req_c))
     else:
         comparable = [
             route
@@ -883,7 +1393,9 @@ def _expected_refusal_explanation(
         if comparable:
             factors.extend(_currency_factor(route) for route in comparable)
         else:
-            factors.extend(_estimate_factor(route) for route in context.candidates)
+            factors.extend(
+                _estimate_factor(route) for route in context.candidates
+            )
     return (
         "INSUFFICIENT_ECONOMIC_INFORMATION",
         "Não há informação econômica suficiente para decidir a rota.",
@@ -911,12 +1423,20 @@ def _validate_refusal_context(context: _RefusalContext) -> None:
         raise InvalidDecisionError(
             "An economic refusal requires authoritative candidates."
         )
+
+    effective_ceilings_dec = {
+        curr: Decimal(amt) for amt, curr in context.effective_ceilings
+    }
+    if not effective_ceilings_dec and limit is not None:
+        effective_ceilings_dec = {limit.currency: Decimal(limit.amount)}
+
     if context.kind == "ceiling_violations":
-        if limit is None or any(
+        if not effective_ceilings_dec or any(
             route.estimate.status != "available"
             or not route.estimate.comparable
-            or route.estimate.currency != limit.currency
-            or route.estimate.decimal_amount() <= Decimal(limit.amount)
+            or route.estimate.currency not in effective_ceilings_dec
+            or route.estimate.decimal_amount()
+            <= effective_ceilings_dec[route.estimate.currency]
             for route in context.candidates
         ):
             raise InvalidDecisionError(
@@ -925,27 +1445,38 @@ def _validate_refusal_context(context: _RefusalContext) -> None:
         return
     if context.kind != "economic_insufficiency":
         raise InvalidDecisionError("Unknown authoritative refusal kind.")
-    if limit is not None:
+
+    if effective_ceilings_dec:
+        conclusive_violation = [
+            route
+            for route in context.candidates
+            if route.estimate.status == "available"
+            and route.estimate.comparable
+            and route.estimate.currency in effective_ceilings_dec
+            and route.estimate.decimal_amount()
+            > effective_ceilings_dec[route.estimate.currency]
+        ]
         admissible = [
             route
             for route in context.candidates
             if route.estimate.status == "available"
             and route.estimate.comparable
-            and route.estimate.currency == limit.currency
-            and route.estimate.decimal_amount() <= Decimal(limit.amount)
+            and route.estimate.currency in effective_ceilings_dec
+            and len(effective_ceilings_dec) == 1
+            and route.estimate.decimal_amount()
+            <= effective_ceilings_dec[route.estimate.currency]
         ]
         indeterminate = [
             route
             for route in context.candidates
-            if route.estimate.status != "available"
-            or not route.estimate.comparable
-            or route.estimate.currency != limit.currency
+            if route not in conclusive_violation and route not in admissible
         ]
         if admissible or not indeterminate:
             raise InvalidDecisionError(
                 "Economic insufficiency contradicts ceiling precedence."
             )
         return
+
     comparable = [
         route
         for route in context.candidates
@@ -981,6 +1512,9 @@ def _economic_information_refusal(
     request: ExecutionRequest,
     exclusions: list[Exclusion],
     candidates: list[Route],
+    *,
+    applied_constraints: tuple[AppliedConstraint, ...] = (),
+    effective_ceilings: tuple[tuple[str, str], ...] = (),
 ) -> RefusalResponse:
     """Build a refusal for insufficient comparable economic information."""
 
@@ -990,6 +1524,8 @@ def _economic_information_refusal(
             candidates=tuple(candidates),
             exclusions=tuple(exclusions),
             kind="economic_insufficiency",
+            applied_constraints=applied_constraints,
+            effective_ceilings=effective_ceilings,
         )
     )
 
@@ -998,8 +1534,14 @@ def _validated_refusal(context: _RefusalContext) -> RefusalResponse:
     """Assemble one explainable refusal and validate it against authoritative facts."""
 
     code, message, reason, factors = _expected_refusal_explanation(context)
-    applied_constraints = _request_constraints(context.request)
-    applied_constraints.extend(_configuration_constraints(list(context.exclusions)))
+    applied_constraints = (
+        list(context.applied_constraints)
+        if context.applied_constraints
+        else (
+            _request_constraints(context.request)
+            + _configuration_constraints(list(context.exclusions))
+        )
+    )
     response = RefusalResponse(
         error=PublicError(code=code, message=message),
         decision=RefusedDecision(
@@ -1018,8 +1560,14 @@ def _validate_refusal(
     """Validate that a constructed refusal matches its expected explanation."""
 
     code, message, reason, factors = _expected_refusal_explanation(context)
-    expected_constraints = _request_constraints(context.request)
-    expected_constraints.extend(_configuration_constraints(list(context.exclusions)))
+    expected_constraints = (
+        list(context.applied_constraints)
+        if context.applied_constraints
+        else (
+            _request_constraints(context.request)
+            + _configuration_constraints(list(context.exclusions))
+        )
+    )
     if (
         response.error.code != code
         or response.error.message != message

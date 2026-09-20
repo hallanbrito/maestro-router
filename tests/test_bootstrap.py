@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from threading import Barrier, Lock
@@ -2755,3 +2756,501 @@ def test_multiroute_new_fields_isolation_preserved_for_all_malformations(
     resp = client.post("/v1/executions", json={"task": "Run valid route."})
     assert resp.status_code == 200
     assert resp.json()["decision"]["route"]["id"] == "route-b"
+
+
+def test_multiroute_known_unavailable_absence_and_boolean_values() -> None:
+    route_absent = make_route_json("route-a", "model-a", "price-a")
+    route_false = make_route_json("route-b", "model-b", "price-b")
+    route_false["known_unavailable"] = False
+    route_true = make_route_json("route-c", "model-c", "price-c")
+    route_true["known_unavailable"] = True
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps(
+            {"routes": [route_absent, route_false, route_true]}
+        ),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    # Calling with allowed_route_ids=["route-c"]: route-c is excluded due to known_unavailability
+    resp = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-c"]}},
+    )
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert data["decision"]["outcome"] == "refused"
+    assert any(
+        f["category"] == "availability" and "route-c estava conhecida como indisponível" in f["description"]
+        for f in data["decision"]["factors"]
+    )
+    assert any(
+        c["category"] == "availability" and c["source"] == "configuration"
+        for c in data["decision"]["applied_constraints"]
+    )
+
+    # Calling with allowed_route_ids=["route-b"]: route-b is selected and executed
+    resp_b = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-b"]}},
+    )
+    assert resp_b.status_code == 200
+    assert resp_b.json()["decision"]["route"]["id"] == "route-b"
+
+    # Calling with allowed_route_ids=["route-a"]: route-a (absent known_unavailable) is selected and executed
+    resp_a = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a"]}},
+    )
+    assert resp_a.status_code == 200
+    assert resp_a.json()["decision"]["route"]["id"] == "route-a"
+
+
+@pytest.mark.parametrize(
+    "invalid_val",
+    [
+        None,
+        0,
+        1,
+        "true",
+        "false",
+        "invalid",
+        [],
+        {},
+        1.0,
+    ],
+)
+def test_multiroute_known_unavailable_invalid_types_parameterized(
+    invalid_val: Any,
+) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["known_unavailable"] = invalid_val
+
+    secret_key = "sensitive-api-key-998877"
+    config = {
+        "OPENAI_API_KEY": secret_key,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a]}),
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    error = caught.value
+    assert error.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert error.path == "routes[0].known_unavailable"
+    msg = str(error)
+    assert msg == "MAESTRO_OPENAI_ROUTES_JSON contém uma configuração inválida em routes[0].known_unavailable."
+    assert secret_key not in msg
+    assert "route-a" not in msg
+    assert "model-a" not in msg
+    assert factory.calls == []
+
+
+def test_multiroute_known_unavailable_duplicate_key_single_route_fails_sanitized() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_str = json.dumps(route_a)
+    injected_route = route_str[:-1] + ', "known_unavailable": false, "known_unavailable": true}'
+    routes_json = '{"routes": [' + injected_route + "]}"
+
+    secret_key = "sensitive-api-key-112233"
+    config = {
+        "OPENAI_API_KEY": secret_key,
+        "MAESTRO_OPENAI_ROUTES_JSON": routes_json,
+    }
+    factory = ControlledClientFactory()
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    error = caught.value
+    assert error.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert error.path == "routes[0].known_unavailable"
+    msg = str(error)
+    assert msg == "MAESTRO_OPENAI_ROUTES_JSON contém uma configuração inválida em routes[0].known_unavailable."
+    assert secret_key not in msg
+    assert factory.calls == []
+
+
+@pytest.mark.parametrize(
+    "malformed_ku_field",
+    [
+        {"known_unavailable": "not-a-bool"},
+        {"known_unavailable": 1},
+        {"known_unavailable": None},
+        {"known_unavailable": []},
+    ],
+)
+def test_multiroute_known_unavailable_local_isolation_with_valid_route(
+    malformed_ku_field: dict[str, Any],
+) -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b.update(malformed_ku_field)
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a", "route-b"]}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["decision"]["route"]["id"] == "route-a"
+    applied_constraints = data["decision"]["applied_constraints"]
+    assert any(
+        c["category"] == "route"
+        and c["source"] == "configuration"
+        and "route-b" in c["description"]
+        and "configuração local inválida" in c["description"]
+        for c in applied_constraints
+    )
+    factors = data["decision"]["factors"]
+    assert any(
+        f["category"] == "configuration"
+        and "route-b" in f["description"]
+        and "configuração local inválida" in f["description"]
+        for f in factors
+    )
+
+
+def test_multiroute_known_unavailable_duplicate_key_isolation_with_valid_route() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b_str = json.dumps(route_b)
+    injected_b = route_b_str[:-1] + ', "known_unavailable": false, "known_unavailable": true}'
+    routes_json = '{"routes": [' + json.dumps(route_a) + ", " + injected_b + "]}"
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": routes_json,
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a", "route-b"]}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["decision"]["route"]["id"] == "route-a"
+    assert any(
+        f["category"] == "configuration" and "route-b" in f["description"]
+        for f in data["decision"]["factors"]
+    )
+
+
+def test_multiroute_cheaper_unavailable_not_selected_and_only_eligible_executed() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a", input_rate="0.001", output_rate="0.001")
+    route_a["known_unavailable"] = True
+    route_b = make_route_json("route-b", "model-b", "price-b", input_rate="0.010", output_rate="0.010")
+    route_b["known_unavailable"] = False
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    client = TestClient(app)
+    resp = client.post("/v1/executions", json={"task": "Execute cheapest eligible."})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["decision"]["route"]["id"] == "route-b"
+    assert any(
+        f["category"] == "availability" and "route-a" in f["description"]
+        for f in data["decision"]["factors"]
+    )
+    assert any(
+        c["category"] == "availability" and c["source"] == "configuration" and "route-a" in c["description"]
+        for c in data["decision"]["applied_constraints"]
+    )
+    assert factory.client is not None
+    assert len(factory.client.responses.calls) == 1
+    assert factory.client.responses.calls[0]["model"] == "model-b"
+
+
+def test_multiroute_all_routes_known_unavailable_refuses_without_external_call() -> None:
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["known_unavailable"] = True
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["known_unavailable"] = True
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    client = TestClient(app)
+    resp = client.post("/v1/executions", json={"task": "Execute under unavailability."})
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert data["decision"]["outcome"] == "refused"
+    assert data["decision"]["strategy"]["applied"] is False
+    factors = data["decision"]["factors"]
+    assert any(f["category"] == "availability" and "route-a" in f["description"] for f in factors)
+    assert any(f["category"] == "availability" and "route-b" in f["description"] for f in factors)
+    applied_constraints = data["decision"]["applied_constraints"]
+    assert any(c["category"] == "availability" and c["source"] == "configuration" and "route-a" in c["description"] for c in applied_constraints)
+    assert any(c["category"] == "availability" and c["source"] == "configuration" and "route-b" in c["description"] for c in applied_constraints)
+    assert factory.client is not None
+    assert factory.client.responses.calls == []
+
+
+def test_multiroute_known_unavailable_filter_precedence() -> None:
+    route_cap = make_route_json("route-cap", "model-cap", "price-cap")
+    route_cap["capabilities"] = ["text"]
+    route_cap["known_unavailable"] = True
+
+    route_allow = make_route_json("route-allow", "model-allow", "price-allow")
+    route_allow["known_unavailable"] = True
+
+    route_qual = make_route_json("route-qual", "model-qual", "price-qual")
+    route_qual["capabilities"] = ["vision"]
+    route_qual["quality_criteria"] = [{"criterion": "faithfulness", "evidence_references": ["ref1"]}]
+    route_qual["known_unavailable"] = True
+
+    route_unavail = make_route_json("route-unavail", "model-unavail", "price-unavail")
+    route_unavail["capabilities"] = ["vision"]
+    route_unavail["quality_criteria"] = [{"criterion": "accuracy", "evidence_references": ["ref2"]}]
+    route_unavail["known_unavailable"] = True
+
+    route_ok = make_route_json("route-ok", "model-ok", "price-ok")
+    route_ok["capabilities"] = ["vision"]
+    route_ok["quality_criteria"] = [{"criterion": "accuracy", "evidence_references": ["ref3"]}]
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps(
+            {"routes": [route_cap, route_allow, route_qual, route_unavail, route_ok]}
+        ),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/executions",
+        json={
+            "task": "Test filter precedence.",
+            "constraints": {
+                "required_capabilities": ["vision"],
+                "required_quality_criteria": ["accuracy"],
+                "allowed_route_ids": ["route-cap", "route-qual", "route-unavail", "route-ok"],
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["decision"]["route"]["id"] == "route-ok"
+    factors = data["decision"]["factors"]
+
+    allow_factor = next(f for f in factors if "route-allow" in f["description"])
+    assert allow_factor["category"] == "route"
+    assert "allowlist" in allow_factor["description"]
+
+    cap_factor = next(f for f in factors if "route-cap" in f["description"])
+    assert cap_factor["category"] == "capability"
+
+    qual_factor = next(f for f in factors if "route-qual" in f["description"])
+    assert qual_factor["category"] == "quality"
+
+    unavail_factor = next(f for f in factors if "route-unavail" in f["description"])
+    assert unavail_factor["category"] == "availability"
+
+
+def test_multiroute_known_unavailable_does_not_skip_global_or_economic_validation() -> None:
+    route_a = make_route_json("route-a", "shared-model", "price-a")
+    route_a["known_unavailable"] = True
+    route_b = make_route_json("route-b", "shared-model", "price-b")
+    route_b["known_unavailable"] = True
+
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_a, route_b]}),
+    }
+    with pytest.raises(InvalidRuntimeConfigurationError) as caught:
+        create_openai_app(config, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    assert caught.value.variable_name == "MAESTRO_OPENAI_ROUTES_JSON"
+    assert caught.value.path == "routes"
+
+    route_c = make_route_json("route-c", "model-c", "price-c")
+    route_c["price_reference"]["rates"] = []
+    route_c["known_unavailable"] = True
+    route_d = make_route_json("route-d", "model-d", "price-d")
+
+    config_local = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_c, route_d]}),
+    }
+    app = create_openai_app(config_local, client_factory=ControlledClientFactory())  # type: ignore[arg-type]
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-c", "route-d"]}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["decision"]["route"]["id"] == "route-d"
+    assert any(
+        f["category"] == "configuration" and "route-c" in f["description"] and "configuração local inválida" in f["description"]
+        for f in data["decision"]["factors"]
+    )
+
+
+def test_multiroute_known_unavailable_immutability_and_recomposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for env_key in (
+        "MAESTRO_OPENAI_MODEL",
+        "MAESTRO_OPENAI_ROUTE_ID",
+        "MAESTRO_OPENAI_PRICE_REFERENCE_JSON",
+        "MAESTRO_OPENAI_ESTIMATED_USAGE_JSON",
+        "MAESTRO_ROUTING_CONSTRAINTS_JSON",
+        "OPENAI_CUSTOM_HEADERS",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+
+    env_factories: list[ControlledClientFactory] = []
+
+    def mock_create_openai_app(
+        configuration: Mapping[str, str],
+        client_factory: Any = None,
+    ) -> FastAPI:
+        fac = client_factory or ControlledClientFactory()
+        env_factories.append(fac)
+        return create_openai_app(configuration, client_factory=fac)
+
+    monkeypatch.setattr(bootstrap_module, "create_openai_app", mock_create_openai_app)
+
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["known_unavailable"] = True
+    route_b = make_route_json("route-b", "model-b", "price-b")
+    route_b["known_unavailable"] = False
+
+    routes_dict = {"routes": [route_a, route_b]}
+    config = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps(routes_dict),
+    }
+    factory = ControlledClientFactory()
+    app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
+
+    routes_dict["routes"][0]["known_unavailable"] = False
+    config["MAESTRO_OPENAI_ROUTES_JSON"] = json.dumps(routes_dict)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a"]}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert factory.client is not None
+    assert factory.client.responses.calls == []
+
+    new_factory = ControlledClientFactory()
+    new_app = create_openai_app(config, client_factory=new_factory)  # type: ignore[arg-type]
+    new_client = TestClient(new_app)
+    resp_new = new_client.post(
+        "/v1/executions",
+        json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a"]}},
+    )
+    assert resp_new.status_code == 200
+    assert resp_new.json()["decision"]["route"]["id"] == "route-a"
+    assert new_factory.client is not None
+    assert len(new_factory.client.responses.calls) == 1
+
+    route_env = make_route_json("route-env", "model-env", "price-env")
+    route_env["known_unavailable"] = True
+
+    monkeypatch.setenv("OPENAI_API_KEY", CONTROLLED_KEY)
+    monkeypatch.setenv("MAESTRO_OPENAI_ROUTES_JSON", json.dumps({"routes": [route_env]}))
+
+    env_app_1 = create_openai_app_from_env()
+    assert len(env_factories) == 1
+    factory_env_1 = env_factories[0]
+
+    route_env["known_unavailable"] = False
+    monkeypatch.setenv("MAESTRO_OPENAI_ROUTES_JSON", json.dumps({"routes": [route_env]}))
+
+    env_client_1 = TestClient(env_app_1)
+    resp_env_1 = env_client_1.post("/v1/executions", json={"task": "Execute."})
+    assert resp_env_1.status_code == 422
+    assert resp_env_1.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert factory_env_1.client is not None
+    assert factory_env_1.client.responses.calls == []
+
+    env_app_2 = create_openai_app_from_env()
+    assert len(env_factories) == 2
+    factory_env_2 = env_factories[1]
+
+    env_client_2 = TestClient(env_app_2)
+    resp_env_2 = env_client_2.post("/v1/executions", json={"task": "Execute."})
+    assert resp_env_2.status_code == 200
+    assert resp_env_2.json()["decision"]["route"]["id"] == "route-env"
+    assert factory_env_2.client is not None
+    assert len(factory_env_2.client.responses.calls) == 1
+
+
+def test_multiroute_known_unavailable_deterministic_ordering() -> None:
+    route_z = make_route_json("route-z", "model-z", "price-z")
+    route_z["known_unavailable"] = True
+    route_a = make_route_json("route-a", "model-a", "price-a")
+    route_a["known_unavailable"] = True
+    route_m = make_route_json("route-m", "model-m", "price-m")
+    route_m["known_unavailable"] = False
+
+    config_1 = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_z, route_a, route_m]}),
+    }
+    factory_1 = ControlledClientFactory()
+    app_1 = create_openai_app(config_1, client_factory=factory_1)  # type: ignore[arg-type]
+    client_1 = TestClient(app_1)
+    resp_1 = client_1.post("/v1/executions", json={"task": "Check determinism."})
+    assert resp_1.status_code == 200
+    data_1 = resp_1.json()
+
+    config_2 = {
+        "OPENAI_API_KEY": CONTROLLED_KEY,
+        "MAESTRO_OPENAI_ROUTES_JSON": json.dumps({"routes": [route_m, route_z, route_a]}),
+    }
+    factory_2 = ControlledClientFactory()
+    app_2 = create_openai_app(config_2, client_factory=factory_2)  # type: ignore[arg-type]
+    client_2 = TestClient(app_2)
+    resp_2 = client_2.post("/v1/executions", json={"task": "Check determinism."})
+    assert resp_2.status_code == 200
+    data_2 = resp_2.json()
+
+    assert data_1["decision"] == data_2["decision"]
+    assert data_1["decision"]["route"]["id"] == "route-m"
+
+    factors_1 = [f for f in data_1["decision"]["factors"] if f["category"] == "availability"]
+    assert len(factors_1) == 2
+    assert "route-a" in factors_1[0]["description"]
+    assert "route-z" in factors_1[1]["description"]
+
+    factors_2 = [f for f in data_2["decision"]["factors"] if f["category"] == "availability"]
+    assert len(factors_2) == 2
+    assert "route-a" in factors_2[0]["description"]
+    assert "route-z" in factors_2[1]["description"]
+
+    assert factory_1.client is not None
+    assert len(factory_1.client.responses.calls) == 1
+    assert factory_2.client is not None
+    assert len(factory_2.client.responses.calls) == 1

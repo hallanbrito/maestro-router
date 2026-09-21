@@ -29,6 +29,12 @@ O Manifesto prevalece como identidade permanente. Para a fronteira pública,
 `docs/05-API.md` é obrigatório. A decisão de roteamento especializa esse contrato
 sem poder alterá-lo.
 
+## Método de execução
+
+Para a execução de fatias de trabalho incrementais (Ws), consulte o protocolo detalhado em [docs/07-METODO-CH-EXECUCAO.md](docs/07-METODO-CH-EXECUCAO.md). Trata-se de uma fonte de processo de engenharia, e não de especificação normativa do produto.
+
+As Ws incrementais devem seguir o protocolo econômico: adotar a menor capacidade suficiente para cada etapa, praticar leitura seletiva de contexto, manter o AGY como executor via terminal, condicionar escaladas a justificativa técnica objetiva, submeter a entrega à revisão independente e submeter ambiguidades relevantes à decisão humana do Product Owner.
+
 ## Antes de trabalhar
 
 1. Leia este `AGENTS.md`.

@@ -49,6 +49,7 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Custo calculado | A primeira política posterior calcula somente `input_token` e `output_token` com aritmética decimal exata. A composição OpenAI aceita uma referência opcional fornecida pelo operador, sem preço padrão, consulta ou atualização automática; o custo posterior só fica disponível com configuração válida e uso completo. O valor não representa billing nem comprova economia entre provedores. |
 | ✅ Implementado | Restrições operacionais e composição monotônica | Configuração de capacidades e critérios de qualidade com referências de evidência por rota (`MAESTRO_OPENAI_ROUTES_JSON`), requisitos globais, allowlist, múltiplos tetos econômicos cumulativos e defaults (`MAESTRO_ROUTING_CONSTRAINTS_JSON`), com composição monotônica e projeção explicativa (ADR 0009). |
 | ✅ Implementado | Indisponibilidade conhecida operacional | Declaração operacional de `known_unavailable` por rota em `MAESTRO_OPENAI_ROUTES_JSON`, excluindo rotas via filtro de disponibilidade antes da economia sem chamadas externas (ADR 0010). |
+| ✅ Implementado | Habilitação operacional de rota | Declaração operacional de `enabled` por rota em `MAESTRO_OPENAI_ROUTES_JSON`, precedência normativa de `disabled_route` e checagem de suficiência no bootstrap sem chamadas externas (ADR 0011). |
 
 Esses marcadores descrevem o estado observado do repositório; não criam compromissos de roadmap.
 

@@ -70,6 +70,9 @@ _COMPLETENESS_FIELDS = (
 _UNAVAILABLE_ESTIMATE_REASON = (
     "Não há preço nem método de estimativa aprovados para esta rota."
 )
+_DISABLED_ROUTE_ESTIMATE_REASON = (
+    "A rota está desabilitada na configuração."
+)
 _OPENAI_PUBLIC_BASE_URL = "https://api.openai.com/v1"
 _OPENAI_CUSTOM_HEADERS = "OPENAI_CUSTOM_HEADERS"
 
@@ -178,7 +181,12 @@ def create_openai_app(
     if _OPENAI_ROUTES_JSON in configuration:
         # One client and adapter serve every configured OpenAI route; model
         # identity still remains attached to each neutral Route snapshot.
-        api_key, routes, configuration_invalid_route_ids = _validated_multiroute_configuration(configuration)
+        (
+            api_key,
+            routes,
+            configuration_invalid_route_ids,
+            configuration_disabled_invalid_route_ids,
+        ) = _validated_multiroute_configuration(configuration)
         operational_constraints = None
         if _ROUTING_CONSTRAINTS_JSON in configuration:
             operational_constraints = _parse_routing_constraints(
@@ -189,6 +197,7 @@ def create_openai_app(
             RouteCatalog(
                 routes,
                 configuration_invalid_route_ids=configuration_invalid_route_ids,
+                configuration_disabled_invalid_route_ids=configuration_disabled_invalid_route_ids,
                 operational_constraints=operational_constraints,
             ),
             {"openai-responses": adapter},
@@ -347,7 +356,7 @@ def _validated_configuration(
 
 def _validated_multiroute_configuration(
     configuration: Mapping[str, str],
-) -> tuple[str, list[Route], list[str]]:
+) -> tuple[str, list[Route], list[str], list[str]]:
     """Validate multiroute JSON and return usable routes plus local exclusions.
 
     Document-wide ambiguity, such as duplicate route identifiers or mixing
@@ -451,10 +460,14 @@ def _validated_multiroute_configuration(
             _OPENAI_ROUTES_JSON, invalid_optional=True, path="routes"
         )
 
-    routes: list[Route] = []
+    valid_enabled_routes: list[Route] = []
+    valid_disabled_routes: list[Route] = []
+    invalid_enabled_route_ids: list[str] = []
+    invalid_disabled_route_ids: list[str] = []
+    indeterminate_enablement_route_ids: list[str] = []
     configuration_invalid_route_ids: list[str] = []
-    num_valid_routes = 0
     first_error_path: str | None = None
+    first_unrescued_error_path: str | None = None
 
     for i, route_entry in enumerate(routes_list):
         route_id = route_entry["route_id"]
@@ -474,10 +487,33 @@ def _validated_multiroute_configuration(
             "capabilities",
             "quality_criteria",
             "known_unavailable",
+            "enabled",
         }
         required_keys = {"route_id", "model", "price_reference", "estimated_usage"}
         if not required_keys.issubset(route_entry.keys()) or not set(route_entry.keys()).issubset(allowed_keys):
             local_failed = True
+
+        # Parse and strictly evaluate enabled before losing information.
+        route_enabled: bool | None = True
+
+        if "enabled" in route_entry:
+            if (
+                isinstance(route_entry, DuplicateTrackingDict)
+                and "enabled" in route_entry.duplicate_keys
+            ):
+                local_failed = True
+                route_enabled = None
+                if local_error_path is None:
+                    local_error_path = f"routes[{i}].enabled"
+            else:
+                enabled_value = route_entry["enabled"]
+                if type(enabled_value) is not bool:
+                    local_failed = True
+                    route_enabled = None
+                    if local_error_path is None:
+                        local_error_path = f"routes[{i}].enabled"
+                else:
+                    route_enabled = enabled_value
 
         model = route_entry.get("model")
         if not _is_structurally_valid_string(model):
@@ -645,40 +681,58 @@ def _validated_multiroute_configuration(
 
         estimate = None
         if not local_failed:
-            try:
-                amount = calculate_pre_execution_amount(
-                    quantities=quantities,
-                    reference=price_reference,
-                )
+            if route_enabled is True:
+                try:
+                    amount = calculate_pre_execution_amount(
+                        quantities=quantities,
+                        reference=price_reference,
+                    )
+                    estimate = EconomicEstimate(
+                        status="available",
+                        amount=amount,
+                        currency=price_reference.currency,
+                        price_reference=price_reference.id,
+                        assumptions=(
+                            _estimated_usage_assumption(
+                                "input_token", quantities["input_token"]
+                            ),
+                            _estimated_usage_assumption(
+                                "output_token", quantities["output_token"]
+                            ),
+                        ),
+                    )
+                except (ValueError, TypeError, KeyError):
+                    local_failed = True
+            elif route_enabled is False:
                 estimate = EconomicEstimate(
-                    status="available",
-                    amount=amount,
-                    currency=price_reference.currency,
-                    price_reference=price_reference.id,
-                    assumptions=(
-                        _estimated_usage_assumption(
-                            "input_token", quantities["input_token"]
-                        ),
-                        _estimated_usage_assumption(
-                            "output_token", quantities["output_token"]
-                        ),
-                    ),
+                    status="unavailable",
+                    reason=_DISABLED_ROUTE_ESTIMATE_REASON,
                 )
-                num_valid_routes += 1
-            except (ValueError, TypeError, KeyError):
-                local_failed = True
 
         if local_failed:
             configuration_invalid_route_ids.append(route_id)
             if first_error_path is None and local_error_path is not None:
                 first_error_path = local_error_path
+
+            if route_enabled is None:
+                indeterminate_enablement_route_ids.append(route_id)
+                if first_unrescued_error_path is None and local_error_path is not None:
+                    first_unrescued_error_path = local_error_path
+            elif route_enabled is False:
+                invalid_disabled_route_ids.append(route_id)
+            elif route_enabled is True:
+                invalid_enabled_route_ids.append(route_id)
+                if first_unrescued_error_path is None and local_error_path is not None:
+                    first_unrescued_error_path = local_error_path
         else:
+            if route_enabled is None:
+                raise RuntimeError("Route with indeterminate enablement must not be materialized.")
             route = Route(
                 id=route_id,
                 provider="openai",
                 model=model,
                 adapter_id="openai-responses",
-                enabled=True,
+                enabled=route_enabled,
                 capabilities=capabilities,
                 quality_criteria=quality_criteria_set,
                 quality_evidence_references=quality_evidence_refs,
@@ -686,8 +740,12 @@ def _validated_multiroute_configuration(
                 estimate=estimate,
                 price_reference=price_reference,
             )
-            routes.append(route)
+            if route_enabled is True:
+                valid_enabled_routes.append(route)
+            elif route_enabled is False:
+                valid_disabled_routes.append(route)
 
+    num_valid_routes = len(valid_enabled_routes) + len(valid_disabled_routes)
     if num_valid_routes == 0:
         raise InvalidRuntimeConfigurationError(
             _OPENAI_ROUTES_JSON,
@@ -695,9 +753,23 @@ def _validated_multiroute_configuration(
             path=first_error_path or "routes",
         )
 
+    if len(valid_enabled_routes) == 0:
+        if len(invalid_enabled_route_ids) > 0 or len(indeterminate_enablement_route_ids) > 0:
+            raise InvalidRuntimeConfigurationError(
+                _OPENAI_ROUTES_JSON,
+                invalid_optional=True,
+                path=first_unrescued_error_path or "routes",
+            )
+
+    routes = valid_enabled_routes + valid_disabled_routes
     # Canonical ordering makes selection inputs independent of JSON array order.
     routes.sort(key=lambda r: r.id)
-    return api_key, routes, configuration_invalid_route_ids
+    return (
+        api_key,
+        routes,
+        configuration_invalid_route_ids,
+        invalid_disabled_route_ids,
+    )
 
 
 def _parse_estimated_usage(raw_value: object) -> dict[str, int]:

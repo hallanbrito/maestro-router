@@ -1,8 +1,8 @@
 # Maestro Router
 
 Maestro Router é uma plataforma open source para roteamento econômico,
-controlável e explicável entre modelos de inteligência artificial. O repositório
-contém uma implementação incremental do MVP.
+controlável e explicável entre modelos de inteligência artificial. O núcleo
+funcional do MVP está implementado e validado por testes automatizados.
 
 O estado executável atual cobre:
 
@@ -65,17 +65,31 @@ Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
 A documentação aprovada está em [`docs/`](docs/); detalhes de arquitetura podem
 ser encontrados pelo mapa em [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Os demais arquivos vazios da raiz são placeholders e não devem ser interpretados
-como decisões já tomadas.
+Veja também [como contribuir](CONTRIBUTING.md), a orientação de
+[produto](PRODUCT.md), a política de [roadmap](ROADMAP.md) e a
+[Apache License 2.0](LICENSE).
 
 ## Execução local
 
 Requer Python 3.12.
 
+Crie o ambiente e instale as dependências:
+
 ```shell
 python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements-dev.txt
-.venv\Scripts\python -m uvicorn --app-dir src maestro_router.api:app
+```
+
+Ative o ambiente no Linux ou macOS com `source .venv/bin/activate`; no
+PowerShell, use `.venv\Scripts\Activate.ps1`. Depois instale as dependências:
+
+```shell
+python -m pip install -r requirements-dev.txt
+```
+
+Com o ambiente ativo, inicie o aplicativo neutro:
+
+```shell
+python -m uvicorn --app-dir src maestro_router.api:app
 ```
 
 O catálogo e o registro de adaptadores padrão em memória são vazios, portanto
@@ -106,6 +120,41 @@ A composição é iniciada explicitamente como uma fábrica ASGI:
 python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
 ```
 
+### Exemplo mínimo reproduzível
+
+O modo legado permite validar o fluxo completo com uma única rota, sem preço ou
+estimativa padrão. Defina os valores no ambiente; nunca versione a chave.
+
+Linux ou macOS:
+
+```shell
+export OPENAI_API_KEY="sua-chave"
+export MAESTRO_OPENAI_MODEL="modelo-disponivel-na-sua-conta"
+export MAESTRO_OPENAI_ROUTE_ID="route-primary"
+python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
+```
+
+PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY = "sua-chave"
+$env:MAESTRO_OPENAI_MODEL = "modelo-disponivel-na-sua-conta"
+$env:MAESTRO_OPENAI_ROUTE_ID = "route-primary"
+python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
+```
+
+Em outro terminal, envie uma solicitação:
+
+```shell
+curl -X POST http://127.0.0.1:8000/v1/executions \
+  -H "Content-Type: application/json" \
+  -d '{"task":"Resuma em uma frase.","context":"O Maestro escolhe uma rota válida antes de executar o modelo."}'
+```
+
+Essa composição realiza uma chamada real ao provedor. Para desenvolvimento e
+testes automatizados, use clientes controlados; a suíte oficial não acessa a
+rede externa.
+
 A composição usa somente as entradas documentadas acima. Variáveis próprias do
 SDK, como `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` e
 `OPENAI_CUSTOM_HEADERS`, não são suportadas por esse bootstrap e não alteram o
@@ -119,6 +168,8 @@ válidos, a rota com menor estimativa é selecionada para execução, com desemp
 determinístico. Estimativa e custo calculado não representam billing nem
 comprovam economia entre provedores.
 
+Com o ambiente ativo:
+
 ```shell
-.venv\Scripts\python -m pytest
+python -m pytest -q
 ```

@@ -219,6 +219,7 @@ class RouteCatalog:
         routes: Iterable[Route] = (),
         *,
         configuration_invalid_route_ids: Iterable[str] = (),
+        configuration_disabled_invalid_route_ids: Iterable[str] = (),
         operational_constraints: OperationalConstraints | None = None,
     ) -> None:
         """Freeze executable routes, invalid route IDs, and operational constraints."""
@@ -244,6 +245,35 @@ class RouteCatalog:
             raise ValueError("Configuration invalid route IDs must not overlap with executable route IDs.")
 
         self.configuration_invalid_route_ids = frozenset(invalid_ids)
+
+        disabled_invalid_ids = tuple(configuration_disabled_invalid_route_ids)
+        for val in disabled_invalid_ids:
+            if not isinstance(val, str) or not any(not c.isspace() for c in val):
+                raise ValueError(
+                    "Configuration disabled invalid route IDs must be non-blank strings."
+                )
+            if any(0xD800 <= ord(c) <= 0xDFFF for c in val):
+                raise ValueError(
+                    "Configuration disabled invalid route IDs must not contain isolated Unicode surrogates."
+                )
+
+        if len(disabled_invalid_ids) != len(set(disabled_invalid_ids)):
+            raise ValueError(
+                "Configuration disabled invalid route IDs must be unique."
+            )
+
+        disabled_invalid_set = frozenset(disabled_invalid_ids)
+        if not disabled_invalid_set.issubset(self.configuration_invalid_route_ids):
+            raise ValueError(
+                "Configuration disabled invalid route IDs must be a subset of configuration invalid route IDs."
+            )
+
+        if executable_ids.intersection(disabled_invalid_set):
+            raise ValueError(
+                "Configuration disabled invalid route IDs must not overlap with executable route IDs."
+            )
+
+        self.configuration_disabled_invalid_route_ids = disabled_invalid_set
         self.operational_constraints = (
             operational_constraints
             if operational_constraints is not None
@@ -660,16 +690,29 @@ def route_request(
     # Multiroute bootstrap can preserve the identity of a malformed local entry
     # without constructing it as an executable Route.  Keep that exclusion in
     # the decision explanation even though it is absent from the catalog tuple.
+    disabled_invalid_ids = getattr(
+        catalog, "configuration_disabled_invalid_route_ids", frozenset()
+    )
     for invalid_id in sorted(locally_invalid_route_ids):
         if invalid_id not in catalog_route_ids:
-            exclusions.append(
-                Exclusion(
-                    invalid_id,
-                    "invalid_route",
-                    "configuration",
-                    f"{invalid_id} foi excluída por configuração local inválida.",
+            if invalid_id in disabled_invalid_ids:
+                exclusions.append(
+                    Exclusion(
+                        invalid_id,
+                        "disabled_route",
+                        "route",
+                        f"{invalid_id} estava desabilitada na configuração.",
+                    )
                 )
-            )
+            else:
+                exclusions.append(
+                    Exclusion(
+                        invalid_id,
+                        "invalid_route",
+                        "configuration",
+                        f"{invalid_id} foi excluída por configuração local inválida.",
+                    )
+                )
 
     applied_constraints = tuple(
         list(composed.applied_constraints)

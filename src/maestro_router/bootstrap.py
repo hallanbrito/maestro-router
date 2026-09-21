@@ -473,6 +473,7 @@ def _validated_multiroute_configuration(
             "estimated_usage",
             "capabilities",
             "quality_criteria",
+            "known_unavailable",
         }
         required_keys = {"route_id", "model", "price_reference", "estimated_usage"}
         if not required_keys.issubset(route_entry.keys()) or not set(route_entry.keys()).issubset(allowed_keys):
@@ -593,6 +594,24 @@ def _validated_multiroute_configuration(
                 if not local_failed:
                     quality_criteria_set = frozenset(seen_criteria)
 
+        known_unavailable: bool = False
+        if "known_unavailable" in route_entry:
+            if (
+                isinstance(route_entry, DuplicateTrackingDict)
+                and "known_unavailable" in route_entry.duplicate_keys
+            ):
+                local_failed = True
+                if local_error_path is None:
+                    local_error_path = f"routes[{i}].known_unavailable"
+            else:
+                known_unavailable_value = route_entry["known_unavailable"]
+                if type(known_unavailable_value) is not bool:
+                    local_failed = True
+                    if local_error_path is None:
+                        local_error_path = f"routes[{i}].known_unavailable"
+                else:
+                    known_unavailable = known_unavailable_value
+
         price_ref_val = route_entry.get("price_reference")
         price_reference = None
         if not isinstance(price_ref_val, dict):
@@ -663,7 +682,7 @@ def _validated_multiroute_configuration(
                 capabilities=capabilities,
                 quality_criteria=quality_criteria_set,
                 quality_evidence_references=quality_evidence_refs,
-                known_unavailable=False,
+                known_unavailable=known_unavailable,
                 estimate=estimate,
                 price_reference=price_reference,
             )

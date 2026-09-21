@@ -14,6 +14,8 @@ Este documento estabelece o protocolo de engenharia do Maestro Router para a exe
 
 Este protocolo governa apenas o processo de trabalho de engenharia do Maestro Router. Ele não rege o comportamento de produto em tempo de execução, não substitui nem altera os documentos normativos do repositório, não cria itens de roadmap ou novas funcionalidades e não modifica decisões arquiteturais (ADRs). Suas diretrizes aplicam-se a todas as próximas Ws, ressalvada decisão explícita e documentada do Product Owner para uma tarefa específica.
 
+Este protocolo é uma especialização operacional do Método Ágil C.H., cuja origem histórica e princípios gerais estão publicados em https://github.com/hallanbrito/metodo-ch. A versão histórica v0.1 permanece independente deste protocolo operacional, não havendo redefinição retroativa do Método C.H. nem conversão de práticas específicas do Maestro Router em princípios universais do método.
+
 O protocolo adota formalmente o seguinte princípio orientador:
 
 > "Usar a menor capacidade suficiente para satisfazer os requisitos de qualidade da etapa e escalar somente diante de evidência de necessidade."
@@ -70,7 +72,7 @@ Toda fatia incremental de trabalho (W) segue rigorosamente a sequência de 19 et
 15. **ChatGPT audita a PR real:** ChatGPT examina a PR real no GitHub (comparando base, head, escopo, diff completo, contratos e ausência de regressões).
 16. **Hallan fornece AUTORIZADO final:** Hallan analisa o parecer da auditoria e emite explicitamente a mensagem `AUTORIZADO`.
 17. **Revalidar HEAD/estado:** Codex/Auditor revalida se o HEAD da branch de trabalho e a branch `master` não divergiram durante a avaliação.
-18. **Merge:** Realiza-se o merge na `master` (preferencialmente fast-forward).
+18. **Merge:** Realiza-se o merge aprovado na `master`.
 19. **Nova master torna-se base da próxima W:** Estabelece-se a base limpa e atualizada para o ciclo de trabalho seguinte.
 
 ## 4. Política econômica de modelos
@@ -163,7 +165,7 @@ A bateria de verificação do Maestro Router segue um protocolo em etapas gradua
 A gestão de versão e repositório adota práticas de integração contínua rigorosas:
 
 - **Branch principal protegida:** A branch `master` deve permanecer estável e conter apenas código validado e aprovado.
-- **Integração limpa:** As integrações devem preferir avanço rápido (fast-forward) ou histórico linear limpo, evitando merges desordenados.
+- **Integração limpa:** A integração preserva histórico limpo e rastreável. O squash merge é a estratégia atualmente utilizada para consolidar uma W aprovada em um único commit na `master`. Eventual mudança futura de estratégia não altera os gates de auditoria independente, revalidação de HEAD e autorização humana do Product Owner.
 - **Proibição de descartes silenciosos:** É terminantemente vedado o uso de `git reset --hard`, descartes silenciosos de commits ou limpezas destrutivas sem autorização explícita e justificada.
 - **Branches de trabalho dedicadas:** Toda W deve ser concebida e desenvolvida em sua própria branch temática, isolada das demais atividades.
 - **Commits atômicos e descritivos:** As mensagens de commit devem refletir com precisão a menor alteração lógica introduzida.

@@ -15,6 +15,7 @@ fontes normativas; este arquivo não resume nem redefine seu conteúdo.
 | [07-METODO-CH-EXECUCAO.md](07-METODO-CH-EXECUCAO.md) | Processo de engenharia | Processo de engenharia — governa papéis, fluxo das Ws, economia de contexto, roteamento operacional de modelos e gates de desenvolvimento; não altera contratos ou comportamento do produto. | Antes de iniciar ou revisar uma W. |
 | [decisions/](decisions/) | Decisões adicionais | Decisões arquiteturais além dos documentos principais, incluindo execução, adaptação externa, composição operacional, referência de preço, previsão de uso, configuração de múltiplas rotas OpenAI, configuração operacional de restrições de roteamento, indisponibilidade conhecida operacional e habilitação operacional de rotas. | Verifique antes de decisões arquiteturais; há decisões registradas de `0001` a `0011`. |
 | [maps/](maps/) | Mapas do produto e do sistema | Navegação visual **não normativa**; não altera a autoridade dos documentos acima. | Para orientação rápida sobre o produto, o fluxo técnico e o estado atual. |
+| [releases/v0.1.0-rc.1.md](releases/v0.1.0-rc.1.md) | Notas da pré-release v0.1.0-rc.1 | Notas informativas **não normativas** para avaliação técnica local; não redefinem contratos ou arquitetura. | Para consultar escopo, limitações e propósito da versão v0.1.0-rc.1. |
 
 Em caso de conflito, aplique a precedência declarada nas próprias fontes. O
 Manifesto prevalece; `05-API.md` governa a fronteira pública e

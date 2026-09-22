@@ -151,6 +151,13 @@ curl -X POST http://127.0.0.1:8000/v1/executions \
   -d '{"task":"Resuma em uma frase.","context":"O Maestro escolhe uma rota válida antes de executar o modelo."}'
 ```
 
+No PowerShell, use a sintaxe nativa equivalente:
+
+```powershell
+$body = @{ task = "Resuma em uma frase."; context = "O Maestro escolhe uma rota válida antes de executar o modelo." } | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/v1/executions" -ContentType "application/json" -Body $body
+```
+
 Essa composição realiza uma chamada real ao provedor. Para desenvolvimento e
 testes automatizados, use clientes controlados; a suíte oficial não acessa a
 rede externa.

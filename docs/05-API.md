@@ -4,7 +4,10 @@
 
 Este documento transforma os comportamentos aprovados no [Manifesto](00-MANIFESTO.md), na [Visão Geral](01-VISAO-GERAL.md), na [Proposta de Valor](02-PROPOSTA-DE-VALOR.md), na [Arquitetura Conceitual](03-ARQUITETURA.md) e nos [Casos de Uso](04-CASOS-DE-USO.md) no contrato técnico mínimo da API pública do MVP.
 
-Os documentos `00–04` permanecem aprovados e não são redefinidos aqui. Em caso de conflito, prevalece o Manifesto. Este contrato descreve o que deverá ser implementado posteriormente; ele não afirma que a API já exista.
+Os documentos `00–04` permanecem aprovados e não são redefinidos aqui. Em caso
+de conflito, prevalece o Manifesto. Este contrato governa a API pública v1
+implementada pelo MVP; o estado executável é resumido no
+[Mapa do Sistema](maps/SYSTEM-MAP.md), que permanece não normativo.
 
 O objetivo é oferecer uma única operação pública capaz de receber uma tarefa, decidir uma rota válida, executar essa rota e devolver um resultado ou erro normalizado com explicação e informação econômica suficiente. A superfície foi mantida deliberadamente pequena.
 

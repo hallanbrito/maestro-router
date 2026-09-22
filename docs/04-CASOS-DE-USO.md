@@ -4,7 +4,11 @@
 
 Este documento transforma o escopo e a arquitetura conceitual já aprovados em casos de uso observáveis do MVP. Ele descreve como uma aplicação cliente e o responsável pela configuração ou integração interagem conceitualmente com o Maestro Router, quais resultados esperam e como as principais falhas devem se manifestar.
 
-Os casos de uso expressam o comportamento esperado do MVP; não afirmam que essas capacidades já estejam implementadas. Também não definem contrato técnico, formato de configuração ou escolhas de tecnologia. Esses assuntos permanecem para documentos e decisões posteriores.
+Os casos de uso expressam o comportamento normativo esperado do MVP. O estado
+executável correspondente é resumido no [Mapa do Sistema](maps/SYSTEM-MAP.md),
+sem transformar esse mapa não normativo em fonte de contrato. Este documento
+também não define o contrato técnico, o formato de configuração ou escolhas de
+tecnologia; esses assuntos pertencem aos documentos e decisões especializados.
 
 As fontes aprovadas deste documento são o [Manifesto](00-MANIFESTO.md), a [Visão Geral](01-VISAO-GERAL.md), a [Proposta de Valor](02-PROPOSTA-DE-VALOR.md) e a [Arquitetura Conceitual](03-ARQUITETURA.md). Em caso de conflito, prevalece o Manifesto. Este documento não amplia nem redefine essas fontes.
 

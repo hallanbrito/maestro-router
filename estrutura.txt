@@ -1,23 +1,21 @@
-Listagem de caminhos de pasta
-O número de série do volume é 0000002C 9602:C33C
-C:.
-¦   ARCHITECTURE.md
-¦   CONTRIBUTING.md
-¦   estrutura.txt
-¦   LICENSE
-¦   PRODUCT.md
-¦   README.md
-¦   ROADMAP.md
-¦
-+---docs
-¦   ¦   00-MANIFESTO.md
-¦   ¦   01-VISAO-GERAL.md
-¦   ¦   02-PROPOSTA-DE-VALOR.md
-¦   ¦   03-ARQUITETURA.md
-¦   ¦   04-CASOS-DE-USO.md
-¦   ¦   05-API.md
-¦   ¦
-¦   +---decisions
-¦           README.md
-¦
-+---src
+Estrutura de alto nível do Maestro Router
+
+.
+|-- AGENTS.md                 Regras operacionais do repositório
+|-- README.md                 Entrada, estado atual e execução local
+|-- PRODUCT.md                Roteamento para as fontes de produto
+|-- ROADMAP.md                Política de evolução sem promessas antecipadas
+|-- CONTRIBUTING.md           Fluxo de contribuição
+|-- LICENSE                   Apache License 2.0
+|-- ARCHITECTURE.md           Mapa para a arquitetura normativa
+|-- requirements.txt         Dependências de runtime
+|-- requirements-dev.txt     Dependências de desenvolvimento
+|-- docs/
+|   |-- 00-MANIFESTO.md a 07-METODO-CH-EXECUCAO.md
+|   |-- decisions/            ADRs 0001 a 0011
+|   `-- maps/                 Mapas não normativos do produto e sistema
+|-- src/maestro_router/       Implementação do MVP
+|   `-- adapters/             Adaptadores externos
+`-- tests/                    Suíte automatizada
+
+Para a lista exata de arquivos, use uma ferramenta de navegação do repositório.

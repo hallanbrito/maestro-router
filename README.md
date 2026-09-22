@@ -4,6 +4,8 @@ Maestro Router é uma plataforma open source para roteamento econômico,
 controlável e explicável entre modelos de inteligência artificial. O núcleo
 funcional do MVP está implementado e validado por testes automatizados.
 
+> A versão [v0.1.0-rc.1](docs/releases/v0.1.0-rc.1.md) está preparada como pré-release para avaliação técnica local.
+
 O estado executável atual cobre:
 
 - validação pública de `POST /v1/executions`;

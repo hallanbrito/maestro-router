@@ -1,10 +1,14 @@
 # Maestro Router
 
-Maestro Router é uma plataforma open source para roteamento econômico,
-controlável e explicável entre modelos de inteligência artificial. O núcleo
-funcional do MVP está implementado e validado por testes automatizados.
+MVP open source em Python e FastAPI que seleciona uma rota de modelo de IA com
+regras explícitas de elegibilidade, estimativa de custo e desempate determinístico.
+Foi criado para tornar a decisão de roteamento controlável e explicável.
 
-> A versão [v0.1.0-rc.1](docs/releases/v0.1.0-rc.1.md) está preparada como pré-release para avaliação técnica local.
+- **Estado:** núcleo funcional com testes; publicação da pré-release pausada para auditoria.
+- **Integração externa atual:** adaptador OpenAI opcional. Outros provedores ainda não possuem adaptadores neste repositório.
+- **Para explorar:** execute localmente, rode os testes ou consulte o contrato e as decisões técnicas em [`docs/`](docs/).
+
+As [notas da candidata v0.1.0-rc.1](docs/releases/v0.1.0-rc.1.md) registram o escopo preparado para avaliação técnica; não há release publicada.
 
 O estado executável atual cobre:
 

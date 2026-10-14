@@ -1,188 +1,82 @@
 # Maestro Router
 
-MVP open source em Python e FastAPI que seleciona uma rota de modelo de IA com
-regras explícitas de elegibilidade, estimativa de custo e desempate determinístico.
-Foi criado para tornar a decisão de roteamento controlável e explicável.
+**Roteamento econômico e explicável de modelos de inteligência artificial.**
 
-- **Estado:** núcleo funcional com testes; publicação da pré-release pausada para auditoria.
-- **Integração externa atual:** adaptador OpenAI opcional. Outros provedores ainda não possuem adaptadores neste repositório.
-- **Para explorar:** execute localmente, rode os testes ou consulte o contrato e as decisões técnicas em [`docs/`](docs/).
+O Maestro Router é um MVP open source em **Python 3.12 e FastAPI** que adiciona uma camada de decisão entre uma aplicação e os modelos de IA. Em vez de fixar um modelo para todas as solicitações, ele avalia **rotas previamente configuradas**, respeita restrições obrigatórias e seleciona a alternativa elegível de **menor custo estimado**, explicando a decisão.
 
-As [notas da candidata v0.1.0-rc.1](docs/releases/v0.1.0-rc.1.md) registram o escopo preparado para avaliação técnica; não há release publicada.
+> **Estado do projeto:** MVP funcional para avaliação técnica, com testes automatizados. A pré-release `v0.1.0-rc.1` ainda não foi publicada. **Integração externa atual:** OpenAI (opcional); os outros provedores ainda não possuem adaptadores executáveis neste repositório.
 
-O estado executável atual cobre:
+## Por que existe?
 
-- validação pública de `POST /v1/executions`;
-- elegibilidade não econômica;
-- avaliação econômica anterior à seleção;
-- seleção determinística e validada pela estratégia `lowest-estimated-cost`;
-- fronteira neutra de execução com adaptadores associados manualmente em memória;
-- primeiro adaptador externo para a OpenAI Responses API, construído e injetado
-  explicitamente;
-- composição operacional OpenAI opcional, explícita e separada do aplicativo
-  padrão neutro, com referência de preço e previsão estática de uso opcionais
-  fornecidas pelo operador;
-- primeira política operacional de estimativa pré-execução, decimalmente exata
-  e limitada a uma previsão configurada de `input_token` e `output_token`;
-- normalização de `input_tokens` e `output_tokens` do adaptador OpenAI em uso
-  neutro completo, parcial ou indisponível;
-- primeira política neutra e decimalmente exata de cálculo de custo posterior,
-  limitada a `input_token` e `output_token` e disponível somente com referência
-  de preço explícita e contexto tarifário completo;
-- projeção pública normalizada de sucesso e dos erros de execução;
-- recusas normativas `NO_ELIGIBLE_ROUTE` e
-  `INSUFFICIENT_ECONOMIC_INFORMATION`;
-- configuração operacional de capacidades e critérios de qualidade por rota com
-  referências de evidência, requisitos globais, allowlists operacionais,
-  múltiplos tetos econômicos cumulativos e valores padrão com composição
-  monotônica (ADR 0009);
-- declaração operacional de indisponibilidade conhecida por rota (`known_unavailable`)
-  com exclusão prévia à avaliação econômica sem chamadas externas (ADR 0010);
-- habilitação operacional de rota (`enabled`) com desabilitação declarativa,
-  precedência normativa de `disabled_route` e checagem de suficiência no bootstrap
-  sem chamadas externas (ADR 0011).
+Quem integra IA a um software precisa decidir **qual modelo usar, em quais condições e com qual custo previsto**. Essa escolha costuma ficar fixa na aplicação ou depender de regras pouco transparentes.
 
-Ainda não estão implementados ou configurados por padrão:
+O Maestro separa a **decisão da execução**: primeiro verifica quais rotas configuradas atendem aos requisitos; depois compara estimativas econômicas compatíveis e escolhe uma rota segundo uma regra determinística. O resultado inclui informações para compreender a escolha.
 
-- rota, provedora ou modelo padrão;
-- gestão de credenciais e configuração operacional padrão;
-- preço padrão ou configuração automática de referência de preço;
-- timeout concreto, retry ou fallback;
-- tabela ou atualização automática de preços.
+**Exemplo conceitual:** uma aplicação configura duas rotas OpenAI com modelos e referências de preço distintos. Se ambas atendem aos requisitos e possuem estimativas comparáveis, o Maestro escolhe a de menor custo estimado. Se nenhuma atender, informa por que não pode selecionar uma rota, sem inventar uma alternativa.
 
-O adaptador OpenAI recebe um cliente assíncrono oficial já construído e não é
-registrado no aplicativo padrão. A composição opcional faz explicitamente essa
-construção e a associação a uma rota. Os testes usam somente clientes
-controlados, sem chamada de rede. Em sucesso, a estimativa usada na seleção é
-preservada; o uso observado pelo adaptador OpenAI é publicado como `available`,
-`uncertain` ou `unavailable`. O núcleo calcula `calculated_cost` somente quando
-a rota selecionada possui uma referência neutra, explícita e completa para as
-unidades aprovadas `input_token` e `output_token`; informação insuficiente mantém
-o custo como `unavailable`. A composição OpenAI pode associar uma referência
-fornecida pelo operador e, quando uma previsão estática de uso também estiver
-configurada, produzir uma estimativa pré-execução `available` com a mesma moeda
-e referência. Sem essa previsão, a estimativa permanece `unavailable`. Não há
-preço padrão, tokenização, consulta ou atualização automática. Mesmo
-configurado, o custo posterior só pode ficar disponível com uso completo e não
-representa billing, cobrança ou prova de economia entre provedores.
+## Como funciona
 
-Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
-[docs/INDEX.md](docs/INDEX.md) para localizar a fonte normativa de cada assunto.
-A documentação aprovada está em [`docs/`](docs/); detalhes de arquitetura podem
-ser encontrados pelo mapa em [ARCHITECTURE.md](ARCHITECTURE.md).
-
-Veja também [como contribuir](CONTRIBUTING.md), a orientação de
-[produto](PRODUCT.md), a política de [roadmap](ROADMAP.md) e a
-[Apache License 2.0](LICENSE).
-
-## Execução local
-
-Requer Python 3.12.
-
-Crie o ambiente e instale as dependências:
-
-```shell
-python -m venv .venv
+```text
+Aplicação
+   ↓ tarefa, contexto e restrições
+API do Maestro — POST /v1/executions
+   ↓ validação e elegibilidade
+Avaliação econômica das rotas admissíveis
+   ↓ estratégia lowest-estimated-cost
+Rota selecionada → adaptador → modelo configurado
+   ↓
+Resultado + explicação + dados econômicos disponíveis
 ```
 
-Ative o ambiente no Linux ou macOS com `source .venv/bin/activate`; no
-PowerShell, use `.venv\Scripts\Activate.ps1`. Depois instale as dependências:
+A seleção considera **capacidades e critérios de qualidade declarados**, restrições de rotas, disponibilidade conhecida e limites econômicos. A estratégia atual desempata de modo determinístico. Não há uma classificação automática da complexidade semântica da tarefa.
 
-```shell
+## O que o MVP já entrega
+
+- **API única:** validação rigorosa da operação `POST /v1/executions` e erros normalizados.
+- **Roteamento controlável:** requisitos, rotas permitidas, indisponibilidade conhecida e configuração de habilitação.
+- **Comparação econômica:** estimativa pré-execução quando o operador fornece informações suficientes; escolha da rota elegível de menor estimativa.
+- **Execução desacoplada:** núcleo neutro de provedores, com adaptador OpenAI opcional e composição de uma ou múltiplas rotas OpenAI.
+- **Explicabilidade:** informações sobre a seleção, uso normalizado e custo calculado após execução quando disponíveis.
+
+**Limitações importantes:** não há preço ou modelo padrão, atualização automática de preços, adaptadores para outros provedores, retry ou fallback concretos. A comparação depende de preços e previsões fornecidos pelo operador; custo calculado não equivale à cobrança do provedor nem comprova economia real.
+
+Veja o [estado técnico completo do MVP](docs/ESTADO-DO-MVP.md).
+
+## Experimente localmente
+
+**Requisito:** Python 3.12. No Linux ou macOS:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-Com o ambiente ativo, inicie o aplicativo neutro:
+Os testes automatizados usam clientes controlados e **não realizam chamadas externas**.
 
-```shell
+Para iniciar a API neutra:
+
+```bash
 python -m uvicorn --app-dir src maestro_router.api:app
 ```
 
-O catálogo e o registro de adaptadores padrão em memória são vazios, portanto
-uma solicitação válida recebe a recusa normativa `NO_ELIGIBLE_ROUTE`.
+O aplicativo padrão inicia **sem rotas ou adaptadores configurados**. Uma requisição válida recebe `NO_ELIGIBLE_ROUTE` — comportamento esperado, não uma demonstração de seleção entre modelos.
 
-### Composição OpenAI opcional
+Para configurar uma execução real com OpenAI, inclusive o **modo multirrota**, ou seguir instruções para PowerShell, consulte o [guia de execução local](docs/GUIA-DE-EXECUCAO.md). Chamadas reais exigem credencial própria e podem gerar custos.
 
-A composição operacional OpenAI possui dois modos de configuração:
+## Documentação e colaboração
 
-1. **Modo Legado (Rota única)**: Exige que o ambiente contenha valores não brancos para `OPENAI_API_KEY`, `MAESTRO_OPENAI_MODEL` e `MAESTRO_OPENAI_ROUTE_ID`. Opcionalmente, o operador pode fornecer uma única referência estruturada e completa em `MAESTRO_OPENAI_PRICE_REFERENCE_JSON` (conforme a [ADR 0006](docs/decisions/0006-operational-price-reference-configuration.md)) e uma previsão estática em `MAESTRO_OPENAI_ESTIMATED_USAGE_JSON` (conforme a [ADR 0007](docs/decisions/0007-operator-supplied-pre-execution-estimate.md)).
-2. **Modo Multirrota**: Ativado quando `MAESTRO_OPENAI_ROUTES_JSON` é fornecido. O valor é um objeto JSON de nível superior contendo exatamente o membro obrigatório `routes`; `routes` contém o array não vazio de rotas (conforme as ADRs [0008](docs/decisions/0008-multiple-openai-route-configuration.md), [0009](docs/decisions/0009-operational-routing-constraints.md), [0010](docs/decisions/0010-operational-known-unavailability.md) e [0011](docs/decisions/0011-operational-route-enablement.md)). Cada entrada exige os membros `route_id`, `model`, `price_reference` e `estimated_usage`, e aceita opcionalmente `capabilities` (array de strings), `quality_criteria` (array de objetos fechados com `criterion` e `evidence_references`), `known_unavailable` (booleano JSON estrito true/false) e `enabled` (booleano JSON estrito true/false, padrão true). Exige `OPENAI_API_KEY` e impede a presença simultânea das variáveis do modo legado.
-3. **Restrições Operacionais de Roteamento**: Configuração opcional neutra do operador via `MAESTRO_ROUTING_CONSTRAINTS_JSON` em modo multirrota (conforme a [ADR 0009](docs/decisions/0009-operational-routing-constraints.md)). Permite definir `required_capabilities`, `required_quality_criteria`, `allowed_route_ids`, `max_estimated_costs` e `defaults`. Suas regras combinam-se monotonicamente com as restrições da solicitação pública, de modo que uma requisição nunca enfraquece as políticas obrigatórias globais.
+| Quero entender... | Onde encontrar |
+| --- | --- |
+| Visão do produto e problema resolvido | [Visão geral](docs/01-VISAO-GERAL.md) |
+| Como instalar, configurar e executar | [Guia de execução](docs/GUIA-DE-EXECUCAO.md) |
+| Capacidades atuais e limitações | [Estado do MVP](docs/ESTADO-DO-MVP.md) |
+| Formato da API, entradas, respostas e erros | [Contrato da API](docs/05-API.md) |
+| Regras de decisão e desempate | [Decisão de roteamento](docs/06-DECISAO-DE-ROTEAMENTO.md) |
+| Arquitetura e decisões técnicas | [Mapa de arquitetura](ARCHITECTURE.md) e [ADRs](docs/decisions/) |
+| Processo colaborativo de engenharia | [Método C.H. de execução](docs/07-METODO-CH-EXECUCAO.md) |
 
-No modo multirrota, JSON ou estrutura superior inválidos e ambiguidades que
-impedem identificar o universo com segurança invalidam todo o snapshot. A mesma
-regra vale para duplicidade de `route_id`, `model` ou `price_reference.id` entre
-identidades estruturalmente válidas. Identidade ausente ou estruturalmente
-inválida também é global quando impede associar o erro com segurança a uma rota.
-Somente uma falha local isolável, em uma entrada com `route_id` válido e único,
-exclui apenas essa rota; se nenhuma rota válida restar, ou se houver entradas
-habilitadas inválidas ou de habilitação indeterminada sem nenhuma rota habilitada
-localmente válida (conforme o limiar de suficiência da [ADR 0011](docs/decisions/0011-operational-route-enablement.md)),
-a inicialização falha.
+Para navegar pelas fontes normativas, consulte [docs/INDEX.md](docs/INDEX.md). Agentes e contribuidores devem começar por [AGENTS.md](AGENTS.md) e [CONTRIBUTING.md](CONTRIBUTING.md). As [notas da pré-release candidata](docs/releases/v0.1.0-rc.1.md) descrevem seu escopo de avaliação; **não existe release publicada**.
 
-A composição é iniciada explicitamente como uma fábrica ASGI:
-
-```shell
-python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
-```
-
-### Exemplo mínimo reproduzível
-
-O modo legado permite validar o fluxo completo com uma única rota, sem preço ou
-estimativa padrão. Defina os valores no ambiente; nunca versione a chave.
-
-Linux ou macOS:
-
-```shell
-export OPENAI_API_KEY="sua-chave"
-export MAESTRO_OPENAI_MODEL="modelo-disponivel-na-sua-conta"
-export MAESTRO_OPENAI_ROUTE_ID="route-primary"
-python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
-```
-
-PowerShell:
-
-```powershell
-$env:OPENAI_API_KEY = "sua-chave"
-$env:MAESTRO_OPENAI_MODEL = "modelo-disponivel-na-sua-conta"
-$env:MAESTRO_OPENAI_ROUTE_ID = "route-primary"
-python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
-```
-
-Em outro terminal, envie uma solicitação:
-
-```shell
-curl -X POST http://127.0.0.1:8000/v1/executions \
-  -H "Content-Type: application/json" \
-  -d '{"task":"Resuma em uma frase.","context":"O Maestro escolhe uma rota válida antes de executar o modelo."}'
-```
-
-No PowerShell, use a sintaxe nativa equivalente:
-
-```powershell
-$body = @{ task = "Resuma em uma frase."; context = "O Maestro escolhe uma rota válida antes de executar o modelo." } | ConvertTo-Json -Compress
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/v1/executions" -ContentType "application/json" -Body $body
-```
-
-Essa composição realiza uma chamada real ao provedor. Para desenvolvimento e
-testes automatizados, use clientes controlados; a suíte oficial não acessa a
-rede externa.
-
-A composição usa somente as entradas documentadas acima. Variáveis próprias do
-SDK, como `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` e
-`OPENAI_CUSTOM_HEADERS`, não são suportadas por esse bootstrap e não alteram o
-cliente capturado no snapshot.
-
-Para cada rota habilitada e válida, a estimativa pré-execução é calculada no
-bootstrap (rotas desabilitadas válidas são materializadas com estimativa
-indisponível e sem cálculo prévio, conforme a [ADR 0011](docs/decisions/0011-operational-route-enablement.md))
-e as alternativas são ordenadas por `route_id`. Se restarem múltiplos candidatos
-válidos, a rota com menor estimativa é selecionada para execução, com desempate
-determinístico. Estimativa e custo calculado não representam billing nem
-comprovam economia entre provedores.
-
-Com o ambiente ativo:
-
-```shell
-python -m pytest -q
-```
+Licença: [Apache 2.0](LICENSE).

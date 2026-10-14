@@ -82,8 +82,9 @@ class TextExecutionRequest:
 class ExecutionRoute:
     """Identidade neutra e explícita da rota selecionada para execução.
 
-    Informa ao adaptador qual provedor e modelo devem ser acionados na execução,
-    referenciando o identificador estável gerado na fase de decisão.
+    Informa ao adaptador qual provedor e modelo devem ser acionados na execução.
+    O identificador estável (`id`) é definido na configuração da rota e
+    preservado pela decisão; jamais gerado pela seleção.
     """
 
     id: str
@@ -232,7 +233,7 @@ class ExecutionUnavailableError(ExecutionFailedError):
 
 
 class ExecutionTimeoutError(ExecutionFailedError):
-    """Indica que a chamada ao provedor ultrapassou o tempo limite configurado."""
+    """Erro normalizado que o adaptador pode comunicar em caso de timeout na chamada externa."""
 
 
 class ExecutionAdapter(Protocol):
@@ -259,7 +260,7 @@ class ExecutionAdapter(Protocol):
 
         Raises:
             ExecutionUnavailableError: Se o provedor ou endpoint estiver indisponível.
-            ExecutionTimeoutError: Se o tempo limite da requisição expirar.
+            ExecutionTimeoutError: Se o adaptador comunicar erro normalizado de timeout.
             ExecutionFailedError: Para outras falhas operacionais na chamada externa.
         """
 

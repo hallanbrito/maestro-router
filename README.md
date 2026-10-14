@@ -2,7 +2,7 @@
 
 **Roteamento econômico e explicável de modelos de inteligência artificial.**
 
-O Maestro Router é um MVP open source em **Python 3.12 e FastAPI** que adiciona uma camada de decisão entre uma aplicação e os modelos de IA. Em vez de fixar um modelo para todas as solicitações, ele avalia **rotas previamente configuradas**, respeita restrições obrigatórias e seleciona a alternativa elegível de **menor custo estimado**, explicando a decisão.
+O Maestro Router é um MVP open source em **Python 3.12 e FastAPI** que adiciona uma camada de decisão entre uma aplicação e os modelos de IA. Em vez de fixar um modelo para todas as solicitações, ele avalia **rotas previamente configuradas**, verifica quais atendem aos requisitos obrigatórios e **escolhe o menor custo estimado entre as rotas elegíveis e economicamente comparáveis**, explicando a decisão.
 
 > **Estado do projeto:** MVP funcional para avaliação técnica, com testes automatizados. A pré-release `v0.1.0-rc.1` ainda não foi publicada. **Integração externa atual:** OpenAI (opcional); os outros provedores ainda não possuem adaptadores executáveis neste repositório.
 
@@ -12,7 +12,21 @@ Quem integra IA a um software precisa decidir **qual modelo usar, em quais condi
 
 O Maestro separa a **decisão da execução**: primeiro verifica quais rotas configuradas atendem aos requisitos; depois compara estimativas econômicas compatíveis e escolhe uma rota segundo uma regra determinística. O resultado inclui informações para compreender a escolha.
 
-**Exemplo conceitual:** uma aplicação configura duas rotas OpenAI com modelos e referências de preço distintos. Se ambas atendem aos requisitos e possuem estimativas comparáveis, o Maestro escolhe a de menor custo estimado. Se nenhuma atender, informa por que não pode selecionar uma rota, sem inventar uma alternativa.
+### Exemplo: o menor custo que atende aos requisitos
+
+Uma aplicação possui três rotas configuradas com estimativas comparáveis, todas em USD:
+
+| Rota | Custo estimado | Atende aos requisitos? | Resultado |
+| --- | ---: | :---: | --- |
+| **A** | **US$ 0,003** | Sim | **Selecionada** |
+| B | US$ 0,001 | Não | Excluída na elegibilidade |
+| C | US$ 0,005 | Sim | Elegível, mas mais cara |
+
+**Por que a rota A?** A rota B custa menos, mas não atende aos requisitos obrigatórios e é eliminada antes da comparação econômica. Entre as elegíveis A e C, o Maestro seleciona **A**, pois tem o menor custo estimado.
+
+**Regra central: primeiro atender aos requisitos; depois comparar custos.** A avaliação utiliza capacidades, critérios e estimativas previamente declarados. O MVP não mede automaticamente a qualidade de uma resposta nem determina sozinho a complexidade da tarefa.
+
+*Valores fictícios para ilustrar a regra de seleção, não preços reais de provedores ou economia comprovada.*
 
 ## Como funciona
 

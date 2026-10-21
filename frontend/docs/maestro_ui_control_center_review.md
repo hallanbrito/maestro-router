@@ -43,14 +43,14 @@ As capturas abaixo foram geradas via navegador headless (Firefox) em ambiente lo
 | **Taxonomia Fechada de Erros** | ✅ Aprovado | Códigos contratuais estritos (400, 415, 422, 500, 502, 503, 504) com status numéricos literais; anomalias de protocolo desviadas para `protocol_error`. |
 | **Valores Indisponíveis sem Falsos Zeros** | ✅ Aprovado | Quando a estimativa, uso ou custo são `unavailable`, a interface apresenta o traço `—` e a justificativa `reason`, nunca zero artificial. |
 | **Decimais Monetários Preservados** | ✅ Aprovado | Grandezas numéricas trafegam e são manipuladas como strings para prevenir erros de precisão IEEE 754. |
-| **Segurança e Operação Offline** | ✅ Aprovado | Zero armazenamento de segredos ou chaves no front-end; sem telemetria persistente ou cookies; fontes do sistema nativo para operação 100% desconectada da internet. |
+| **Segurança e Operação Offline** | ✅ Aprovado | Zero armazenamento de segredos ou chaves no front-end; sem telemetria persistente ou cookies; ausência de portas dos fundos/respostas simuladas por parâmetros de URL; fontes do sistema nativo para operação 100% desconectada da internet. |
 
 ---
 
 ## 3. Validações Automatizadas
 
 - **Instalação Reproduzível:** `npm ci` aprovado com `engines` restrito a `^22.22.2 || ^24.15.0 || >=26.0.0`.
-- **Suíte Front-end (Vitest):** 20 testes aprovados em 4.39s (100% de sucesso).
+- **Suíte Front-end (Vitest):** 21 testes aprovados (100% de sucesso), incluindo validação contra disparo de execuções ou preenchimentos espúrios via query params.
 - **Tipagem e Compilação (`tsc && vite build`):** 1.941 módulos transformados em 666ms com zero erros.
 - **Suíte Back-end (Pytest):** 625 testes aprovados em 5.75s (zero regressão).
 - **Verificação de Diff Git (`git diff --check`):** Saída limpa.

@@ -156,4 +156,28 @@ describe('ExecutionView component', () => {
       ).toBeInTheDocument();
     });
   });
+  it('não preenche respostas nem altera status por parâmetros de consulta sem interação do usuário', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const onExecutionResultMock = vi.fn();
+
+    window.history.pushState({}, '', '/?demo=refusal&test=1');
+
+    try {
+      render(<ExecutionView onExecutionResult={onExecutionResultMock} />);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(onExecutionResultMock).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText(/Recusa Controlada: Nenhuma Rota Elegível/i)
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Demonstração de recusa de rota/i)
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/Pronto para Roteamento Neutro/i)
+      ).toBeInTheDocument();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
 });

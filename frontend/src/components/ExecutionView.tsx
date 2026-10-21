@@ -118,42 +118,6 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [task, context, capabilitiesInput, criteriaInput, allowedRoutesInput, maxCostAmount, maxCostCurrency, isLoading]);
 
-  // Permite que ferramentas de homologação visual acionem uma demonstração real via query param (?demo=refusal)
-  useEffect(() => {
-    const searchParams = new URLSearchParams(window.location.search);
-    if (searchParams.get('demo') === 'refusal') {
-      const demoTask = 'Demonstração de recusa de rota';
-      setTask(demoTask);
-      setApiResponse({
-        kind: 'refusal',
-        status: 422,
-        error: {
-          error: {
-            code: 'NO_ELIGIBLE_ROUTE',
-            message:
-              'Nenhuma rota configurada, habilitada e válida satisfaz as restrições aplicáveis.',
-          },
-          decision: {
-            outcome: 'refused',
-            strategy: { id: 'lowest-estimated-cost', applied: false },
-            applied_constraints: [],
-            reason:
-              'Todas as rotas foram excluídas antes da comparação econômica.',
-            factors: [
-              {
-                category: 'route',
-                description: 'O catálogo não continha rotas configuradas.',
-              },
-            ],
-          },
-        },
-      });
-      if (onExecutionResult) {
-        onExecutionResult('refusal');
-      }
-    }
-  }, [onExecutionResult]);
-
   const loadPreset = (preset: PresetExample) => {
     setTask(preset.request.task);
     setContext(preset.request.context || '');

@@ -86,6 +86,7 @@ interface ExecutionViewProps {
       | 'client_error'
       | 'execution_error'
       | 'server_error'
+      | 'protocol_error'
       | 'network_error'
   ) => void;
 }
@@ -116,6 +117,42 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [task, context, capabilitiesInput, criteriaInput, allowedRoutesInput, maxCostAmount, maxCostCurrency, isLoading]);
+
+  // Permite que ferramentas de homologação visual acionem uma demonstração real via query param (?demo=refusal)
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get('demo') === 'refusal') {
+      const demoTask = 'Demonstração de recusa de rota';
+      setTask(demoTask);
+      setApiResponse({
+        kind: 'refusal',
+        status: 422,
+        error: {
+          error: {
+            code: 'NO_ELIGIBLE_ROUTE',
+            message:
+              'Nenhuma rota configurada, habilitada e válida satisfaz as restrições aplicáveis.',
+          },
+          decision: {
+            outcome: 'refused',
+            strategy: { id: 'lowest-estimated-cost', applied: false },
+            applied_constraints: [],
+            reason:
+              'Todas as rotas foram excluídas antes da comparação econômica.',
+            factors: [
+              {
+                category: 'route',
+                description: 'O catálogo não continha rotas configuradas.',
+              },
+            ],
+          },
+        },
+      });
+      if (onExecutionResult) {
+        onExecutionResult('refusal');
+      }
+    }
+  }, [onExecutionResult]);
 
   const loadPreset = (preset: PresetExample) => {
     setTask(preset.request.task);
@@ -308,7 +345,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <SlidersHorizontal size={16} />
-                Restrições da Solicitação (<span className="code-font">constraints</span>)
+                <span>Restrições da Solicitação (<span className="code-font">constraints</span>)</span>
               </span>
               {showConstraints ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
             </button>
@@ -590,6 +627,23 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
             {apiResponse.error.decision && (
               <DecisionCard decision={apiResponse.error.decision} />
             )}
+          </div>
+        )}
+
+        {/* Erro de Protocolo Inesperado (fora do contrato v1 ou corpo não-JSON) */}
+        {!isLoading && apiResponse && apiResponse.kind === 'protocol_error' && (
+          <div className="alert-card danger" role="alert">
+            <div className="alert-header">
+              <AlertOctagon size={24} color="var(--color-danger)" />
+              <div>
+                <h3 className="alert-title">
+                  Erro de Protocolo ({apiResponse.error.code} - HTTP {apiResponse.status})
+                </h3>
+                <p className="alert-message" style={{ margin: 0 }}>
+                  {apiResponse.error.message}
+                </p>
+              </div>
+            </div>
           </div>
         )}
 

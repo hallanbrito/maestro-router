@@ -5,7 +5,9 @@
  * 1. Uniões discriminadas estritas para decisões (SelectedDecision vs RefusedDecision).
  * 2. Uniões discriminadas estritas para economia e uso (available, uncertain, unavailable).
  * 3. Categorias estritamente fechadas para restrições e fatores (sem escape "| string").
- * 4. Preservação mandatória de grandezas decimais como strings exatas.
+ * 4. Taxonomia de erros fechada aos 8 códigos da API v1; erros de protocolo/cliente separados.
+ * 5. Status HTTP contratuais representados por literais estritos (sem fallback "| number").
+ * 6. Preservação mandatória de grandezas decimais como strings exatas.
  */
 
 export interface MaxEstimatedCost {
@@ -224,17 +226,19 @@ export interface ErrorIssue {
   message: string;
 }
 
+/** Códigos semânticos estáveis enumerados na API pública v1 (docs/05-API.md seção 9.3). */
+export type ApiErrorCode =
+  | 'INVALID_REQUEST'
+  | 'INVALID_CONFIGURATION'
+  | 'NO_ELIGIBLE_ROUTE'
+  | 'INSUFFICIENT_ECONOMIC_INFORMATION'
+  | 'INVALID_DECISION'
+  | 'EXECUTION_FAILED'
+  | 'EXECUTION_UNAVAILABLE'
+  | 'EXECUTION_TIMEOUT';
+
 export interface ApiErrorPayload {
-  code:
-    | 'INVALID_REQUEST'
-    | 'INVALID_CONFIGURATION'
-    | 'NO_ELIGIBLE_ROUTE'
-    | 'INSUFFICIENT_ECONOMIC_INFORMATION'
-    | 'INVALID_DECISION'
-    | 'EXECUTION_FAILED'
-    | 'EXECUTION_UNAVAILABLE'
-    | 'EXECUTION_TIMEOUT'
-    | string;
+  code: ApiErrorCode;
   message: string;
   issues?: ErrorIssue[];
 }
@@ -245,10 +249,29 @@ export interface ExecutionErrorResponse {
   economics?: ExecutionEconomics;
 }
 
+/** Erros internos de protocolo ou respostas anômalas fora do contrato v1. */
+export type ProtocolErrorCode = 'INVALID_SERVER_RESPONSE' | 'UNEXPECTED_HTTP_STATUS';
+
+export interface ProtocolErrorPayload {
+  code: ProtocolErrorCode;
+  message: string;
+}
+
+/**
+ * Respostas categorizadas com fidelidade aos status HTTP do contrato:
+ * - Sucesso: 200
+ * - Recusa: 422
+ * - Erro de cliente: 400 | 415
+ * - Falha de execução pós-seleção: 502 | 503 | 504
+ * - Erro interno do servidor: 500
+ * - Erro de protocolo/inesperado: status genérico
+ * - Falha de rede: status 0
+ */
 export type ExecutionApiResponse =
   | { kind: 'success'; status: 200; data: ExecutionSuccessResponse }
   | { kind: 'refusal'; status: 422; error: ExecutionErrorResponse }
-  | { kind: 'client_error'; status: 400 | 415 | number; error: ExecutionErrorResponse }
+  | { kind: 'client_error'; status: 400 | 415; error: ExecutionErrorResponse }
   | { kind: 'execution_error'; status: 502 | 503 | 504; error: ExecutionErrorResponse }
-  | { kind: 'server_error'; status: 500 | number; error: ExecutionErrorResponse }
+  | { kind: 'server_error'; status: 500; error: ExecutionErrorResponse }
+  | { kind: 'protocol_error'; status: number; error: ProtocolErrorPayload }
   | { kind: 'network_error'; status: 0; message: string; details?: string };

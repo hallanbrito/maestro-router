@@ -10,7 +10,8 @@
  *   * task e context são transmitidos integralmente com quaisquer espaços significativos.
  *   * Identificadores de rota, capacidades e critérios preservam seus caracteres originais.
  *   * amount e currency em max_estimated_cost não sofrem conversão ou correção de caixa implícita.
- * - Mapeia com fidelidade a taxonomia de erros: 400, 415, 422, 500, 502, 503 e 504.
+ * - Mapeia com fidelidade os status HTTP literais do contrato (200, 400, 415, 422, 500, 502, 503, 504).
+ * - Desvia anomalias ou respostas não-JSON para a categoria protocol_error.
  */
 
 import {
@@ -103,13 +104,11 @@ export async function executeTask(
       responseData = await response.json();
     } catch {
       return {
-        kind: 'server_error',
+        kind: 'protocol_error',
         status: response.status,
         error: {
-          error: {
-            code: 'INVALID_SERVER_RESPONSE',
-            message: `O servidor retornou status HTTP ${response.status} com corpo incompatível com JSON.`,
-          },
+          code: 'INVALID_SERVER_RESPONSE',
+          message: `O servidor retornou status HTTP ${response.status} com corpo incompatível com JSON.`,
         },
       };
     }
@@ -157,10 +156,22 @@ export async function executeTask(
     }
 
     // 500 Internal Server Error (INVALID_CONFIGURATION ou INVALID_DECISION)
+    if (response.status === 500) {
+      return {
+        kind: 'server_error',
+        status: 500,
+        error: errorResponse,
+      };
+    }
+
+    // Qualquer outro status HTTP inesperado fora do contrato público v1
     return {
-      kind: 'server_error',
+      kind: 'protocol_error',
       status: response.status,
-      error: errorResponse,
+      error: {
+        code: 'UNEXPECTED_HTTP_STATUS',
+        message: `O servidor retornou status HTTP inesperado: ${response.status}.`,
+      },
     };
   } catch (_err: unknown) {
     // Falha de rede ou servidor FastAPI inacessível

@@ -159,6 +159,7 @@ describe('executeTask service', () => {
 
     expect(result.kind).toBe('success');
     if (result.kind === 'success') {
+      expect(result.status).toBe(200);
       expect(result.data.result.content).toBe('Resultado normalizado da execução.');
       expect(result.data.decision.outcome).toBe('selected');
       expect(result.data.decision.strategy.applied).toBe(true);
@@ -167,7 +168,7 @@ describe('executeTask service', () => {
     }
   });
 
-  it('mapeia erro de mídia HTTP 415 (INVALID_REQUEST)', async () => {
+  it('mapeia erro de mídia HTTP 415 com status literal 415', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
       status: 415,
       json: async () => ({
@@ -188,7 +189,7 @@ describe('executeTask service', () => {
     }
   });
 
-  it('mapeia erro de cliente HTTP 400 (INVALID_REQUEST com issues)', async () => {
+  it('mapeia erro de cliente HTTP 400 com status literal 400', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
       status: 400,
       json: async () => ({
@@ -216,7 +217,7 @@ describe('executeTask service', () => {
     }
   });
 
-  it('mapeia ambos os códigos HTTP 422: NO_ELIGIBLE_ROUTE e INSUFFICIENT_ECONOMIC_INFORMATION', async () => {
+  it('mapeia ambos os códigos HTTP 422: NO_ELIGIBLE_ROUTE e INSUFFICIENT_ECONOMIC_INFORMATION com status literal 422', async () => {
     const refusedDecision: RefusedDecision = {
       outcome: 'refused',
       strategy: { id: 'lowest-estimated-cost', applied: false },
@@ -245,6 +246,7 @@ describe('executeTask service', () => {
     const res1 = await executeTask({ task: 'Sem rotas' });
     expect(res1.kind).toBe('refusal');
     if (res1.kind === 'refusal') {
+      expect(res1.status).toBe(422);
       expect(res1.error.error.code).toBe('NO_ELIGIBLE_ROUTE');
       expect(res1.error.decision?.outcome).toBe('refused');
       expect(res1.error.decision?.strategy.applied).toBe(false);
@@ -278,11 +280,12 @@ describe('executeTask service', () => {
     const res2 = await executeTask({ task: 'Sem preço' });
     expect(res2.kind).toBe('refusal');
     if (res2.kind === 'refusal') {
+      expect(res2.status).toBe(422);
       expect(res2.error.error.code).toBe('INSUFFICIENT_ECONOMIC_INFORMATION');
     }
   });
 
-  it('mapeia erro de servidor HTTP 500 (INVALID_CONFIGURATION)', async () => {
+  it('mapeia erro de servidor HTTP 500 com status literal 500', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
       status: 500,
       json: async () => ({
@@ -303,12 +306,12 @@ describe('executeTask service', () => {
     }
   });
 
-  describe('erros de execução pós-seleção parametrizados (502, 503, 504)', () => {
+  describe('erros de execução pós-seleção parametrizados com status literais (502, 503, 504)', () => {
     const errorCodes = [
-      { status: 502, code: 'EXECUTION_FAILED' },
-      { status: 503, code: 'EXECUTION_UNAVAILABLE' },
-      { status: 504, code: 'EXECUTION_TIMEOUT' },
-    ] as const;
+      { status: 502 as const, code: 'EXECUTION_FAILED' as const },
+      { status: 503 as const, code: 'EXECUTION_UNAVAILABLE' as const },
+      { status: 504 as const, code: 'EXECUTION_TIMEOUT' as const },
+    ];
 
     errorCodes.forEach(({ status, code }) => {
       it(`mapeia status HTTP ${status} com código ${code} preservando decisão e economia`, async () => {
@@ -366,6 +369,38 @@ describe('executeTask service', () => {
         }
       });
     });
+  });
+
+  it('mapeia resposta não-JSON como protocol_error com INVALID_SERVER_RESPONSE', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      status: 502,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0');
+      },
+    } as unknown as Response);
+
+    const result = await executeTask({ task: 'HTML error page' });
+
+    expect(result.kind).toBe('protocol_error');
+    if (result.kind === 'protocol_error') {
+      expect(result.status).toBe(502);
+      expect(result.error.code).toBe('INVALID_SERVER_RESPONSE');
+    }
+  });
+
+  it('mapeia status HTTP inesperado fora do contrato v1 como protocol_error com UNEXPECTED_HTTP_STATUS', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      status: 404,
+      json: async () => ({}),
+    } as unknown as Response);
+
+    const result = await executeTask({ task: 'Rota 404 inexistente' });
+
+    expect(result.kind).toBe('protocol_error');
+    if (result.kind === 'protocol_error') {
+      expect(result.status).toBe(404);
+      expect(result.error.code).toBe('UNEXPECTED_HTTP_STATUS');
+    }
   });
 
   it('trata falha de rede sem propagar exceção não capturada', async () => {

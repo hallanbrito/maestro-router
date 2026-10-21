@@ -18,3 +18,8 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+# Frontend
+node_modules/
+dist/
+.vite/

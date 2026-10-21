@@ -5,7 +5,11 @@
  * - Comunica-se exclusivamente com POST /v1/executions (único endpoint público).
  * - Não inventa endpoints inexistentes de saúde, status, catálogo ou métricas.
  * - Não executa POST automático, polling ou repetições autônomas de execução.
- * - Preserva valores numéricos decimais como strings para prevenir perda de precisão.
+ * - Preserva valores textuais e numéricos exatamente como informados:
+ *   * trim() é utilizado exclusivamente para verificar a presença de texto não-branco.
+ *   * task e context são transmitidos integralmente com quaisquer espaços significativos.
+ *   * Identificadores de rota, capacidades e critérios preservam seus caracteres originais.
+ *   * amount e currency em max_estimated_cost não sofrem conversão ou correção de caixa implícita.
  * - Mapeia com fidelidade a taxonomia de erros: 400, 415, 422, 500, 502, 503 e 504.
  */
 
@@ -22,19 +26,21 @@ export const API_ENDPOINT = '/v1/executions';
 /**
  * Envia uma solicitação síncrona de execução ao Maestro Router.
  *
- * Esta função só é acionada por comando explícito do usuário (botão ou atalho),
- * nunca em segundo plano ou de forma recorrente.
+ * Acionado estritamente por comando explícito do usuário (botão ou atalho de teclado),
+ * nunca em segundo plano ou em laços de repetição autônomos.
  */
 export async function executeTask(
   request: ExecutionRequest
 ): Promise<ExecutionApiResponse> {
-  // Construção estrita do payload (sem campos nulos ou membros vazios indevidos)
+  // Construção estrita do payload (sem campos nulos ou membros vazios indevidos).
+  // task é enviado exatamente como digitado pelo usuário, preservando espaços significativos.
   const bodyPayload: Record<string, unknown> = {
     task: request.task,
   };
 
-  // O campo context só é enviado se contiver caracteres válidos
-  if (request.context && request.context.trim().length > 0) {
+  // context só é incluído se contiver ao menos um caractere não-branco, sendo transmitido
+  // exatamente com os caracteres e espaços digitados, sem trim truncador.
+  if (request.context !== undefined && request.context.trim().length > 0) {
     bodyPayload.context = request.context;
   }
 
@@ -68,12 +74,13 @@ export async function executeTask(
 
     if (
       request.constraints.max_estimated_cost &&
-      request.constraints.max_estimated_cost.amount &&
-      request.constraints.max_estimated_cost.currency
+      request.constraints.max_estimated_cost.amount !== undefined &&
+      request.constraints.max_estimated_cost.currency !== undefined
     ) {
+      // amount e currency são transmitidos exatamente como fornecidos, sem correção silenciosa
       constraintsPayload.max_estimated_cost = {
         amount: request.constraints.max_estimated_cost.amount,
-        currency: request.constraints.max_estimated_cost.currency.toUpperCase(),
+        currency: request.constraints.max_estimated_cost.currency,
       };
     }
 

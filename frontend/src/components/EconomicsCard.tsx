@@ -1,35 +1,10 @@
 import React from 'react';
 import { DollarSign, Clock, Hash, Check, HelpCircle, AlertTriangle } from 'lucide-react';
-import { ExecutionEconomics, EconomicStatus } from '../types';
+import { ExecutionEconomics } from '../types';
 
 interface EconomicsCardProps {
   economics: ExecutionEconomics;
 }
-
-const renderStatusBadge = (status: EconomicStatus) => {
-  switch (status) {
-    case 'available':
-      return (
-        <span className="badge badge-success" title="Valor defensável e apurado">
-          <Check size={10} /> Disponível
-        </span>
-      );
-    case 'uncertain':
-      return (
-        <span className="badge badge-warning" title="Valor aproximado ou parcial com hipóteses">
-          <AlertTriangle size={10} /> Incerto
-        </span>
-      );
-    case 'unavailable':
-      return (
-        <span className="badge badge-neutral" title="Valor não apurável com os dados atuais">
-          <HelpCircle size={10} /> Indisponível
-        </span>
-      );
-    default:
-      return null;
-  }
-};
 
 export const EconomicsCard: React.FC<EconomicsCardProps> = ({ economics }) => {
   const { estimate, usage, calculated_cost } = economics;
@@ -54,55 +29,83 @@ export const EconomicsCard: React.FC<EconomicsCardProps> = ({ economics }) => {
               <Clock size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
               Estimativa Prévia
             </span>
-            {renderStatusBadge(estimate.status)}
+            {estimate.status === 'available' && (
+              <span className="badge badge-success" title="Valor defensável e apurado">
+                <Check size={10} /> Disponível
+              </span>
+            )}
+            {estimate.status === 'uncertain' && (
+              <span className="badge badge-warning" title="Valor aproximado com hipóteses">
+                <AlertTriangle size={10} /> Incerto
+              </span>
+            )}
+            {estimate.status === 'unavailable' && (
+              <span className="badge badge-neutral" title="Valor não apurável com os dados atuais">
+                <HelpCircle size={10} /> Indisponível
+              </span>
+            )}
           </div>
           <div className="metric-value">
-            {estimate.status !== 'unavailable' && estimate.amount
-              ? `${estimate.amount} ${estimate.currency || 'USD'}`
+            {estimate.status !== 'unavailable'
+              ? `${estimate.amount} ${estimate.currency}`
               : '—'}
           </div>
-          {estimate.price_reference && (
+          {estimate.status !== 'unavailable' && (
             <div className="metric-sub" title="Referência de Preço">
               Ref: {estimate.price_reference}
             </div>
           )}
-          {estimate.reason && (
+          {estimate.status !== 'available' && (
             <div style={{ fontSize: '0.75rem', color: 'var(--color-warning)', marginTop: 4 }}>
               {estimate.reason}
             </div>
           )}
-          {estimate.assumptions && estimate.assumptions.length > 0 && (
+          {estimate.status !== 'unavailable' && estimate.assumptions.length > 0 && (
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
               Hipóteses: {estimate.assumptions.join('; ')}
             </div>
           )}
         </div>
 
-        {/* Custo Calculado Pós-Execução */}
+        {/* Custo Calculado pelo Maestro Pós-Execução */}
         <div className="metric-box">
           <div className="metric-label">
             <span>
               <DollarSign size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-              Custo Calculado
+              Custo Calculado pelo Maestro
             </span>
-            {renderStatusBadge(calculated_cost.status)}
+            {calculated_cost.status === 'available' && (
+              <span className="badge badge-success" title="Valor defensável e apurado">
+                <Check size={10} /> Disponível
+              </span>
+            )}
+            {calculated_cost.status === 'uncertain' && (
+              <span className="badge badge-warning" title="Valor aproximado com hipóteses">
+                <AlertTriangle size={10} /> Incerto
+              </span>
+            )}
+            {calculated_cost.status === 'unavailable' && (
+              <span className="badge badge-neutral" title="Valor não apurável com os dados atuais">
+                <HelpCircle size={10} /> Indisponível
+              </span>
+            )}
           </div>
           <div className="metric-value" style={{ color: 'var(--color-success)' }}>
-            {calculated_cost.status !== 'unavailable' && calculated_cost.amount
-              ? `${calculated_cost.amount} ${calculated_cost.currency || 'USD'}`
+            {calculated_cost.status !== 'unavailable'
+              ? `${calculated_cost.amount} ${calculated_cost.currency}`
               : '—'}
           </div>
-          {calculated_cost.price_reference && (
+          {calculated_cost.status !== 'unavailable' && (
             <div className="metric-sub" title="Referência de Preço Calculada">
               Ref: {calculated_cost.price_reference}
             </div>
           )}
-          {calculated_cost.reason && (
+          {calculated_cost.status !== 'available' && (
             <div style={{ fontSize: '0.75rem', color: 'var(--color-warning)', marginTop: 4 }}>
               {calculated_cost.reason}
             </div>
           )}
-          {calculated_cost.assumptions && calculated_cost.assumptions.length > 0 && (
+          {calculated_cost.status !== 'unavailable' && calculated_cost.assumptions.length > 0 && (
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
               Hipóteses: {calculated_cost.assumptions.join('; ')}
             </div>
@@ -116,9 +119,23 @@ export const EconomicsCard: React.FC<EconomicsCardProps> = ({ economics }) => {
               <Hash size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
               Uso Normalizado
             </span>
-            {renderStatusBadge(usage.status)}
+            {usage.status === 'available' && (
+              <span className="badge badge-success" title="Uso apurado">
+                <Check size={10} /> Disponível
+              </span>
+            )}
+            {usage.status === 'uncertain' && (
+              <span className="badge badge-warning" title="Uso aproximado ou parcial">
+                <AlertTriangle size={10} /> Incerto
+              </span>
+            )}
+            {usage.status === 'unavailable' && (
+              <span className="badge badge-neutral" title="Uso indisponível">
+                <HelpCircle size={10} /> Indisponível
+              </span>
+            )}
           </div>
-          {usage.items && usage.items.length > 0 ? (
+          {usage.status !== 'unavailable' ? (
             <div style={{ marginTop: '0.35rem' }}>
               {usage.items.map((item, idx) => (
                 <div
@@ -139,7 +156,7 @@ export const EconomicsCard: React.FC<EconomicsCardProps> = ({ economics }) => {
           ) : (
             <div className="metric-value">—</div>
           )}
-          {usage.reason && (
+          {usage.status !== 'available' && (
             <div style={{ fontSize: '0.75rem', color: 'var(--color-warning)', marginTop: 4 }}>
               {usage.reason}
             </div>

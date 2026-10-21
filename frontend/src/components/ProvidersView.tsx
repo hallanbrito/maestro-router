@@ -8,7 +8,8 @@ export const ProvidersView: React.FC = () => {
         <h2 className="info-hero-title">Gerenciamento Operacional de Rotas & Provedores</h2>
         <p className="info-hero-desc">
           O Maestro Router opera sob estrita neutralidade entre provedores e modelo de segurança defensiva.
-          O catálogo de rotas é imutável em tempo de execução e configurado pelo operador via variáveis de ambiente seguras.
+          No estado atual do MVP, a composição operacional suporta o aplicativo neutro e o adaptador OpenAI,
+          com catálogo imutável configurado pelo operador via variáveis de ambiente.
         </p>
       </div>
 
@@ -18,8 +19,8 @@ export const ProvidersView: React.FC = () => {
           <div>
             <h3 className="alert-title">Arquitetura de Segurança de Credenciais</h3>
             <p className="alert-message" style={{ margin: 0 }}>
-              Por decisão arquitetural normativa (ADR 0001, ADR 0003 e docs/05-API.md), o front-end
-              <strong> nunca armazena, solicita nem transmite chaves de API</strong> de provedores externos.
+              Por decisão arquitetural normativa (ADRs 0001 e 0003 e docs/05-API.md), o front-end
+              <strong> nunca armazena, solicita nem transmite chaves de API</strong>.
               Todas as credenciais residem exclusivamente no ambiente operacional do backend.
             </p>
           </div>
@@ -31,19 +32,20 @@ export const ProvidersView: React.FC = () => {
           <div className="card-header">
             <h3 className="card-title">
               <Server size={18} color="var(--color-primary)" />
-              Modo Multirrota
+              Modo Multirrota OpenAI
             </h3>
-            <span className="badge badge-purple">Recomendado</span>
+            <span className="badge badge-purple">ADRs 0008, 0009, 0010 e 0011</span>
           </div>
           <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            Permite registrar múltiplos modelos e provedores com atributos granulares: capacidades declaradas,
+            Permite registrar múltiplas rotas e modelos OpenAI com atributos granulares: capacidades declaradas,
             critérios de qualidade validados, referências auditáveis de preço e previsão de uso.
           </p>
           <div style={{ marginTop: '1rem' }}>
             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
-              Variável de Ambiente:
+              Variáveis de Ambiente:
             </span>
-            <pre className="code-snippet">MAESTRO_OPENAI_ROUTES_JSON</pre>
+            <pre className="code-snippet">MAESTRO_OPENAI_ROUTES_JSON
+MAESTRO_ROUTING_CONSTRAINTS_JSON</pre>
           </div>
         </div>
 
@@ -72,7 +74,7 @@ export const ProvidersView: React.FC = () => {
         <div className="card-header">
           <h3 className="card-title">
             <KeyRound size={18} color="var(--color-warning)" />
-            Exemplo Estruturado de Rota Neutra (ADR 0008)
+            Exemplo Estruturado de Rotas OpenAI (ADRs 0008 e 0011)
           </h3>
           <span className="badge badge-neutral">JSON Operacional</span>
         </div>
@@ -87,7 +89,13 @@ export const ProvidersView: React.FC = () => {
       "model": "gpt-4o",
       "enabled": true,
       "known_unavailable": false,
-      "capabilities": ["text_generation", "summarization", "coding"],
+      "capabilities": ["text_generation", "summarization"],
+      "quality_criteria": [
+        {
+          "criterion": "summary_faithfulness_accepted",
+          "evidence_references": ["benchmark-q3-2026"]
+        }
+      ],
       "price_reference": {
         "id": "pricing-openai-2026-08",
         "currency": "USD",

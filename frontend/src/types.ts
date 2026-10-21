@@ -1,9 +1,11 @@
 /**
  * Contratos técnicos da API pública v1 do Maestro Router (docs/05-API.md).
- * Tipos estritamente alinhados à especificação normativa do MVP.
+ * Tipos rigorosamente alinhados à especificação normativa do MVP:
  *
- * Preserva números decimais monetários e de uso como strings exatas,
- * evitando imprecisão de ponto flutuante e conversões cambiais silenciosas.
+ * 1. Uniões discriminadas estritas para decisões (SelectedDecision vs RefusedDecision).
+ * 2. Uniões discriminadas estritas para economia e uso (available, uncertain, unavailable).
+ * 3. Categorias estritamente fechadas para restrições e fatores (sem escape "| string").
+ * 4. Preservação mandatória de grandezas decimais como strings exatas.
  */
 
 export interface MaxEstimatedCost {
@@ -16,7 +18,7 @@ export interface MaxEstimatedCost {
 export interface RequestConstraints {
   /** Capacidades neutras exigidas da rota (ex: ["text_generation", "summarization"]). */
   required_capabilities?: string[];
-  /** Critérios de qualidade previamente aceitos na configuração. */
+  /** Critérios de qualidade aceitos na configuração (ex: ["summary_faithfulness_accepted"]). */
   required_quality_criteria?: string[];
   /** Identificadores de rota permitidos (allowlist estrita). */
   allowed_route_ids?: string[];
@@ -39,139 +41,190 @@ export interface ExecutionResult {
 }
 
 export interface SelectedRoute {
-  /** Identificador neutro e único da rota. */
+  /** Identificador neutro e único da rota na configuração. */
   id: string;
-  /** Identificador neutro do provedor da rota. */
+  /** Identificador neutro do provedor associado. */
   provider: string;
   /** Identificador neutro do modelo associado. */
   model: string;
 }
 
-export interface StrategyInfo {
-  /** Identificador da estratégia aplicada. */
-  id: string;
-  /** Indica se a estratégia chegou a ser efetivamente executada. */
-  applied: boolean;
-}
+export type ConstraintSource = 'request' | 'configuration';
+
+export type ConstraintCategory =
+  | 'route'
+  | 'capability'
+  | 'quality'
+  | 'availability'
+  | 'preference'
+  | 'economics';
 
 export interface AppliedConstraint {
-  /** Origem da restrição: 'request' ou 'configuration'. */
-  source: 'request' | 'configuration' | string;
-  /** Categoria da restrição. */
-  category: 'route' | 'capability' | 'quality' | 'availability' | 'preference' | 'economics' | string;
-  /** Descrição factual da restrição aplicada. */
+  source: ConstraintSource;
+  category: ConstraintCategory;
   description: string;
 }
 
+export type FactorCategory =
+  | 'route'
+  | 'capability'
+  | 'quality'
+  | 'availability'
+  | 'preference'
+  | 'economics'
+  | 'configuration'
+  | 'strategy'
+  | 'tie_breaker';
+
 export interface DecisionFactor {
-  /** Categoria do fator determinante. */
-  category:
-    | 'route'
-    | 'capability'
-    | 'quality'
-    | 'availability'
-    | 'preference'
-    | 'economics'
-    | 'configuration'
-    | 'strategy'
-    | 'tie_breaker'
-    | string;
-  /** Descrição factual que justifica a escolha ou recusa. */
+  category: FactorCategory;
   description: string;
-  /** Referências auditáveis associadas ao fator. */
   references?: string[];
 }
 
-export interface Decision {
-  /** Resultado do roteamento: selecionada ou recusada. */
-  outcome: 'selected' | 'refused';
-  /** Rota selecionada (presente exclusivamente quando outcome === 'selected'). */
-  route?: SelectedRoute;
-  /** Estratégia configurada. */
-  strategy: StrategyInfo;
-  /** Restrições efetivas determinantes para a decisão. */
+/** Decisão válida com rota selecionada (docs/05-API.md seção 7.2). */
+export interface SelectedDecision {
+  outcome: 'selected';
+  route: SelectedRoute;
+  strategy: {
+    id: string;
+    applied: true;
+  };
   applied_constraints: AppliedConstraint[];
-  /** Razão objetiva e sintetizada da decisão. */
   reason: string;
-  /** Fatos determinantes sem raciocínio interno ou dados secretos. */
   factors: DecisionFactor[];
 }
 
-export type EconomicStatus = 'available' | 'uncertain' | 'unavailable';
-
-export interface EconomicEstimate {
-  /** Estado de disponibilidade da estimativa. */
-  status: EconomicStatus;
-  /** Valor monetário estimado pré-execução preservado como string decimal. */
-  amount?: string;
-  /** Moeda da estimativa (3 letras maiúsculas). */
-  currency?: string;
-  /** Identificador neutro da tabela de preços auditável. */
-  price_reference?: string;
-  /** Hipóteses declaradas na estimativa. */
-  assumptions?: string[];
-  /** Justificativa quando status for uncertain ou unavailable. */
-  reason?: string;
+/** Decisão de recusa válida antes da execução (docs/05-API.md seção 9.2). */
+export interface RefusedDecision {
+  outcome: 'refused';
+  route?: never;
+  strategy: {
+    id: string;
+    applied: false;
+  };
+  applied_constraints: AppliedConstraint[];
+  reason: string;
+  factors: DecisionFactor[];
 }
 
+export type Decision = SelectedDecision | RefusedDecision;
+
+/* ==========================================================================
+   Observabilidade Econômica (docs/05-API.md seção 8.1)
+   ========================================================================== */
+
+export interface AvailableEconomicEstimate {
+  status: 'available';
+  amount: string;
+  currency: string;
+  price_reference: string;
+  assumptions: string[];
+  reason?: never;
+}
+
+export interface UncertainEconomicEstimate {
+  status: 'uncertain';
+  amount: string;
+  currency: string;
+  price_reference: string;
+  assumptions: string[];
+  reason: string;
+}
+
+export interface UnavailableEconomicEstimate {
+  status: 'unavailable';
+  reason: string;
+  amount?: never;
+  currency?: never;
+  price_reference?: never;
+  assumptions?: never;
+}
+
+export type EconomicEstimate =
+  | AvailableEconomicEstimate
+  | UncertainEconomicEstimate
+  | UnavailableEconomicEstimate;
+
+export interface AvailableCalculatedCost {
+  status: 'available';
+  amount: string;
+  currency: string;
+  price_reference: string;
+  assumptions: string[];
+  reason?: never;
+}
+
+export interface UncertainCalculatedCost {
+  status: 'uncertain';
+  amount: string;
+  currency: string;
+  price_reference: string;
+  assumptions: string[];
+  reason: string;
+}
+
+export interface UnavailableCalculatedCost {
+  status: 'unavailable';
+  reason: string;
+  amount?: never;
+  currency?: never;
+  price_reference?: never;
+  assumptions?: never;
+}
+
+export type CalculatedCost =
+  | AvailableCalculatedCost
+  | UncertainCalculatedCost
+  | UnavailableCalculatedCost;
+
+/* ==========================================================================
+   Uso Normalizado (docs/05-API.md seção 8.2)
+   ========================================================================== */
+
 export interface UsageItem {
-  /** Unidade neutra de consumo (ex: "input_token", "output_token"). */
   unit: string;
-  /** Quantidade consumida preservada como string decimal. */
   quantity: string;
 }
 
-export interface Usage {
-  /** Estado de disponibilidade dos dados de uso. */
-  status: EconomicStatus;
-  /** Itens normalizados de consumo após resposta do provedor. */
-  items?: UsageItem[];
-  /** Justificativa quando uso for uncertain ou unavailable. */
-  reason?: string;
+export interface AvailableUsage {
+  status: 'available';
+  items: UsageItem[];
+  reason?: never;
 }
 
-export interface CalculatedCost {
-  /** Estado de disponibilidade do custo apurado. */
-  status: EconomicStatus;
-  /** Valor monetário final calculado preservado como string decimal. */
-  amount?: string;
-  /** Moeda do cálculo (3 letras maiúsculas). */
-  currency?: string;
-  /** Referência de preços auditável utilizada no cálculo. */
-  price_reference?: string;
-  /** Hipóteses consideradas no cálculo. */
-  assumptions?: string[];
-  /** Justificativa quando custo calculado for uncertain ou unavailable. */
-  reason?: string;
+export interface UncertainUsage {
+  status: 'uncertain';
+  items: UsageItem[];
+  reason: string;
 }
+
+export interface UnavailableUsage {
+  status: 'unavailable';
+  reason: string;
+  items?: never;
+}
+
+export type Usage = AvailableUsage | UncertainUsage | UnavailableUsage;
 
 export interface ExecutionEconomics {
-  /** Estimativa antes da execução. */
   estimate: EconomicEstimate;
-  /** Uso registrado após o acionamento do provedor. */
   usage: Usage;
-  /** Custo auditável calculado pós-execução. */
   calculated_cost: CalculatedCost;
 }
 
 export interface ExecutionSuccessResponse {
-  /** Resultado textual normalizado. */
   result: ExecutionResult;
-  /** Decisão formal de seleção do roteador. */
-  decision: Decision;
-  /** Dados econômicos completos. */
+  decision: SelectedDecision;
   economics: ExecutionEconomics;
 }
 
 export interface ErrorIssue {
-  /** Caminho do membro JSON em formato JSON Pointer (ex: "/task"). */
   path?: string;
-  /** Mensagem sanitizada sobre a inconsistência. */
   message: string;
 }
 
 export interface ApiErrorPayload {
-  /** Código taxonômico estável do erro (docs/05-API.md seção 9.3). */
   code:
     | 'INVALID_REQUEST'
     | 'INVALID_CONFIGURATION'
@@ -182,22 +235,16 @@ export interface ApiErrorPayload {
     | 'EXECUTION_UNAVAILABLE'
     | 'EXECUTION_TIMEOUT'
     | string;
-  /** Resumo compreensível do erro. */
   message: string;
-  /** Lista de inconsistências detalhadas quando aplicável. */
   issues?: ErrorIssue[];
 }
 
 export interface ExecutionErrorResponse {
-  /** Detalhes do erro retornado pela API. */
   error: ApiErrorPayload;
-  /** Decisão formal presente em recusas (422) e falhas de execução pós-seleção (502, 503, 504). */
   decision?: Decision;
-  /** Informações econômicas presentes em erros após seleção válida. */
   economics?: ExecutionEconomics;
 }
 
-/** Representação discriminada das respostas da API do Maestro. */
 export type ExecutionApiResponse =
   | { kind: 'success'; status: 200; data: ExecutionSuccessResponse }
   | { kind: 'refusal'; status: 422; error: ExecutionErrorResponse }

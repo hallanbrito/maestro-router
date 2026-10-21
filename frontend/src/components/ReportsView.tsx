@@ -8,7 +8,7 @@ export const ReportsView: React.FC = () => {
         <h2 className="info-hero-title">Modelo Econômico & Métricas do Maestro Router</h2>
         <p className="info-hero-desc">
           O Maestro trata custos como parte fundamental da decisão algorítmica, separando de forma estrita
-          a estimativa prévia do custo real calculado pós-execução.
+          a estimativa prévia do custo calculado pelo Maestro pós-execução.
         </p>
       </div>
 
@@ -33,7 +33,7 @@ export const ReportsView: React.FC = () => {
               <Clock size={18} color="var(--color-primary)" />
               1. Estimativa Pré-Execução
             </h3>
-            <span className="badge badge-neutral">Antes da Chamada</span>
+            <span className="badge badge-neutral">ADR 0007</span>
           </div>
           <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
             Calculada antes de qualquer acionamento externo. É confrontada com o teto de custo da solicitação
@@ -60,13 +60,13 @@ export const ReportsView: React.FC = () => {
           <div className="card-header">
             <h3 className="card-title">
               <DollarSign size={18} color="var(--color-success)" />
-              3. Custo Calculado
+              3. Custo Calculado pelo Maestro
             </h3>
-            <span className="badge badge-success">Auditável</span>
+            <span className="badge badge-success">ADR 0006 (Auditável)</span>
           </div>
           <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
             Multiplicação do uso normalizado pelas taxas da referência de preços auditável (
-            <code>price_reference</code>). Diferencia custo calculado de fatura ou cobrança final do provedor.
+            <code>price_reference</code>). Diferencia custo calculado pelo Maestro de fatura ou cobrança final do provedor.
           </p>
         </div>
       </div>
@@ -78,7 +78,7 @@ export const ReportsView: React.FC = () => {
         </h3>
         <ul style={{ paddingLeft: '1.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.7 }}>
           <li>
-            <strong>Elegibilidade antes do preço:</strong> Um modelo mais barato nunca é escolhido se não atender às capacidades e critérios exigidos pela tarefa.
+            <strong>Elegibilidade antes do preço:</strong> Uma rota de menor preço nunca é escolhida se não atender às capacidades e critérios exigidos pela tarefa.
           </li>
           <li>
             <strong>Sem conversão cambial oculta:</strong> Moedas diferentes não são convertidas implicitamente para evitar flutuações e erros de precisão.

@@ -31,7 +31,7 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({ decision }) => {
         </span>
       </div>
 
-      {isSelected && decision.route && (
+      {decision.outcome === 'selected' && (
         <div className="route-pill" aria-label="Detalhes da rota selecionada">
           <div className="route-item">
             <span className="route-item-label">ID da Rota</span>

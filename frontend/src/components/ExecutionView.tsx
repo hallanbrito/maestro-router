@@ -45,7 +45,17 @@ const PRESET_EXAMPLES: PresetExample[] = [
     },
   },
   {
-    title: '3. Teto de Custo Estimado (0.010 USD)',
+    title: '3. Critério de Qualidade Obrigatório',
+    request: {
+      task: 'Elabore uma síntese técnica dos invariantes de roteamento.',
+      context: 'A decisão de roteamento do Maestro separa elegibilidade não econômica de avaliação de custos.',
+      constraints: {
+        required_quality_criteria: ['summary_faithfulness_accepted'],
+      },
+    },
+  },
+  {
+    title: '4. Teto de Custo Estimado (0.0100 USD)',
     request: {
       task: 'Explique a importância da neutralidade de provedores em roteamento de IA.',
       constraints: {
@@ -57,7 +67,7 @@ const PRESET_EXAMPLES: PresetExample[] = [
     },
   },
   {
-    title: '4. Allowlist Restritiva de Rota',
+    title: '5. Allowlist Restritiva de Rota',
     request: {
       task: 'Gere um exemplo de cabeçalho HTTP em JSON.',
       constraints: {
@@ -114,13 +124,13 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
     if (preset.request.constraints) {
       setShowConstraints(true);
       setCapabilitiesInput(
-        preset.request.constraints.required_capabilities?.join(', ') || ''
+        preset.request.constraints.required_capabilities?.join(',') || ''
       );
       setCriteriaInput(
-        preset.request.constraints.required_quality_criteria?.join(', ') || ''
+        preset.request.constraints.required_quality_criteria?.join(',') || ''
       );
       setAllowedRoutesInput(
-        preset.request.constraints.allowed_route_ids?.join(', ') || ''
+        preset.request.constraints.allowed_route_ids?.join(',') || ''
       );
       if (preset.request.constraints.max_estimated_cost) {
         setMaxCostAmount(preset.request.constraints.max_estimated_cost.amount);
@@ -151,6 +161,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
+    // trim() é utilizado exclusivamente para verificar presença de caracteres não brancos
     if (!task.trim()) {
       return;
     }
@@ -158,39 +169,41 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
     setIsLoading(true);
     setApiResponse(null);
 
-    const parseList = (val: string) =>
+    // Divisão de listas preservando caracteres exatos dos identificadores (sem trim silencioso)
+    const parseListWithoutTrimming = (val: string) =>
       val
         .split(',')
-        .map((s) => s.trim())
         .filter((s) => s.length > 0);
 
-    const caps = parseList(capabilitiesInput);
-    const criteria = parseList(criteriaInput);
-    const routes = parseList(allowedRoutesInput);
+    const caps = parseListWithoutTrimming(capabilitiesInput);
+    const criteria = parseListWithoutTrimming(criteriaInput);
+    const routes = parseListWithoutTrimming(allowedRoutesInput);
 
+    // task é enviada exatamente como digitada pelo usuário, preservando espaços significativos
     const requestPayload: ExecutionRequest = {
-      task: task.trim(),
+      task: task,
     };
 
-    if (context.trim()) {
-      requestPayload.context = context.trim();
+    // context só é enviado se contiver caracteres válidos, sem remoção de espaços significativos
+    if (context.trim().length > 0) {
+      requestPayload.context = context;
     }
 
     const hasConstraints =
       caps.length > 0 ||
       criteria.length > 0 ||
       routes.length > 0 ||
-      Boolean(maxCostAmount.trim());
+      maxCostAmount.length > 0;
 
     if (hasConstraints) {
       requestPayload.constraints = {};
       if (caps.length > 0) requestPayload.constraints.required_capabilities = caps;
       if (criteria.length > 0) requestPayload.constraints.required_quality_criteria = criteria;
       if (routes.length > 0) requestPayload.constraints.allowed_route_ids = routes;
-      if (maxCostAmount.trim()) {
+      if (maxCostAmount.length > 0) {
         requestPayload.constraints.max_estimated_cost = {
-          amount: maxCostAmount.trim(),
-          currency: maxCostCurrency.trim() || 'USD',
+          amount: maxCostAmount,
+          currency: maxCostCurrency,
         };
       }
     }
@@ -304,28 +317,43 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
               <div className="accordion-body">
                 <div className="form-group">
                   <label htmlFor="caps-input" className="form-label" style={{ fontSize: '0.8rem' }}>
-                    Capacidades Obrigatórias
+                    Capacidades Obrigatórias (<span className="code-font">required_capabilities</span>)
                   </label>
                   <input
                     id="caps-input"
                     type="text"
                     className="form-input code-font"
-                    placeholder="text_generation, summarization"
+                    placeholder="text_generation,summarization"
                     value={capabilitiesInput}
                     onChange={(e) => setCapabilitiesInput(e.target.value)}
                   />
-                  <div className="form-help">Separadas por vírgula.</div>
+                  <div className="form-help">Identificadores exatos separados por vírgula.</div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="criteria-input" className="form-label" style={{ fontSize: '0.8rem' }}>
+                    Critérios de Qualidade Obrigatórios (<span className="code-font">required_quality_criteria</span>)
+                  </label>
+                  <input
+                    id="criteria-input"
+                    type="text"
+                    className="form-input code-font"
+                    placeholder="summary_faithfulness_accepted"
+                    value={criteriaInput}
+                    onChange={(e) => setCriteriaInput(e.target.value)}
+                  />
+                  <div className="form-help">Critérios de aceitação que toda rota admissível deve declarar.</div>
                 </div>
 
                 <div className="form-group">
                   <label htmlFor="routes-input" className="form-label" style={{ fontSize: '0.8rem' }}>
-                    Rotas Permitidas (Allowlist)
+                    Rotas Permitidas (<span className="code-font">allowed_route_ids</span>)
                   </label>
                   <input
                     id="routes-input"
                     type="text"
                     className="form-input code-font"
-                    placeholder="route-primary, route-openai-mini"
+                    placeholder="route-primary,route-openai-mini"
                     value={allowedRoutesInput}
                     onChange={(e) => setAllowedRoutesInput(e.target.value)}
                   />
@@ -337,7 +365,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.75rem' }}>
                   <div className="form-group">
                     <label htmlFor="cost-amt-input" className="form-label" style={{ fontSize: '0.8rem' }}>
-                      Teto de Custo Máximo
+                      Teto de Custo Máximo (<span className="code-font">amount</span>)
                     </label>
                     <input
                       id="cost-amt-input"
@@ -351,7 +379,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
 
                   <div className="form-group">
                     <label htmlFor="cost-curr-input" className="form-label" style={{ fontSize: '0.8rem' }}>
-                      Moeda
+                      Moeda (<span className="code-font">currency</span>)
                     </label>
                     <input
                       id="cost-curr-input"
@@ -360,7 +388,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
                       maxLength={3}
                       placeholder="USD"
                       value={maxCostCurrency}
-                      onChange={(e) => setMaxCostCurrency(e.target.value.toUpperCase())}
+                      onChange={(e) => setMaxCostCurrency(e.target.value)}
                     />
                   </div>
                 </div>
@@ -426,7 +454,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
             <h3 className="empty-title">Pronto para Roteamento Neutro</h3>
             <p className="empty-description">
               Envie uma tarefa e parâmetros opcionais para que o Maestro avalie as rotas elegíveis,
-              calcule estimativas prévias e execute a melhor opção de forma transparente e auditável.
+              consulte estimativas prévias e execute a rota selecionada segundo a estratégia.
             </p>
           </div>
         )}
@@ -439,7 +467,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({ onExecutionResult 
               Avaliando Critérios de Rota...
             </h3>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-              Verificando elegibilidade não-econômica, estimativas monetárias e selecionando a rota ideal.
+              Verificando elegibilidade não-econômica, estimativas monetárias e identificando a rota selecionada segundo a estratégia.
             </p>
           </div>
         )}

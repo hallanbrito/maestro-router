@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Interface web de controle e observabilidade do Maestro Router",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

@@ -1,13 +1,14 @@
-"""Administrative layer and operational composition for Maestro Control Center.
+"""Camada administrativa local e composição operacional do Maestro Control Center.
 
-This module provides a local, optional administrative layer that enables safe
-in-memory credential management, route configuration, and explainable previews
-(recommendations) for the Control Center, while preserving the neutral public
-execution contract from docs/05-API.md intact.
+Este módulo implementa uma composição operacional dedicada ao Control Center (ADR 0012),
+fornecendo uma camada administrativa local que gerencia credenciais em memória volátil,
+rotas em tempo de execução e sugestões explicáveis (prévias sem custo de tokens),
+preservando estritamente o contrato neutro da API pública v1 (docs/05-API.md).
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import secrets
 import threading
@@ -19,34 +20,23 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
 from openai import (
     APIConnectionError,
-    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     AuthenticationError,
-    OpenAIError,
     PermissionDeniedError,
     RateLimitError,
 )
 
 from .adapters import OpenAIResponsesAdapter
 from .api import create_app
-from .contracts import (
-    CURRENCY_PATTERN,
-    DECIMAL_PATTERN,
-    ExecutionRequest,
-    ExecutionSuccessResponse,
-)
-from .economics import PriceReference, calculate_pre_execution_amount
+from .contracts import ExecutionRequest
+from .economics import calculate_pre_execution_amount
 from .execution import ExecutionAdapter
 from .routing import (
     EconomicEstimate,
-    Exclusion,
-    MoneyCeiling,
     OperationalConstraints,
-    OperationalDefaults,
     Route,
     RouteCatalog,
     SelectedDecision,
@@ -55,11 +45,15 @@ from .routing import (
 from .bootstrap import (
     _parse_estimated_usage,
     _parse_price_reference,
-    _parse_routing_constraints,
-    _parse_unique_string_list,
     _is_structurally_valid_string,
     _estimated_usage_assumption,
     _DISABLED_ROUTE_ESTIMATE_REASON,
+)
+
+# ContextVar assíncrono para propagar a trilha selecionada durante a requisição de execução.
+# Permite que a trilha 'Free' restrinja efetivamente a execução pública sem violar o schema do body.
+active_track_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "active_track_ctx", default=None
 )
 
 CredentialStatus = Literal[
@@ -81,7 +75,9 @@ KNOWN_OPENAI_MODELS = [
     "gpt-4-turbo",
 ]
 
-DEFAULT_GPT4O_MINI_PRICE_REFERENCE = {
+# Referência de preço oficial documentada para o GPT-4o-mini (ADR 0008).
+# Utilizada estritamente para a rota padrão inicial deste modelo específico.
+INITIAL_GPT4O_MINI_PRICE_REFERENCE = {
     "id": "pricing-openai-gpt-4o-mini-2026",
     "currency": "USD",
     "version": "2026-08",
@@ -97,15 +93,41 @@ DEFAULT_GPT4O_MINI_PRICE_REFERENCE = {
     "model_identity_exact": True,
 }
 
-DEFAULT_GPT4O_MINI_ESTIMATED_USAGE = {
+INITIAL_GPT4O_MINI_ESTIMATED_USAGE = {
     "input_token": 1500,
     "output_token": 500,
     "applicability_confirmed": True,
 }
 
 
+def is_proven_free_route(route: Route) -> bool:
+    """Verifica se a rota possui gratuidade efetivamente comprovada.
+
+    Para ser considerada gratuita no Maestro Router:
+    1. A rota precisa estar habilitada e não marcada como indisponível.
+    2. A referência de preço deve existir e conter taxas exclusivamente iguais a zero.
+    3. A estimativa prévia de custo deve estar disponível com montante aritmético igual a zero.
+    4. Rotas com custo desconhecido, estimativa indisponível ou preço > 0 não são gratuitas.
+    """
+    if not route.enabled or route.known_unavailable:
+        return False
+    if route.price_reference is None:
+        return False
+    rates = route.price_reference.rates
+    if not rates or not all(Decimal(r.rate) == Decimal("0") for r in rates):
+        return False
+    if route.estimate is None or route.estimate.status != "available":
+        return False
+    try:
+        if route.estimate.decimal_amount() != Decimal("0"):
+            return False
+    except Exception:
+        return False
+    return True
+
+
 class ControlCenterState:
-    """Thread-safe in-memory state for the Control Center operational runtime."""
+    """Estado thread-safe em memória volátil para o runtime do Control Center."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -119,6 +141,8 @@ class ControlCenterState:
                 "message": None,
             }
         }
+        # Rota inicial do modelo padrão. Observe que quality_criteria inicia vazio,
+        # sem benchmarks inventados ou evidências forjadas.
         self.routes_raw: list[dict[str, Any]] = [
             {
                 "route_id": "route-openai-gpt4o-mini",
@@ -127,14 +151,9 @@ class ControlCenterState:
                 "enabled": True,
                 "known_unavailable": False,
                 "capabilities": ["text_generation", "summarization"],
-                "quality_criteria": [
-                    {
-                        "criterion": "summary_faithfulness_accepted",
-                        "evidence_references": ["benchmark-q3-2026"],
-                    }
-                ],
-                "price_reference": DEFAULT_GPT4O_MINI_PRICE_REFERENCE,
-                "estimated_usage": DEFAULT_GPT4O_MINI_ESTIMATED_USAGE,
+                "quality_criteria": [],
+                "price_reference": INITIAL_GPT4O_MINI_PRICE_REFERENCE,
+                "estimated_usage": INITIAL_GPT4O_MINI_ESTIMATED_USAGE,
             }
         ]
         self.current_catalog: RouteCatalog = RouteCatalog()
@@ -146,7 +165,7 @@ class ControlCenterState:
             self._rebuild_runtime_locked()
 
     def _rebuild_runtime_locked(self) -> None:
-        """Construct immutable RouteCatalog and ExecutionAdapters from active state."""
+        """Reconstrói os snapshots imutáveis do RouteCatalog e dos adaptadores."""
         openai_cred = self.credentials.get("openai", {})
         api_key = openai_cred.get("api_key")
         adapters: dict[str, ExecutionAdapter] = {}
@@ -163,10 +182,16 @@ class ControlCenterState:
             if not _is_structurally_valid_string(route_id):
                 continue
 
-            enabled = entry.get("enabled", True)
             model = entry.get("model")
             provider = entry.get("provider", "openai")
             known_unavailable = bool(entry.get("known_unavailable", False))
+            user_enabled = bool(entry.get("enabled", True))
+
+            # Se não há chave de API para o provedor externo, a rota não possui adaptador
+            # funcional associado. Para preservar a taxonomia da API pública (recusa 422
+            # em vez de erro interno 500), a rota permanece desabilitada na composição.
+            has_credential = bool(api_key) if provider == "openai" else False
+            effective_enabled = user_enabled if has_credential else False
 
             capabilities = frozenset(entry.get("capabilities", []))
             qc_raw = entry.get("quality_criteria", [])
@@ -176,11 +201,9 @@ class ControlCenterState:
                 if isinstance(item, dict) and "criterion" in item:
                     c = item["criterion"]
                     refs = item.get("evidence_references", [])
-                    qc_set.add(c)
-                    qc_refs[c] = tuple(sorted(refs))
-                elif isinstance(item, str):
-                    qc_set.add(item)
-                    qc_refs[item] = ()
+                    if refs:
+                        qc_set.add(c)
+                        qc_refs[c] = tuple(sorted(refs))
 
             price_ref_val = entry.get("price_reference")
             price_reference = None
@@ -203,10 +226,17 @@ class ControlCenterState:
                     quantities = None
 
             estimate = None
-            if not enabled:
+            if not effective_enabled:
+                reason = (
+                    _DISABLED_ROUTE_ESTIMATE_REASON
+                    if user_enabled
+                    else "A rota está desabilitada na configuração."
+                )
+                if not has_credential and user_enabled:
+                    reason = "A chave do provedor não está cadastrada na memória do servidor."
                 estimate = EconomicEstimate(
                     status="unavailable",
-                    reason=_DISABLED_ROUTE_ESTIMATE_REASON,
+                    reason=reason,
                 )
             elif price_reference and quantities:
                 try:
@@ -239,13 +269,12 @@ class ControlCenterState:
                     reason="Não há preço nem método de estimativa aprovados para esta rota.",
                 )
 
-            # Build route
             route = Route(
                 id=route_id,
                 provider=provider,
                 model=model or "unknown",
                 adapter_id="openai-responses",
-                enabled=bool(enabled),
+                enabled=effective_enabled,
                 capabilities=capabilities,
                 quality_criteria=frozenset(qc_set),
                 quality_evidence_references=qc_refs,
@@ -281,7 +310,6 @@ class ControlCenterState:
             session = self.sessions.get(session_id)
             if not session:
                 return False
-            # Constant-time comparison to prevent timing attacks
             return secrets.compare_digest(session["csrf_token"], csrf_token)
 
     def set_credential(self, provider: str, api_key: str) -> None:
@@ -386,7 +414,11 @@ class ControlCenterState:
 
 
 class DynamicRouteCatalog(RouteCatalog):
-    """RouteCatalog proxy that forwards calls to the current active catalog snapshot."""
+    """Proxy de catálogo que repassa chamadas ao catálogo ativo em memória.
+
+    Ao receber chamadas no contexto da trilha 'Free', restringe a allowlist
+    efetiva exclusivamente às rotas com gratuidade comprovada.
+    """
 
     def __init__(self, state: ControlCenterState) -> None:
         self._state = state
@@ -410,11 +442,29 @@ class DynamicRouteCatalog(RouteCatalog):
 
     @property
     def operational_constraints(self) -> OperationalConstraints | None:
-        return getattr(self._state.current_catalog, "operational_constraints", None)
+        base_constraints = getattr(
+            self._state.current_catalog, "operational_constraints", None
+        ) or OperationalConstraints()
+
+        # Se a execução corrente estiver marcada na trilha 'Free', restringe a allowlist
+        # operacional para conter APENAS rotas com gratuidade comprovada.
+        track = active_track_ctx.get()
+        if track == "free":
+            snapshot = self._state.current_catalog.snapshot()
+            free_ids = frozenset(r.id for r in snapshot if is_proven_free_route(r))
+            return OperationalConstraints(
+                required_capabilities=base_constraints.required_capabilities,
+                required_quality_criteria=base_constraints.required_quality_criteria,
+                allowed_route_ids=free_ids,
+                max_estimated_costs=base_constraints.max_estimated_costs,
+                defaults=base_constraints.defaults,
+            )
+
+        return base_constraints
 
 
 class DynamicAdapterRegistry(Mapping[str, ExecutionAdapter]):
-    """Mapping proxy that dynamically delegates adapter lookups to the active registry."""
+    """Proxy de registro que delega a busca de adaptadores ao estado ativo."""
 
     def __init__(self, state: ControlCenterState) -> None:
         self._state = state
@@ -433,7 +483,7 @@ class DynamicAdapterRegistry(Mapping[str, ExecutionAdapter]):
 
 
 def _is_safe_origin(origin: str | None) -> bool:
-    """Validate that requests originate from local browser loopback origins."""
+    """Valida se as solicitações administrativas se originam do loopback local."""
     if origin is None:
         return True
     try:
@@ -444,15 +494,212 @@ def _is_safe_origin(origin: str | None) -> bool:
         return False
 
 
+def _validate_route_payload(body: Any) -> dict[str, Any]:
+    """Valida exaustivamente o payload de rota ANTES de qualquer mutação de estado.
+
+    Rejeita tipos incompatíveis, provedores não suportados e critérios sem evidência.
+    Em falha, levanta HTTPException sem alterar a configuração anterior.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_JSON", "message": "O corpo deve ser um objeto JSON."},
+        )
+
+    provider = body.get("provider")
+    if provider != "openai":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "UNSUPPORTED_PROVIDER",
+                "message": "Apenas o provedor 'openai' possui adaptador suportado no momento.",
+            },
+        )
+
+    route_id = body.get("route_id")
+    if not _is_structurally_valid_string(route_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_ROUTE_ID",
+                "message": "route_id é obrigatório e deve ser uma string não vazia.",
+            },
+        )
+
+    model = body.get("model")
+    if not _is_structurally_valid_string(model):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_MODEL",
+                "message": "model é obrigatório e deve ser uma string não vazia.",
+            },
+        )
+
+    if "enabled" in body and type(body["enabled"]) is not bool:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_TYPE", "message": "enabled deve ser um valor booleano."},
+        )
+
+    if "known_unavailable" in body and type(body["known_unavailable"]) is not bool:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_TYPE", "message": "known_unavailable deve ser um valor booleano."},
+        )
+
+    capabilities: list[str] = []
+    if "capabilities" in body:
+        caps_val = body["capabilities"]
+        if not isinstance(caps_val, list) or any(not _is_structurally_valid_string(c) for c in caps_val):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_CAPABILITIES",
+                    "message": "capabilities deve ser uma lista de strings não vazias.",
+                },
+            )
+        if len(set(caps_val)) != len(caps_val):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_CAPABILITIES",
+                    "message": "capabilities não pode conter duplicatas.",
+                },
+            )
+        capabilities = list(caps_val)
+
+    quality_criteria: list[dict[str, Any]] = []
+    if "quality_criteria" in body:
+        qc_val = body["quality_criteria"]
+        if not isinstance(qc_val, list):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_QUALITY_CRITERIA",
+                    "message": "quality_criteria deve ser uma lista de critérios.",
+                },
+            )
+        seen_criteria: set[str] = set()
+        for idx, item in enumerate(qc_val):
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "INVALID_QUALITY_CRITERIA",
+                        "message": f"quality_criteria[{idx}] deve ser um objeto.",
+                    },
+                )
+            crit = item.get("criterion")
+            if not _is_structurally_valid_string(crit):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "INVALID_QUALITY_CRITERIA",
+                        "message": f"quality_criteria[{idx}].criterion deve ser string válida.",
+                    },
+                )
+            if crit in seen_criteria:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "INVALID_QUALITY_CRITERIA",
+                        "message": f"Critério duplicado: {crit}.",
+                    },
+                )
+            seen_criteria.add(crit)
+
+            refs = item.get("evidence_references")
+            if not isinstance(refs, list) or len(refs) == 0 or any(not _is_structurally_valid_string(r) for r in refs):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "INVALID_QUALITY_CRITERIA",
+                        "message": (
+                            f"quality_criteria[{idx}] exige ao menos uma evidence_reference "
+                            "válida fornecida pelo operador. Não são permitidas declarações sem evidência."
+                        ),
+                    },
+                )
+            if len(set(refs)) != len(refs):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "INVALID_QUALITY_CRITERIA",
+                        "message": f"evidence_references em quality_criteria[{idx}] contém duplicatas.",
+                    },
+                )
+            quality_criteria.append({"criterion": crit, "evidence_references": list(refs)})
+
+    # Validação estrita da referência de preço (sem auto-preenchimento para outros modelos)
+    price_ref_obj: dict[str, Any] | None = None
+    if "price_reference" in body and body["price_reference"] is not None:
+        raw_price = body["price_reference"]
+        if not isinstance(raw_price, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_PRICE_REFERENCE", "message": "price_reference deve ser um objeto JSON."},
+            )
+        try:
+            _parse_price_reference(json.dumps(raw_price), route_id=route_id, model=model)
+            price_ref_obj = raw_price
+        except Exception as err:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_PRICE_REFERENCE", "message": f"price_reference inválida: {err}"},
+            )
+
+    # Validação estrita da previsão de uso (sem auto-preenchimento para outros modelos)
+    est_usage_obj: dict[str, Any] | None = None
+    if "estimated_usage" in body and body["estimated_usage"] is not None:
+        raw_usage = body["estimated_usage"]
+        if not isinstance(raw_usage, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_ESTIMATED_USAGE", "message": "estimated_usage deve ser um objeto JSON."},
+            )
+        try:
+            _parse_estimated_usage(json.dumps(raw_usage))
+            est_usage_obj = raw_usage
+        except Exception as err:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_ESTIMATED_USAGE", "message": f"estimated_usage inválido: {err}"},
+            )
+
+    return {
+        "route_id": route_id,
+        "provider": provider,
+        "model": model,
+        "enabled": bool(body.get("enabled", True)),
+        "known_unavailable": bool(body.get("known_unavailable", False)),
+        "capabilities": capabilities,
+        "quality_criteria": quality_criteria,
+        "price_reference": price_ref_obj,
+        "estimated_usage": est_usage_obj,
+    }
+
+
 def create_control_center_app(state: ControlCenterState | None = None) -> FastAPI:
-    """Create the Maestro Control Center FastAPI application with admin layer."""
+    """Cria a aplicação FastAPI do Maestro Control Center com a camada administrativa local."""
     control_state = state if state is not None else ControlCenterState()
 
     dynamic_catalog = DynamicRouteCatalog(control_state)
     dynamic_adapters = DynamicAdapterRegistry(control_state)
 
-    # Core execution application exposing POST /v1/executions in strict compliance with docs/05-API.md
+    # Aplicação núcleo de execução expondo POST /v1/executions em conformidade com docs/05-API.md
     app = create_app(catalog=dynamic_catalog, adapters=dynamic_adapters)
+
+    # Middleware para capturar o cabeçalho X-Maestro-Track durante requisições de execução.
+    # Permite que a trilha 'Free' filtre efetivamente a execução pública sem alterar o contrato do corpo.
+    @app.middleware("http")
+    async def track_middleware(request: Request, call_next):
+        track_header = request.headers.get("x-maestro-track", "").lower()
+        token = active_track_ctx.set(track_header if track_header else None)
+        try:
+            return await call_next(request)
+        finally:
+            active_track_ctx.reset(token)
 
     admin_router = APIRouter(prefix="/admin", tags=["Control Center Admin"])
 
@@ -460,7 +707,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> None:
-        """Validate CSRF token, Origin, and Session on administrative mutating actions."""
+        """Valida token CSRF, Origin e Sessão para operações administrativas mutantes."""
         origin = request.headers.get("origin") or request.headers.get("referer")
         if not _is_safe_origin(origin):
             raise HTTPException(
@@ -483,7 +730,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.get("/session")
     async def get_session(response: Response, request: Request) -> dict[str, str]:
-        """Obtain or refresh a secure local administrative session and CSRF token."""
+        """Obtém ou atualiza a sessão administrativa local segura e token CSRF."""
         existing_session = request.cookies.get("maestro_admin_session")
         if existing_session and existing_session in control_state.sessions:
             csrf_token = control_state.sessions[existing_session]["csrf_token"]
@@ -501,7 +748,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.get("/config")
     async def get_config() -> dict[str, Any]:
-        """Return safe metadata of registered providers, credentials status, and routes."""
+        """Retorna metadados seguros dos provedores, credenciais e rotas operacionais."""
         return control_state.get_safe_config()
 
     @admin_router.post("/credentials")
@@ -509,7 +756,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> dict[str, Any]:
-        """Register or replace an API key in backend memory without persistence."""
+        """Cadastra ou substitui a chave de API na memória volátil do backend."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         try:
             body = await request.json()
@@ -519,9 +766,16 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_JSON", "message": "Corpo JSON inválido."},
             )
 
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_JSON", "message": "Corpo JSON deve ser um objeto."},
+            )
+
         provider = body.get("provider")
         api_key = body.get("api_key")
 
+        # Validação estrita: rejeita provedores não implementados e chaves inválidas
         if provider != "openai":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -531,7 +785,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 },
             )
 
-        if not isinstance(api_key, str) or not api_key.strip():
+        if not _is_structurally_valid_string(api_key):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -552,9 +806,14 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> dict[str, Any]:
-        """Remove an API key from backend memory."""
+        """Remove a chave de API da memória volátil do backend."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         provider = request.query_params.get("provider", "openai")
+        if provider != "openai":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "UNSUPPORTED_PROVIDER", "message": "Provedor não suportado."},
+            )
         control_state.remove_credential(provider)
         return {
             "provider": provider,
@@ -567,7 +826,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> dict[str, Any]:
-        """Explicitly verify the registered credential via lightweight model listing (zero paid generation)."""
+        """Verifica a credencial via listagem neutra de modelos (zero custo de geração)."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         openai_cred = control_state.credentials.get("openai", {})
         api_key = openai_cred.get("api_key")
@@ -583,10 +842,8 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         client = AsyncOpenAI(api_key=api_key, max_retries=0)
         try:
-            # Lightweight call that fetches official models list without generating tokens or charging costs
             response_models = await client.models.list()
             model_ids = [m.id for m in response_models.data if hasattr(m, "id")]
-            # Filter for common chat/completion models to make UI useful
             relevant_models = sorted(
                 [m for m in model_ids if any(k in m for k in ("gpt-4", "o1", "gpt-3.5"))]
             )
@@ -674,7 +931,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.get("/models")
     async def list_models() -> dict[str, Any]:
-        """Return the available models for the operational adapter."""
+        """Retorna os modelos reconhecidos para o adaptador operacional."""
         openai_cred = control_state.credentials.get("openai", {})
         models = openai_cred.get("models", KNOWN_OPENAI_MODELS)
         return {
@@ -688,7 +945,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> dict[str, Any]:
-        """Create or update a route in the Control Center active configuration."""
+        """Cadastra ou atualiza uma rota após validação exaustiva de tipos e dados."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         try:
             body = await request.json()
@@ -698,52 +955,21 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_JSON", "message": "Corpo JSON inválido."},
             )
 
-        route_id = body.get("route_id")
-        model = body.get("model")
-        if not _is_structurally_valid_string(route_id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": "INVALID_ROUTE_ID",
-                    "message": "route_id é obrigatório e deve ser um identificador textual válido.",
-                },
-            )
-        if not _is_structurally_valid_string(model):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": "INVALID_MODEL",
-                    "message": "model é obrigatório e deve ser um identificador válido.",
-                },
-            )
+        # Validação integral dos dados ANTES de qualquer modificação de estado (Item 5).
+        validated_route = _validate_route_payload(body)
 
         with control_state._lock:
             existing_idx = next(
-                (i for i, r in enumerate(control_state.routes_raw) if r.get("route_id") == route_id),
+                (i for i, r in enumerate(control_state.routes_raw) if r.get("route_id") == validated_route["route_id"]),
                 None,
             )
-            route_data = {
-                "route_id": route_id,
-                "provider": body.get("provider", "openai"),
-                "model": model,
-                "enabled": bool(body.get("enabled", True)),
-                "known_unavailable": bool(body.get("known_unavailable", False)),
-                "capabilities": list(body.get("capabilities", ["text_generation"])),
-                "quality_criteria": list(body.get("quality_criteria", [])),
-                "price_reference": body.get(
-                    "price_reference", DEFAULT_GPT4O_MINI_PRICE_REFERENCE
-                ),
-                "estimated_usage": body.get(
-                    "estimated_usage", DEFAULT_GPT4O_MINI_ESTIMATED_USAGE
-                ),
-            }
             if existing_idx is not None:
-                control_state.routes_raw[existing_idx] = route_data
+                control_state.routes_raw[existing_idx] = validated_route
             else:
-                control_state.routes_raw.append(route_data)
+                control_state.routes_raw.append(validated_route)
             control_state._rebuild_runtime_locked()
 
-        return {"status": "success", "route": route_data}
+        return {"status": "success", "route": validated_route}
 
     @admin_router.patch("/routes/{route_id}/toggle")
     async def toggle_route(
@@ -751,7 +977,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> dict[str, Any]:
-        """Quickly enable or disable a route in active configuration."""
+        """Alterna a habilitação de uma rota na configuração ativa."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         with control_state._lock:
             target = next(
@@ -775,9 +1001,15 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> dict[str, Any]:
-        """Remove a route from active configuration."""
+        """Remove uma rota da configuração ativa."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         with control_state._lock:
+            existing = any(r.get("route_id") == route_id for r in control_state.routes_raw)
+            if not existing:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "ROUTE_NOT_FOUND", "message": f"Rota {route_id} não encontrada."},
+                )
             control_state.routes_raw = [
                 r for r in control_state.routes_raw if r.get("route_id") != route_id
             ]
@@ -786,7 +1018,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.post("/preview")
     async def preview_routing(request: Request) -> dict[str, Any]:
-        """Explainable routing preview without executing the external provider (zero cost)."""
+        """Prévia explicável de decisão sem acionamento externo (zero custo de tokens)."""
         try:
             body = await request.json()
         except Exception:
@@ -807,7 +1039,6 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
             track = "economica"
 
         constraints_input = body.get("constraints") or {}
-        # Construct standard ExecutionRequest to reuse Maestro's pure routing engine
         req_kwargs: dict[str, Any] = {"task": task}
         if "context" in body and body["context"]:
             req_kwargs["context"] = body["context"]
@@ -822,43 +1053,38 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_REQUEST", "message": f"Restrições inválidas: {err}"},
             )
 
-        # Snapshot active routes
         catalog_snapshot = control_state.current_catalog.snapshot()
         all_routes_count = len(catalog_snapshot)
-
         has_api_key = bool(control_state.credentials.get("openai", {}).get("api_key"))
 
-        # Policy descriptions
+        # Apresentação realista e auditável das políticas de trilha
         track_policies = {
             "free": "Trilha Free: aceita exclusivamente candidatos cuja gratuidade esteja comprovada por referência de preço com taxas zero e condições documentadas.",
             "economica": "Trilha Econômica: aplica a estratégia canônica de menor custo estimado entre todos os candidatos elegíveis com dados econômicos comparáveis.",
-            "inteligente": "Trilha Inteligente: avalia requisitos da tarefa e critérios de qualidade documentados, priorizando rotas com evidências técnicas comprovadas e menor custo.",
+            "inteligente": "Trilha Inteligente: aplica estritamente os critérios de qualidade obrigatórios (required_quality_criteria) com evidências documentadas, selecionando o menor custo entre as rotas qualificadas.",
         }
 
-        # Handling Track Free
+        # Tratamento da Trilha Free (Item 1):
+        # Exclui ativamente qualquer rota que não tenha gratuidade comprovada.
         if track == "free":
-            # Check if any route has proven 0-cost
             free_candidates: list[Route] = []
             exclusions: list[dict[str, str]] = []
-            for r in catalog_snapshot:
-                is_free = False
-                if r.price_reference:
-                    rates = r.price_reference.rates
-                    if rates and all(rate.rate == Decimal("0") for rate in rates):
-                        is_free = True
-                if r.estimate and r.estimate.amount in {"0", "0.0", "0.00", "0.0000"}:
-                    is_free = True
 
-                if is_free:
+            for r in catalog_snapshot:
+                if is_proven_free_route(r):
                     free_candidates.append(r)
                 else:
-                    exclusions.append(
-                        {
-                            "route_id": r.id,
-                            "reason": "paid_route",
-                            "description": f"{r.id} foi excluída porque possui custo associado maior que zero (incompatível com a trilha Free).",
-                        }
+                    reason_desc = (
+                        f"{r.id} foi excluída por possuir custos associados maiores que zero "
+                        "(incompatível com a trilha Free)."
+                        if (r.price_reference and any(Decimal(rt.rate) > Decimal("0") for rt in r.price_reference.rates))
+                        else f"{r.id} foi excluída por não comprovar gratuidade aplicável (preço ou estimativa ausente/indisponível na trilha Free)."
                     )
+                    exclusions.append({
+                        "route_id": r.id,
+                        "reason": "paid_or_unknown_cost",
+                        "description": reason_desc,
+                    })
 
             if not free_candidates:
                 return {
@@ -879,17 +1105,72 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     "economic_data_status": "Nenhum candidato com gratuidade comprovada.",
                     "billing_warning": False,
                     "explanation": (
-                        "A trilha Free requer comprovação de custo zero. "
-                        "Todas as rotas configuradas atualmente possuem custos associados. "
+                        "A trilha Free requer comprovação estrita de custo zero. "
+                        "Todas as rotas configuradas atualmente possuem custos associados ou dados econômicos desconhecidos. "
                         "Selecione a trilha 'Econômica' ou 'Inteligente' para utilizar as rotas configuradas."
                     ),
                 }
 
-        # For track economica or inteligente, run route_request against catalog
+            # Avalia se os candidatos gratuitos atendem às restrições adicionais do usuário (ex: capacidades)
+            filtered_free_catalog = RouteCatalog(
+                free_candidates,
+                operational_constraints=OperationalConstraints(
+                    allowed_route_ids=frozenset(r.id for r in free_candidates)
+                ),
+            )
+            routing_decision = route_request(exec_req, filtered_free_catalog)
+            if isinstance(routing_decision, SelectedDecision):
+                selected = routing_decision.selected_routes[0]
+                return {
+                    "track": "free",
+                    "policy_description": track_policies["free"],
+                    "recommended_route": {
+                        "route_id": selected.id,
+                        "provider": selected.provider,
+                        "model": selected.model,
+                        "estimate": {"amount": "0.0000", "currency": selected.estimate.currency or "USD", "status": "available"},
+                        "price_reference": {"id": selected.price_reference.id, "currency": selected.price_reference.currency} if selected.price_reference else None,
+                        "justification": f"{selected.id} foi selecionada com gratuidade comprovada na trilha Free.",
+                    },
+                    "candidate_evaluations": [
+                        {"route_id": selected.id, "status": "selected", "reason": "Gratuidade comprovada e requisitos satisfeitos."}
+                    ] + [
+                        {"route_id": e["route_id"], "status": "excluded", "reason": e["description"]}
+                        for e in exclusions
+                    ],
+                    "factors": [{"category": f.category, "description": f.description} for f in routing_decision.factors],
+                    "exclusions": exclusions,
+                    "economic_data_status": "Gratuidade comprovada (0.0000 USD).",
+                    "billing_warning": False,
+                    "explanation": f"{selected.id} atende a todas as restrições e possui custo zero comprovado.",
+                }
+            else:
+                # Candidatos gratuitos existiam, mas foram eliminados por restrições da tarefa (ex: capacidade ausente)
+                refusal_data = routing_decision.model_dump()
+                return {
+                    "track": "free",
+                    "policy_description": track_policies["free"],
+                    "recommended_route": None,
+                    "candidate_evaluations": [
+                        {"route_id": e["route_id"], "status": "excluded", "reason": e["description"]}
+                        for e in exclusions
+                    ],
+                    "factors": refusal_data.get("decision", {}).get("factors", []),
+                    "exclusions": exclusions,
+                    "economic_data_status": "Rotas gratuitas existentes são incompatíveis com os requisitos da tarefa.",
+                    "billing_warning": False,
+                    "explanation": (
+                        "As rotas gratuitas configuradas foram excluídas por não atenderem aos requisitos da tarefa "
+                        "(ex.: capacidades exigidas ou critérios ausentes). Rotas pagas permanecem estritamente excluídas na trilha Free."
+                    ),
+                    "refusal_code": refusal_data.get("error", {}).get("code"),
+                }
+
+        # Para as trilhas Econômica e Inteligente:
+        # Se não há chave de API cadastrada, as rotas externas não possuem associação válida de execução.
         locally_invalid_ids = frozenset()
         invalid_exec_ids = frozenset()
         if not has_api_key:
-            # If no API key is present in memory, all external adapter routes are missing adapter association
             invalid_exec_ids = frozenset(r.id for r in catalog_snapshot if r.enabled)
             locally_invalid_ids = invalid_exec_ids
 
@@ -907,6 +1188,17 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 if selected.estimate and selected.estimate.amount
                 else "Estimativa indisponível"
             )
+            explanation = routing_decision.reason
+            if track == "inteligente":
+                has_req_quality = bool(
+                    exec_req.constraints and exec_req.constraints.required_quality_criteria
+                )
+                if not has_req_quality:
+                    explanation += (
+                        " (Nota: nenhum critério de qualidade foi especificado na solicitação; "
+                        "a seleção aplicou elegibilidade técnica e menor custo estimado padrão)."
+                    )
+
             return {
                 "track": track,
                 "policy_description": track_policies[track],
@@ -927,7 +1219,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                         if selected.price_reference
                         else None
                     ),
-                    "justification": routing_decision.reason,
+                    "justification": selected.id + " foi selecionada segundo as regras de elegibilidade e custo.",
                 },
                 "candidate_evaluations": [
                     {
@@ -942,14 +1234,11 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     for f in routing_decision.factors
                 ],
                 "exclusions": [],
-                "economic_data_status": f"Referência auditável de preço ativa; estimativa prévia: {est_status}.",
-                "billing_warning": selected.provider != "local" and not (
-                    selected.estimate and selected.estimate.amount in {"0", "0.0", "0.0000"}
-                ),
-                "explanation": routing_decision.reason,
+                "economic_data_status": f"Referência de preço ativa; estimativa: {est_status}.",
+                "billing_warning": selected.provider != "local" and not is_proven_free_route(selected),
+                "explanation": explanation,
             }
         else:
-            # Refusal
             refusal_data = routing_decision.model_dump()
             error_info = refusal_data.get("error", {})
             factors_info = refusal_data.get("decision", {}).get("factors", [])
@@ -982,6 +1271,4 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
     return app
 
 
-# Module-level default application for Control Center execution:
-# e.g.: uvicorn --app-dir src maestro_router.control_center:app --port 8000
 app = create_control_center_app()

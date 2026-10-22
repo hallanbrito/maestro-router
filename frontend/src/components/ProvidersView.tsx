@@ -57,8 +57,9 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   const [routeModel, setRouteModel] = useState('gpt-4o-mini');
   const [customModel, setCustomModel] = useState('');
   const [newRouteId, setNewRouteId] = useState('route-openai-gpt4o-mini');
-  const [routeCapabilities, setRouteCapabilities] = useState('text_generation, summarization');
-  const [routeQualityCriteria, setRouteQualityCriteria] = useState('summary_faithfulness_accepted');
+  const [routeCapabilities, setRouteCapabilities] = useState('text_generation');
+  const [routeQualityCriteria, setRouteQualityCriteria] = useState('');
+  const [routeEvidenceReferences, setRouteEvidenceReferences] = useState('');
 
   const loadConfig = async () => {
     try {
@@ -178,8 +179,9 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     setNewRouteId(`route-openai-${Date.now().toString().slice(-4)}`);
     setRouteModel(config.models[0] || 'gpt-4o-mini');
     setCustomModel('');
-    setRouteCapabilities('text_generation, summarization');
-    setRouteQualityCriteria('summary_faithfulness_accepted');
+    setRouteCapabilities('text_generation');
+    setRouteQualityCriteria('');
+    setRouteEvidenceReferences('');
     setShowRouteModal(true);
   };
 
@@ -196,11 +198,27 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
 
-    const qcs = routeQualityCriteria
+    const criteriaList = routeQualityCriteria
       .split(',')
       .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-      .map((c) => ({ criterion: c, evidence_references: ['benchmark-manual-2026'] }));
+      .filter((s) => s.length > 0);
+
+    const evidenceRefs = routeEvidenceReferences
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    if (criteriaList.length > 0 && evidenceRefs.length === 0) {
+      alert(
+        'Para declarar critérios de qualidade, é obrigatório fornecer ao menos uma referência de evidência documentada pelo operador.'
+      );
+      return;
+    }
+
+    const qcs = criteriaList.map((c) => ({
+      criterion: c,
+      evidence_references: evidenceRefs,
+    }));
 
     try {
       setLoading(true);
@@ -636,24 +654,44 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
 
               <div>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.25rem' }}>
-                  Critérios de Qualidade (separados por vírgula)
+                  Critérios de Qualidade (opcional, separados por vírgula)
                 </label>
                 <input
                   type="text"
                   className="input-field"
                   value={routeQualityCriteria}
                   onChange={(e) => setRouteQualityCriteria(e.target.value)}
-                  placeholder="summary_faithfulness_accepted"
+                  placeholder="ex: summary_faithfulness_accepted"
                 />
               </div>
 
+              {routeQualityCriteria.trim().length > 0 && (
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                    Referências de Evidência da Qualidade (obrigatório se houver critério)
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    value={routeEvidenceReferences}
+                    onChange={(e) => setRouteEvidenceReferences(e.target.value)}
+                    placeholder="ex: avaliacao-equipe-2026, benchmark-auditado-v1"
+                    required
+                  />
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    O Maestro proíbe declarações de qualidade sem referências de evidências auditáveis fornecidas pelo operador.
+                  </span>
+                </div>
+              )}
+
               <div style={{ padding: '0.75rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)' }}>
                 <span style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: '0.25rem' }}>
-                  Referência Econômica Padrão
+                  Referência Econômica e Previsão de Uso
                 </span>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
-                  A rota será configurada com a referência oficial auditável de preços e previsão de uso padrão
-                  (1.500 tokens de entrada, 500 de saída), habilitando estimativas prévias no motor.
+                  {(customModel.trim() || routeModel) === 'gpt-4o-mini'
+                    ? 'O modelo gpt-4o-mini utilizará a referência oficial auditada documentada (ADR 0008) com estimativas prévias no motor.'
+                    : 'Outros modelos iniciam sem tarifas ou estimativas pré-preenchidas. Dados econômicos ausentes permanecem explicitamente indisponíveis até configuração explícita.'}
                 </p>
               </div>
 

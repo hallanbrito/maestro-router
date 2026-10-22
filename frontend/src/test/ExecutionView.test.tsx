@@ -94,13 +94,16 @@ describe('ExecutionView component', () => {
     fireEvent.click(submitBtn);
 
     await waitFor(() => {
-      expect(mockExecute).toHaveBeenCalledWith({
-        task: '  Instrução técnica com espaços  ',
-        context: 'Contexto relevante.',
-        constraints: {
-          required_quality_criteria: ['summary_faithfulness_accepted'],
+      expect(mockExecute).toHaveBeenCalledWith(
+        {
+          task: '  Instrução técnica com espaços  ',
+          context: 'Contexto relevante.',
+          constraints: {
+            required_quality_criteria: ['summary_faithfulness_accepted'],
+          },
         },
-      });
+        'economica'
+      );
       expect(
         screen.getByText('Texto gerado pelo Maestro Router.')
       ).toBeInTheDocument();

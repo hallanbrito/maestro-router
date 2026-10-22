@@ -17,8 +17,8 @@ from openai import (
 from maestro_router.control_center import (
     ControlCenterState,
     create_control_center_app,
-    DEFAULT_GPT4O_MINI_PRICE_REFERENCE,
-    DEFAULT_GPT4O_MINI_ESTIMATED_USAGE,
+    INITIAL_GPT4O_MINI_PRICE_REFERENCE,
+    INITIAL_GPT4O_MINI_ESTIMATED_USAGE,
 )
 from maestro_router.execution import (
     NormalizedUsage,
@@ -45,16 +45,18 @@ def client(clean_state: ControlCenterState) -> TestClient:
 
 
 def test_public_execution_endpoint_preserved_refusal_when_no_key(client: TestClient) -> None:
-    """The public POST /v1/executions remains strictly faithful to docs/05-API.md."""
+    """The public POST /v1/executions returns 422 NO_ELIGIBLE_ROUTE when no key is configured."""
     resp = client.post(
         "/v1/executions",
         headers={"Content-Type": "application/json"},
         json={"task": "Teste de tarefa inicial sem chave configurada."},
     )
-    # Without an API key, the external route has no adapter, resulting in 422 NO_ELIGIBLE_ROUTE or 500 config error
-    assert resp.status_code in {422, 500}
+    # Sem chave cadastrada, a rota externa é desabilitada na composição, resultando precisamente em 422 NO_ELIGIBLE_ROUTE
+    assert resp.status_code == 422
     data = resp.json()
     assert "error" in data
+    assert data["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert "Nenhuma rota configurada, habilitada e válida" in data["error"]["message"]
 
 
 def test_public_execution_success_with_adapter(clean_state: ControlCenterState) -> None:
@@ -313,7 +315,7 @@ def test_preview_track_free_refusal_when_only_paid_routes(client: TestClient, cl
     data = preview_resp.json()
     assert data["track"] == "free"
     assert data["recommended_route"] is None
-    assert "trilha Free requer comprovação de custo zero" in data["explanation"]
+    assert "comprovação estrita de custo zero" in data["explanation"]
 
 
 def test_preview_track_economica_recommends_route(client: TestClient, clean_state: ControlCenterState) -> None:
@@ -330,3 +332,299 @@ def test_preview_track_economica_recommends_route(client: TestClient, clean_stat
     assert data["recommended_route"]["route_id"] == "route-openai-gpt4o-mini"
     assert "justification" in data["recommended_route"]
     assert len(data["factors"]) > 0
+
+
+def test_free_execution_without_preview_excludes_paid_routes(clean_state: ControlCenterState) -> None:
+    """Regressão 1: Execução na trilha Free sem consultar a prévia recusa rotas pagas.
+
+    Mesmo que o cliente envie a requisição diretamente para POST /v1/executions com o cabeçalho
+    X-Maestro-Track: free e exista uma rota habilitada com adaptador ativo, se ela for paga
+    (como a rota padrão do GPT-4o-mini), a requisição deve ser recusada com 422 NO_ELIGIBLE_ROUTE
+    sem acionar o adaptador do provedor externo.
+    """
+    clean_state.set_credential("openai", "sk-active-test-key")
+    mock_adapter = MagicMock()
+    mock_adapter.execute = AsyncMock()
+    clean_state.current_adapters["openai-responses"] = mock_adapter
+
+    app = create_control_center_app(clean_state)
+    local_client = TestClient(app, base_url="http://localhost:8000")
+
+    resp = local_client.post(
+        "/v1/executions",
+        headers={
+            "Content-Type": "application/json",
+            "X-Maestro-Track": "free",
+        },
+        json={"task": "Gere um texto curto sem custo."},
+    )
+
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    mock_adapter.execute.assert_not_called()
+
+
+def test_mixed_catalog_free_track_incompatible_free_and_paid_routes(clean_state: ControlCenterState) -> None:
+    """Regressão 2: Catálogo misto com rota gratuita incompatível e rota paga.
+
+    Em um catálogo contendo:
+    - Rota A (gratuita comprovada, mas com capabilities=['text_generation'])
+    - Rota B (paga, com capabilities=['text_generation', 'code_analysis'])
+
+    Quando uma requisição na trilha Free exige 'code_analysis':
+    - A rota gratuita é excluída por não atender às restrições da tarefa.
+    - A rota paga não pode ser utilizada como fallback silencioso na trilha Free.
+    - O resultado deve ser recusa (422 na execução e recommended_route=None na prévia).
+    """
+    clean_state.set_credential("openai", "sk-active-test-key")
+
+    # Cadastra uma rota comprovadamente gratuita (preço zero e estimativa zero)
+    free_route_payload = {
+        "route_id": "route-free-model",
+        "provider": "openai",
+        "model": "gpt-free-model",
+        "enabled": True,
+        "capabilities": ["text_generation"],
+        "price_reference": {
+            "id": "pricing-free-model",
+            "currency": "USD",
+            "version": "2026-01",
+            "source": "provider_free_tier",
+            "rates": [
+                {"unit": "input_token", "rate": "0.0", "base": 1000000},
+                {"unit": "output_token", "rate": "0.0", "base": 1000000},
+            ],
+            "conditions": ["tier:free"],
+            "context_complete": True,
+            "units_exhaustive": True,
+            "no_double_counting": True,
+            "model_identity_exact": True,
+        },
+        "estimated_usage": {
+            "input_token": 1000,
+            "output_token": 500,
+            "applicability_confirmed": True,
+        },
+    }
+
+    clean_state.routes_raw.append(free_route_payload)
+    mock_adapter = MagicMock()
+    mock_adapter.execute = AsyncMock()
+    clean_state.current_adapters["openai-responses"] = mock_adapter
+    clean_state.rebuild_runtime()
+
+    app = create_control_center_app(clean_state)
+    local_client = TestClient(app, base_url="http://localhost:8000")
+
+    # 1. Verifica na prévia explicável
+    preview_resp = local_client.post(
+        "/admin/preview",
+        json={
+            "task": "Analise o código de alta complexidade.",
+            "track": "free",
+            "constraints": {"required_capabilities": ["code_analysis"]},
+        },
+    )
+    assert preview_resp.status_code == 200
+    preview_data = preview_resp.json()
+    assert preview_data["recommended_route"] is None
+    assert "Rotas pagas permanecem estritamente excluídas na trilha Free" in preview_data["explanation"]
+
+    # 2. Verifica na execução direta com header X-Maestro-Track
+    exec_resp = local_client.post(
+        "/v1/executions",
+        headers={
+            "Content-Type": "application/json",
+            "X-Maestro-Track": "free",
+        },
+        json={
+            "task": "Analise o código de alta complexidade.",
+            "constraints": {"required_capabilities": ["code_analysis"]},
+        },
+    )
+    assert exec_resp.status_code == 422
+    assert exec_resp.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    mock_adapter.execute.assert_not_called()
+
+
+def test_other_model_without_declared_price_or_usage_remains_unavailable(client: TestClient, clean_state: ControlCenterState) -> None:
+    """Regressão 3: Cadastro de outro modelo sem preço ou previsão declarados.
+
+    Garante que cadastrar um modelo diferente de GPT-4o-mini sem dados econômicos explícitos
+    não receba preenchimento automático das tarifas ou do perfil de uso do GPT-4o-mini.
+    Os dados econômicos devem permanecer explicitamente ausentes/indisponíveis.
+    """
+    clean_state.set_credential("openai", "sk-active-test-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    # Cadastra gpt-4o sem informar price_reference nem estimated_usage
+    create_resp = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-openai-gpt4o",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "enabled": True,
+            "capabilities": ["text_generation", "code_analysis"],
+        },
+    )
+    assert create_resp.status_code == 200
+
+    # Consulta configuração segura
+    config_resp = client.get("/admin/config")
+    assert config_resp.status_code == 200
+    config_data = config_resp.json()
+    gpt4o_route = next(r for r in config_data["routes"] if r["route_id"] == "route-openai-gpt4o")
+
+    # Verifica que dados econômicos estão nulos e não herdaram o GPT-4o-mini
+    assert gpt4o_route["price_reference"] is None
+    assert gpt4o_route["estimated_usage"] is None
+
+    # No catálogo em memória, a rota deve existir mas com estimativa indisponível
+    snapshot_route = next(r for r in clean_state.current_catalog.snapshot() if r.id == "route-openai-gpt4o")
+    assert snapshot_route.price_reference is None
+    assert snapshot_route.estimate is not None
+    assert snapshot_route.estimate.status == "unavailable"
+
+
+def test_quality_criteria_without_evidence_reference_rejected(client: TestClient) -> None:
+    """Regressão 4: Critério de qualidade sem evidência documentada é rejeitado.
+
+    A camada administrativa deve exigir ao menos uma evidence_reference válida para qualquer
+    critério de qualidade fornecido pelo operador, proibindo declarações sem evidência.
+    """
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    # 1. Tentativa com lista de evidências vazia
+    resp_empty_list = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-invalid-quality-1",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "quality_criteria": [
+                {"criterion": "mmlu", "evidence_references": []}
+            ],
+        },
+    )
+    assert resp_empty_list.status_code == 400
+    assert resp_empty_list.json()["detail"]["code"] == "INVALID_QUALITY_CRITERIA"
+
+    # 2. Tentativa com referência vazia/em branco
+    resp_blank_ref = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-invalid-quality-2",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "quality_criteria": [
+                {"criterion": "mmlu", "evidence_references": ["   "]}
+            ],
+        },
+    )
+    assert resp_blank_ref.status_code == 400
+    assert resp_blank_ref.json()["detail"]["code"] == "INVALID_QUALITY_CRITERIA"
+
+
+def test_first_use_without_key_flow(client: TestClient, clean_state: ControlCenterState) -> None:
+    """Regressão 5: Fluxo de primeiro uso sem credencial cadastrada.
+
+    Garante que quando o usuário abre o Control Center sem nenhuma chave:
+    - O status em GET /admin/config indica 'not_registered'.
+    - POST /v1/executions retorna precisamente 422 NO_ELIGIBLE_ROUTE (sem 500 ou crash).
+    - POST /admin/preview retorna recommended_route=None explicando ausência de credencial.
+    """
+    # 1. Configuração inicial sem chave
+    config_resp = client.get("/admin/config")
+    assert config_resp.status_code == 200
+    openai_prov = next(p for p in config_resp.json()["providers"] if p["id"] == "openai")
+    assert openai_prov["credential"]["registered"] is False
+    assert openai_prov["credential"]["status"] == "not_registered"
+
+    # 2. Execução direta sem chave
+    exec_resp = client.post(
+        "/v1/executions",
+        headers={"Content-Type": "application/json"},
+        json={"task": "Minha primeira execução no onboarding."},
+    )
+    assert exec_resp.status_code == 422
+    assert exec_resp.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+    # 3. Prévia sem chave
+    preview_resp = client.post(
+        "/admin/preview",
+        json={"task": "Minha primeira consulta.", "track": "economica"},
+    )
+    assert preview_resp.status_code == 200
+    preview_data = preview_resp.json()
+    assert preview_data["recommended_route"] is None
+    assert "A chave de API do provedor não está cadastrada" in preview_data["explanation"]
+
+
+def test_invalid_admin_registration_does_not_mutate_state(client: TestClient, clean_state: ControlCenterState) -> None:
+    """Regressão 6: Validação integral antes de modificar estado garante preservação em caso de erro.
+
+    Se o payload contiver dados inválidos (provedor não suportado, tipos inválidos, etc.),
+    a requisição é rejeitada e a lista de rotas anterior permanece exatamente inalterada.
+    """
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    initial_routes_count = len(clean_state.routes_raw)
+    initial_route_ids = [r["route_id"] for r in clean_state.routes_raw]
+
+    # Tentativa com provedor não suportado
+    resp_prov = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-anthropic-opus",
+            "provider": "anthropic",
+            "model": "claude-3-opus",
+        },
+    )
+    assert resp_prov.status_code == 400
+    assert resp_prov.json()["detail"]["code"] == "UNSUPPORTED_PROVIDER"
+
+    # Tentativa com tipo inválido para 'enabled'
+    resp_type = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-invalid-enabled",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "enabled": "true_as_string",
+        },
+    )
+    assert resp_type.status_code == 400
+    assert resp_type.json()["detail"]["code"] == "INVALID_TYPE"
+
+    # Tentativa com route_id em branco
+    resp_id = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "   ",
+            "provider": "openai",
+            "model": "gpt-4o",
+        },
+    )
+    assert resp_id.status_code == 400
+    assert resp_id.json()["detail"]["code"] == "INVALID_ROUTE_ID"
+
+    # Confirma que nenhuma mutação ocorreu no estado
+    assert len(clean_state.routes_raw) == initial_routes_count
+    assert [r["route_id"] for r in clean_state.routes_raw] == initial_route_ids

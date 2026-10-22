@@ -1,9 +1,9 @@
 # 0012. Camada administrativa local e experiência de primeiro uso do Control Center
 
-- **Status:** Aprovada
+- **Status:** Proposta em validação técnica (Draft PR #27)
 - **Data:** 2026-10-22
 - **Autor:** Maestro Router Team
-- **Decisores:** PO Hallan e time de engenharia
+- **Decisores:** PO Hallan (em revisão de homologação)
 
 ## Contexto
 
@@ -18,14 +18,15 @@ Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26)
 ## Decisão
 
 1. **Camada Administrativa Local e Opcional (`/admin/*`):**
-   - Cria-se uma composição operacional dedicada ao Control Center (`src/maestro_router/control_center.py`), separada do aplicativo neutro estrito de produção (`src/maestro_router/api.py`).
-   - A aplicação neutra de produção permanece 100% inalterada e fiel a `docs/05-API.md`, expondo unicamente `POST /v1/executions`.
+   - Cria-se uma composição operacional dedicada ao Control Center (`src/maestro_router/control_center.py`), separada da aplicação neutra estrita de produção (`src/maestro_router/api.py`).
+   - A aplicação neutra de produção permanece inalterada e fiel a `docs/05-API.md`, expondo unicamente `POST /v1/executions`.
    - O Control Center monta `POST /v1/executions` utilizando os mesmos componentes de domínio e regras de elegibilidade do Maestro, complementado pelos endpoints administrativos locais protegidos.
+   - Percurso inicial sem chave cadastrada: quando nenhuma chave de API estiver presente na memória volátil, rotas que dependem de adaptador externo são marcadas operacionalmente como desabilitadas na composição. Isso assegura que requisições iniciais a `POST /v1/executions` resultem rigorosamente na recusa normativa HTTP 422 `NO_ELIGIBLE_ROUTE` (informando que a rota está desabilitada por ausência de credencial), eliminando qualquer risco de erro interno HTTP 500 `INVALID_CONFIGURATION`.
 
 2. **Segurança de Credenciais e Proteção de Sessão/CSRF:**
    - Credenciais de provedores (ex.: OpenAI API Key) cadastradas via frontend residem **exclusivamente na memória volátil** do processo backend. Nenhuma credencial é gravada em disco, logs, repositório, sessionStorage ou localStorage.
    - O backend nunca retorna o segredo para o frontend; apenas metadados seguros e o estado da credencial são trafegados.
-   - Proteção de sessão dinâmica: na carga inicial, o frontend obtém um identificador de sessão e um token CSRF criptograficamente seguro via `GET /admin/session`. Requisições administrativas de mutação exigem o cabeçalho `X-Maestro-CSRF-Token` e validação de `Origin`/`Referer` restrito a loopback (`localhost`/`127.0.0.1`).
+   - Proteção de sessão dinâmica: na carga inicial, o frontend obtém um identificador de sessão e um token CSRF criptograficamente seguro via `GET /admin/session`. Requisições administrativas de mutação exigem o cabeçalho `X-Maestro-CSRF-Token` e validação de `Origin`/`Referer` restrito a loopback local (`localhost`/`127.0.0.1`).
    - Nenhum segredo ou chave mestra é embutido no bundle estático do frontend.
 
 3. **Ciclo de Vida da Credencial:**
@@ -35,16 +36,18 @@ Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26)
      - `Acesso recusado`: provedor retornou erro de autenticação ou permissão (HTTP 401/403).
      - `Sem saldo`: cota esgotada ou ausência de créditos no provedor (HTTP 429 com insuficiência de cota).
      - `Verificação indisponível`: falha de conectividade ou indisponibilidade do provedor externo.
-   - Verificações externas são estritamente explícitas (acionadas pelo usuário) e utilizam métodos neutros e gratuitos (ex.: listagem de modelos via SDK), nunca gerando texto pago.
+   - Verificações externas são estritamente explícitas (acionadas pelo usuário) e utilizam métodos neutros e gratuitos (ex.: listagem de modelos via SDK oficial), nunca gerando texto pago.
 
-4. **Gerenciamento Operacional de Rotas e Isolamento em Voo:**
+4. **Gerenciamento Operacional de Rotas e Validação Integral Prévia:**
    - O Control Center mantém um catálogo reconfigurável em memória. Alterações em rotas ou credenciais realizam uma troca atômica do snapshot do `RouteCatalog` e do registro de adaptadores.
    - Execuções em andamento capturam o snapshot no instante do recebimento da requisição, garantindo que mutações na configuração administrativa não interfiram em tarefas em processamento.
+   - **Validação Integral Prévia:** Todos os dados recebidos em `POST /admin/routes` são rigorosamente validados antes de qualquer mutação de estado. Tipos incompatíveis (ex.: booleanos enviados como string), provedores sem adaptador implementado e critérios de qualidade desacompanhados de referências de evidências auditáveis fornecidas pelo operador resultam em rejeição imediata (HTTP 400), preservando o estado anterior integralmente intacto.
+   - **Ausência de Preenchimento Automático Indevido:** Referências de preços e perfis de uso documentados do GPT-4o-mini aplicam-se estritamente à sua rota padrão inicial. Cadastros de novos modelos exigem dados econômicos explícitos; na sua ausência, as informações tarifárias e estimativas permanecem explicitamente marcadas como indisponíveis, vedando qualquer confirmação não atestada de aplicabilidade ou identidade tarifária.
 
 5. **Trilhas de Roteamento (Free, Econômica e Inteligente):**
-   - **Free:** restringe os candidatos estritamente a rotas cujo custo seja comprovadamente zero via referência de preço e condições documentadas. Custo desconhecido ou inexistente não autoriza inclusão na trilha Free. Se nenhuma rota gratuita estiver configurada, a recusa é informada com clareza.
-   - **Econômica:** aplica a estratégia canônica `lowest-estimated-cost` do Maestro entre rotas elegíveis com dados comparáveis de estimativa.
-   - **Inteligente:** avalia os requisitos da tarefa (capacidades exigidas, critérios de qualidade documentados) priorizando rotas que comprovem conformidade aos critérios de qualidade exigidos, aplicando em seguida o menor custo estimado entre as qualificadas.
+   - **Free:** Restringe os candidatos estritamente a rotas cujo custo seja comprovadamente zero por tarifas unitárias nulas e estimativa prévia calculada em zero monetário. Rotas pagas, com estimativas indisponíveis ou custos desconhecidos permanecem terminantemente excluídas. Na execução direta via `POST /v1/executions`, a restrição é propagada através do cabeçalho `X-Maestro-Track: free` capturado por ContextVar em middleware HTTP, reduzindo a allowlist operacional (`allowed_route_ids`) às rotas comprovadamente gratuitas sem violar a gramática fechada do corpo JSON da API pública v1. Se não houver rotas gratuitas compatíveis com a tarefa, a requisição é recusada (HTTP 422 `NO_ELIGIBLE_ROUTE`), impedindo qualquer execução de rota tarifada.
+   - **Econômica:** Aplica a estratégia canônica `lowest-estimated-cost` do Maestro entre rotas elegíveis com dados comparáveis de estimativa prévia calculada.
+   - **Inteligente:** Utiliza estritamente os requisitos explícitos da tarefa (capacidades exigidas e critérios de qualidade aceitos) associados a referências de evidências documentadas informadas pelo operador. Não infere pontuações, rankings universais ou notas de inteligência; aplica a elegibilidade técnica aos critérios declarados e, entre as rotas conformes, adota o menor custo estimado.
 
 6. **Sugestões Explicáveis (Prévia de Roteamento):**
    - Endpoint `POST /admin/preview` executa a decisão de elegibilidade e ranqueamento sobre o catálogo ativo sem acionar o provedor externo, com custo zero de tokens.
@@ -60,6 +63,9 @@ Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26)
   - Engenheiros de software podem compreender, configurar e testar o Maestro Router pelo navegador de ponta a ponta sem recorrer ao terminal ou arquivos de ambiente.
   - Segurança defensiva rigorosa preservada: credenciais efêmeras em memória, CSRF dinâmico, verificação sem custos e ausência de vazamentos.
   - Compatibilidade integral com os contratos normativos existentes (`docs/05-API.md`), mantendo o motor e a API pública inviolados.
+  - Isolamento estrito da trilha Free tanto na prévia quanto na execução, bloqueando chamadas pagas inadvertidas.
+  - Validação atômica e proteção de integridade do estado em mutações administrativas.
 - **Limitações Registradas:**
   - Chaves de API cadastradas pela interface não persistem após o encerramento do processo do servidor (requerem novo cadastro ao reiniciar).
   - Apenas o adaptador OpenAI está operacional no MVP atual; outros provedores são explicitamente apresentados como não implementados.
+  - A persistência segura de credenciais em repouso exigirá decisão arquitetural futura própria caso venha a ser requerida.

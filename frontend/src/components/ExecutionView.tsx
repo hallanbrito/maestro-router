@@ -359,7 +359,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
       }
     }
 
-    const response = await executeTask(requestPayload);
+    const response = await executeTask(requestPayload, track);
     setApiResponse(response);
     setIsLoading(false);
 
@@ -504,7 +504,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             <div className="alert-card info" style={{ marginBottom: '0.75rem', fontSize: '0.8rem' }}>
               <p style={{ margin: 0 }}>
                 <strong>Trilha:</strong> determina a política que o Maestro aplicará para selecionar a rota.
-                A trilha <em>Free</em> exige gratuidade auditada comprovada. A trilha <em>Econômica</em> busca o menor custo estimado entre as rotas aptas. A trilha <em>Inteligente</em> prioriza adequação a critérios de qualidade declarados.
+                A trilha <em>Free</em> exige gratuidade auditada comprovada. A trilha <em>Econômica</em> busca o menor custo estimado entre as rotas aptas comparáveis. A trilha <em>Inteligente</em> aplica critérios de qualidade e requisitos técnicos explicitamente declarados com evidências auditáveis.
               </p>
             </div>
           )}
@@ -525,7 +525,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 <strong style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>Free</strong>
               </div>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginTop: '0.2rem' }}>
-                Somente candidatos com custo R$ 0,00 comprovado.
+                Somente candidatos com custo zero comprovado.
               </span>
             </div>
 
@@ -564,7 +564,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 <strong style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>Inteligente</strong>
               </div>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginTop: '0.2rem' }}>
-                Prioriza critérios de qualidade e requisitos explícitos.
+                Aplica critérios de qualidade e requisitos explícitos.
               </span>
             </div>
           </div>

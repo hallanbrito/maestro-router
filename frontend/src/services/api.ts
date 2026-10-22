@@ -31,7 +31,8 @@ export const API_ENDPOINT = '/v1/executions';
  * nunca em segundo plano ou em laços de repetição autônomos.
  */
 export async function executeTask(
-  request: ExecutionRequest
+  request: ExecutionRequest,
+  track?: TrackType
 ): Promise<ExecutionApiResponse> {
   // Construção estrita do payload (sem campos nulos ou membros vazios indevidos).
   // task é enviado exatamente como digitado pelo usuário, preservando espaços significativos.
@@ -91,11 +92,16 @@ export async function executeTask(
   }
 
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (track) {
+      headers['X-Maestro-Track'] = track;
+    }
+
     const response = await fetch(API_ENDPOINT, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(bodyPayload),
     });
 

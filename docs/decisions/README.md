@@ -18,6 +18,7 @@ contexto histórico e não substituem o estado executável atual.
 | [0009](0009-operational-routing-constraints.md) | Restrições operacionais de roteamento |
 | [0010](0010-operational-known-unavailability.md) | Indisponibilidade conhecida por rota |
 | [0011](0011-operational-route-enablement.md) | Habilitação operacional de rotas |
+| [0012](0012-control-center-local-admin-layer.md) | Camada administrativa local e onboarding do Control Center |
 
 Consulte [docs/INDEX.md](../INDEX.md) para a precedência e a finalidade das
 fontes do projeto. O estado atual do runtime é resumido no

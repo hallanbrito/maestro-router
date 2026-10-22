@@ -181,7 +181,240 @@ export async function executeTask(
       message:
         'Não foi possível estabelecer conexão com o Maestro Router em http://127.0.0.1:8000.',
       details:
-        'Certifique-se de que o backend FastAPI esteja em execução. Exemplo: "python -m uvicorn --app-dir src maestro_router.api:app".',
+        'Certifique-se de que o backend FastAPI esteja em execução. Exemplo: "python -m uvicorn --app-dir src maestro_router.control_center:app".',
     };
   }
 }
+
+// ==============================================================================
+// Serviços Administrativos Locais do Control Center (ADR 0012)
+// ==============================================================================
+
+import {
+  ProviderInfo,
+  RouteConfig,
+  RoutingPreview,
+  TrackType,
+} from '../types';
+
+let cachedCsrfToken: string | null = null;
+
+export function resetAdminCsrfTokenForTesting(): void {
+  cachedCsrfToken = null;
+}
+
+/**
+ * Obtém ou reutiliza o token CSRF dinâmico gerado pelo backend administrativo em memória.
+ */
+export async function getAdminCsrfToken(): Promise<string> {
+  if (cachedCsrfToken) {
+    return cachedCsrfToken;
+  }
+  const res = await fetch('/admin/session', { method: 'GET' });
+  if (!res.ok) {
+    throw new Error(`Falha no handshake de sessão administrativa: HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  cachedCsrfToken = data.csrf_token;
+  return data.csrf_token;
+}
+
+/**
+ * Consulta o estado seguro da configuração operacional (provedores, credenciais e rotas).
+ */
+export async function fetchAdminConfig(): Promise<{
+  providers: ProviderInfo[];
+  routes: RouteConfig[];
+  models: string[];
+}> {
+  const res = await fetch('/admin/config', { method: 'GET' });
+  if (!res.ok) {
+    throw new Error(`Falha ao consultar configuração administrativa: HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+/**
+ * Cadastra ou substitui uma chave de API na memória volátil do backend.
+ */
+export async function saveCredential(
+  provider: string,
+  apiKey: string
+): Promise<{ provider: string; status: string; message: string }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch('/admin/credentials', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Maestro-CSRF-Token': token,
+    },
+    body: JSON.stringify({ provider, api_key: apiKey }),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao salvar credencial: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+
+/**
+ * Remove a credencial de um provedor da memória volátil do servidor.
+ */
+export async function removeCredential(
+  provider: string
+): Promise<{ provider: string; status: string; message: string }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch(`/admin/credentials?provider=${encodeURIComponent(provider)}`, {
+    method: 'DELETE',
+    headers: {
+      'X-Maestro-CSRF-Token': token,
+    },
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao remover credencial: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+
+/**
+ * Aciona a verificação explícita da credencial via listagem neutra de modelos (zero geração paga).
+ */
+export async function verifyCredential(
+  provider: string
+): Promise<{
+  provider: string;
+  status: string;
+  models?: string[];
+  message: string;
+}> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch('/admin/credentials/verify', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Maestro-CSRF-Token': token,
+    },
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao verificar credencial: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+
+/**
+ * Consulta a lista de modelos suportados / verificados.
+ */
+export async function fetchModels(): Promise<{
+  provider: string;
+  models: string[];
+  verified: boolean;
+}> {
+  const res = await fetch('/admin/models', { method: 'GET' });
+  if (!res.ok) {
+    throw new Error(`Falha ao obter lista de modelos: HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+/**
+ * Salva ou atualiza uma rota na configuração ativa em memória.
+ */
+export async function saveRoute(
+  route: Partial<RouteConfig>
+): Promise<{ status: string; route: RouteConfig }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch('/admin/routes', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Maestro-CSRF-Token': token,
+    },
+    body: JSON.stringify(route),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao salvar rota: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+
+/**
+ * Alterna habilitação (enable/disable) de uma rota.
+ */
+export async function toggleRoute(
+  routeId: string
+): Promise<{ route_id: string; enabled: boolean }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch(`/admin/routes/${encodeURIComponent(routeId)}/toggle`, {
+    method: 'PATCH',
+    headers: {
+      'X-Maestro-CSRF-Token': token,
+    },
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao alternar rota: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+
+/**
+ * Remove uma rota da configuração ativa.
+ */
+export async function deleteRoute(
+  routeId: string
+): Promise<{ status: string; route_id: string }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch(`/admin/routes/${encodeURIComponent(routeId)}`, {
+    method: 'DELETE',
+    headers: {
+      'X-Maestro-CSRF-Token': token,
+    },
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao excluir rota: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+
+/**
+ * Solicita uma sugestão e prévia explicável de roteamento com custo zero.
+ */
+export async function fetchRoutingPreview(params: {
+  task: string;
+  context?: string;
+  track: TrackType;
+  constraints?: Record<string, unknown>;
+}): Promise<RoutingPreview> {
+  const res = await fetch('/admin/preview', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao obter sugestão: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+

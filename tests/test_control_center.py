@@ -62,7 +62,7 @@ def test_public_execution_endpoint_preserved_refusal_when_no_key(client: TestCli
 def test_public_execution_success_with_adapter(clean_state: ControlCenterState) -> None:
     """When a route and mock adapter are active, POST /v1/executions succeeds with 200."""
     clean_state.set_credential("openai", "sk-test-key-1234567890")
-    
+
     # Mock the adapter execution
     mock_adapter = MagicMock()
     mock_adapter.execute = AsyncMock(
@@ -795,3 +795,66 @@ def test_free_track_terminology_operator_declared_and_disclaimer(
     assert "gratuidade comprovada" not in data["explanation"].lower()
     assert "sem custo garantido" not in data["explanation"].lower()
     assert "custo zero garantido" not in data["explanation"].lower()
+
+
+def test_invalid_track_rejected_with_http_400(client: TestClient, clean_state: ControlCenterState) -> None:
+    """Rejeita trilhas desconhecidas com HTTP 400 sem executar adaptador nem converter silenciosamente."""
+    clean_state.set_credential("openai", "sk-active-key")
+    mock_adapter = MagicMock()
+    mock_adapter.execute = AsyncMock()
+    clean_state.current_adapters["openai-responses"] = mock_adapter
+
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    # 1. Prévia com trilha 'FREE' (maiúscula) e 'trilha-inexistente'
+    for bad_track in ("FREE", "trilha-inexistente", "aleatoria"):
+        prev_res = client.post(
+            "/admin/preview",
+            json={"task": "Tarefa de teste", "track": bad_track},
+        )
+        assert prev_res.status_code == 400
+        data = prev_res.json()
+        assert data["error"]["code"] == "INVALID_TRACK"
+        assert f"Trilha '{bad_track}' não é suportada" in data["error"]["message"]
+
+    # 2. Execução administrativa com trilha inválida
+    for bad_track in ("FREE", "trilha-inexistente"):
+        exec_res = client.post(
+            "/admin/executions",
+            headers={"X-Maestro-CSRF-Token": csrf_token},
+            cookies=session_resp.cookies,
+            json={"task": "Execução com trilha inválida", "track": bad_track},
+        )
+        assert exec_res.status_code == 400
+        data = exec_res.json()
+        assert data["error"]["code"] == "INVALID_TRACK"
+        assert f"Trilha '{bad_track}' não é suportada" in data["error"]["message"]
+
+    # Confirma que nenhum adaptador foi executado
+    mock_adapter.execute.assert_not_called()
+
+
+def test_invalid_constraints_returns_standard_error_envelope(client: TestClient, clean_state: ControlCenterState) -> None:
+    """Erro de validação de teto de custo retorna envelope padronizado error.code == 'INVALID_REQUEST'."""
+    clean_state.set_credential("openai", "sk-active-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    resp = client.post(
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "task": "Tarefa com teto inválido",
+            "constraints": {
+                "max_estimated_cost": {"amount": "abc", "currency": "USD"}
+            },
+        },
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "error" in data
+    assert data["error"]["code"] == "INVALID_REQUEST"
+    assert "issues" in data["error"]
+    assert any("amount" in str(issue) for issue in data["error"]["issues"])

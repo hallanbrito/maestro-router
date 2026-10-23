@@ -225,4 +225,221 @@ describe('ProvidersView component', () => {
       screen.getByText(/Dados econômicos ausentes permanecem explicitamente indisponíveis até que sejam configurados pelo operador\./i)
     ).toBeInTheDocument();
   });
+
+  it('permite editar uma rota existente, configurar tarifas econômicas e salvar no backend', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [
+        {
+          route_id: 'route-openai-test',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          enabled: true,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [],
+          status: 'ready',
+          blockers: [],
+        },
+      ],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute').mockResolvedValueOnce({
+      status: 'saved',
+      route: {
+        route_id: 'route-openai-test',
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        enabled: true,
+        known_unavailable: false,
+        capabilities: ['text_generation'],
+        quality_criteria: [],
+        status: 'ready',
+        blockers: [],
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-route-route-openai-test')).toBeInTheDocument();
+    });
+
+    // Clica no botão Editar da rota
+    fireEvent.click(screen.getByTestId('edit-route-route-openai-test'));
+
+    expect(screen.getByText(/Editar Rota: route-openai-test/i)).toBeInTheDocument();
+
+    // Habilita a configuração econômica
+    const toggleEconomics = screen.getByTestId('toggle-economics-config');
+    fireEvent.click(toggleEconomics);
+
+    // Preenche tarifas e estimativas de uso
+    const inputRate = screen.getByTestId('route-input-rate');
+    const outputRate = screen.getByTestId('route-output-rate');
+    const estInput = screen.getByTestId('route-estimated-input');
+    const estOutput = screen.getByTestId('route-estimated-output');
+
+    fireEvent.change(inputRate, { target: { value: '0.1500' } });
+    fireEvent.change(outputRate, { target: { value: '0.6000' } });
+    fireEvent.change(estInput, { target: { value: '2000' } });
+    fireEvent.change(estOutput, { target: { value: '800' } });
+
+    // Salva o formulário
+    const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          route_id: 'route-openai-test',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          price_reference: expect.objectContaining({
+            currency: 'USD',
+            rates: [
+              { unit: 'input_token', rate: '0.1500', base: 1000000 },
+              { unit: 'output_token', rate: '0.6000', base: 1000000 },
+            ],
+          }),
+          estimated_usage: {
+            input_token: 2000,
+            output_token: 800,
+            applicability_confirmed: true,
+          },
+        })
+      );
+    });
+  });
+
+  it('permite definir tarifas zero via atalho no modal para qualificar na trilha Free', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute').mockResolvedValueOnce({
+      status: 'saved',
+      route: {
+        route_id: 'route-free-test',
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        enabled: true,
+        known_unavailable: false,
+        capabilities: ['text_generation'],
+        quality_criteria: [],
+        status: 'ready',
+        blockers: [],
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    // Habilita seção econômica
+    const toggleEconomics = screen.getByTestId('toggle-economics-config');
+    fireEvent.click(toggleEconomics);
+
+    // Clica no atalho de tarifas zero
+    const zeroRatesBtn = screen.getByTestId('btn-set-zero-rates');
+    fireEvent.click(zeroRatesBtn);
+
+    const inputRate = screen.getByTestId('route-input-rate') as HTMLInputElement;
+    const outputRate = screen.getByTestId('route-output-rate') as HTMLInputElement;
+
+    expect(inputRate.value).toBe('0.00');
+    expect(outputRate.value).toBe('0.00');
+
+    // Submete a rota com tarifas zero
+    const saveBtn = screen.getByRole('button', { name: /Salvar Rota/i });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          price_reference: expect.objectContaining({
+            rates: [
+              { unit: 'input_token', rate: '0.00', base: 1000000 },
+              { unit: 'output_token', rate: '0.00', base: 1000000 },
+            ],
+          }),
+        })
+      );
+    });
+  });
+
+  it('rejeita tarifas inválidas com mensagem de erro no modal sem enviar para o backend', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute');
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    const toggleEconomics = screen.getByTestId('toggle-economics-config');
+    fireEvent.click(toggleEconomics);
+
+    const inputRate = screen.getByTestId('route-input-rate');
+    fireEvent.change(inputRate, { target: { value: 'abc' } });
+
+    const saveBtn = screen.getByRole('button', { name: /Salvar Rota/i });
+    fireEvent.click(saveBtn);
+
+    expect(
+      screen.getByText(/Tarifas de entrada e saída devem ser valores numéricos decimais não negativos/i)
+    ).toBeInTheDocument();
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
 });

@@ -133,6 +133,8 @@ interface ExecutionViewProps {
     providers: ProviderInfo[];
     routes: RouteConfig[];
   };
+  isLoading?: boolean;
+  setIsLoading?: (val: boolean) => void;
 }
 
 export const ExecutionView: React.FC<ExecutionViewProps> = ({
@@ -161,6 +163,8 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   routingPreview: controlledRoutingPreview,
   setRoutingPreview: setControlledRoutingPreview,
   configInfo,
+  isLoading: controlledIsLoading,
+  setIsLoading: setControlledIsLoading,
 }) => {
   // Internal fallback states if props are not supplied (e.g. in standalone tests)
   const [internalTask, setInternalTask] = useState('');
@@ -208,7 +212,9 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   const routingPreview = controlledRoutingPreview !== undefined ? controlledRoutingPreview : internalRoutingPreview;
   const setRoutingPreview = setControlledRoutingPreview || setInternalRoutingPreview;
 
-  const [isLoading, setIsLoading] = useState(false);
+  const [internalIsLoading, setInternalIsLoading] = useState(false);
+  const isLoading = controlledIsLoading !== undefined ? controlledIsLoading : internalIsLoading;
+  const setIsLoading = setControlledIsLoading || setInternalIsLoading;
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [activeTooltip, setActiveTooltip] = useState<string | null>(null);
@@ -323,49 +329,58 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
       return;
     }
 
-    setIsLoading(true);
-    setApiResponse(null);
+    try {
+      setIsLoading(true);
+      setApiResponse(null);
 
-    const parseListWithoutTrimming = (val: string) =>
-      val.split(',').filter((s) => s.length > 0);
+      const parseListWithoutTrimming = (val: string) =>
+        val.split(',').filter((s) => s.length > 0);
 
-    const caps = parseListWithoutTrimming(capabilitiesInput);
-    const criteria = parseListWithoutTrimming(criteriaInput);
-    const routes = parseListWithoutTrimming(allowedRoutesInput);
+      const caps = parseListWithoutTrimming(capabilitiesInput);
+      const criteria = parseListWithoutTrimming(criteriaInput);
+      const routes = parseListWithoutTrimming(allowedRoutesInput);
 
-    const requestPayload: ExecutionRequest = {
-      task: task,
-    };
+      const requestPayload: ExecutionRequest = {
+        task: task,
+      };
 
-    if (context.trim().length > 0) {
-      requestPayload.context = context;
-    }
-
-    const hasConstraints =
-      caps.length > 0 ||
-      criteria.length > 0 ||
-      routes.length > 0 ||
-      maxCostAmount.length > 0;
-
-    if (hasConstraints) {
-      requestPayload.constraints = {};
-      if (caps.length > 0) requestPayload.constraints.required_capabilities = caps;
-      if (criteria.length > 0) requestPayload.constraints.required_quality_criteria = criteria;
-      if (routes.length > 0) requestPayload.constraints.allowed_route_ids = routes;
-      if (maxCostAmount.length > 0) {
-        requestPayload.constraints.max_estimated_cost = {
-          amount: maxCostAmount,
-          currency: maxCostCurrency,
-        };
+      if (context.trim().length > 0) {
+        requestPayload.context = context;
       }
-    }
 
-    const response = await executeAdminTask(requestPayload, track);
-    setApiResponse(response);
-    setIsLoading(false);
+      const hasConstraints =
+        caps.length > 0 ||
+        criteria.length > 0 ||
+        routes.length > 0 ||
+        maxCostAmount.length > 0;
 
-    if (onExecutionResult) {
-      onExecutionResult(response.kind);
+      if (hasConstraints) {
+        requestPayload.constraints = {};
+        if (caps.length > 0) requestPayload.constraints.required_capabilities = caps;
+        if (criteria.length > 0) requestPayload.constraints.required_quality_criteria = criteria;
+        if (routes.length > 0) requestPayload.constraints.allowed_route_ids = routes;
+        if (maxCostAmount.length > 0) {
+          requestPayload.constraints.max_estimated_cost = {
+            amount: maxCostAmount,
+            currency: maxCostCurrency,
+          };
+        }
+      }
+
+      const response = await executeAdminTask(requestPayload, track);
+      setApiResponse(response);
+
+      if (onExecutionResult) {
+        onExecutionResult(response.kind);
+      }
+    } catch (err: any) {
+      setApiResponse({
+        kind: 'network_error',
+        status: 0,
+        message: err?.message || 'Falha inesperada durante a execução da rota.',
+      });
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -382,6 +397,20 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   const isKeyRegistered = openaiProvider?.credential.registered;
   const isKeyVerified = openaiProvider?.credential.status === 'verified';
   const activeRoutesCount = configInfo?.routes.filter((r) => r.enabled).length ?? 1;
+
+  // Validação de teto de custo para apresentação imediata junto ao campo
+  const costLimitIssue =
+    apiResponse && apiResponse.kind === 'client_error'
+      ? apiResponse.error?.error?.issues?.find(
+          (i) =>
+            i.path?.includes('max_estimated_cost') ||
+            i.path?.includes('amount') ||
+            i.message?.toLowerCase().includes('decimal') ||
+            i.message?.toLowerCase().includes('teto')
+        )
+      : undefined;
+  const isCostAmountInvalid =
+    maxCostAmount.trim().length > 0 && !/^\d+(\.\d+)?$/.test(maxCostAmount.trim());
 
   return (
     <div className="execution-view">
@@ -804,6 +833,14 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                     </select>
                   </div>
                   <span className="field-hint">Exato: 4 casas decimais.</span>
+                  {(isCostAmountInvalid || costLimitIssue) && (
+                    <span
+                      style={{ color: 'var(--color-danger)', fontSize: '0.75rem', display: 'block', marginTop: '0.25rem', fontWeight: 500 }}
+                      data-testid="cost-limit-error"
+                    >
+                      {costLimitIssue ? costLimitIssue.message : 'O teto de custo deve ser um valor decimal não negativo válido (ex: 0.0100).'}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -928,12 +965,12 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                       Erro de Validação da Solicitação (HTTP {apiResponse.status})
                     </h3>
                     <span className="badge badge-danger">
-                      Código: {apiResponse.error.error.code}
+                      Código: {apiResponse.error?.error?.code || 'INVALID_REQUEST'}
                     </span>
                   </div>
                 </div>
-                <p className="alert-message">{apiResponse.error.error.message}</p>
-                {apiResponse.error.error.issues && (
+                <p className="alert-message">{apiResponse.error?.error?.message || 'A solicitação contém dados inválidos.'}</p>
+                {apiResponse.error?.error?.issues && (
                   <ul className="error-issues-list">
                     {apiResponse.error.error.issues.map((issue, idx) => (
                       <li key={idx}>{issue.message}</li>
@@ -953,18 +990,18 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                       Falha na Execução do Provedor (HTTP {apiResponse.status})
                     </h3>
                     <span className="badge badge-danger">
-                      Código: {apiResponse.error.error.code}
+                      Código: {apiResponse.error?.error?.code || 'EXECUTION_FAILED'}
                     </span>
                   </div>
                 </div>
-                <p className="alert-message">{apiResponse.error.error.message}</p>
+                <p className="alert-message">{apiResponse.error?.error?.message || 'A execução do provedor falhou.'}</p>
                 <div className="recommendation-box">
                   <h4 className="recommendation-title">Comportamento do Motor</h4>
                   <p className="recommendation-text">
                     O Maestro Router selecionou a rota com sucesso, mas o provedor externo falhou ou demorou além do limite tolerável. O erro foi traduzido sem vazar dados confidenciais externos.
                   </p>
                 </div>
-                {apiResponse.error.decision && (
+                {apiResponse.error?.decision && (
                   <DecisionCard decision={apiResponse.error.decision} />
                 )}
               </div>
@@ -978,11 +1015,11 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                   <div>
                     <h3 className="alert-title">Erro Interno do Servidor (HTTP 500)</h3>
                     <span className="badge badge-danger">
-                      Código: {apiResponse.error.error.code}
+                      Código: {apiResponse.error?.error?.code || 'INTERNAL_ERROR'}
                     </span>
                   </div>
                 </div>
-                <p className="alert-message">{apiResponse.error.error.message}</p>
+                <p className="alert-message">{apiResponse.error?.error?.message || 'Ocorreu um erro interno.'}</p>
               </div>
             )}
 

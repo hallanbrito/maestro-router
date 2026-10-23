@@ -19,7 +19,9 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -33,8 +35,10 @@ from .adapters import OpenAIResponsesAdapter
 from .api import (
     create_app,
     _execute_selection,
+    _invalid_request,
     _is_valid_adapter,
     _snapshot_adapters,
+    _validation_issues,
 )
 from .contracts import ExecutionRequest
 from .economics import calculate_pre_execution_amount
@@ -683,6 +687,50 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
     # O endpoint público v1 não interpreta trilhas, cabeçalhos ou estratégias externas.
     app = create_app(catalog=dynamic_catalog, adapters=dynamic_adapters)
 
+    # Padroniza envelopes de erro HTTP e de validação para a camada administrativa do Control Center
+    @app.exception_handler(HTTPException)
+    async def custom_http_exception_handler(request: Request, exc: HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = detail.get("code", "HTTP_ERROR")
+            message = detail.get("message", str(detail))
+            extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "error": {"code": code, "message": message, **extra},
+                    "detail": detail,
+                },
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {"code": "HTTP_ERROR", "message": str(detail)},
+                "detail": detail,
+            },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        issues = [
+            {
+                "path": "/" + "/".join(str(p) for p in err["loc"] if p != "body"),
+                "message": err["msg"],
+            }
+            for err in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "A solicitação contém dados inválidos.",
+                    "issues": issues,
+                },
+                "detail": issues,
+            },
+        )
+
     admin_router = APIRouter(prefix="/admin", tags=["Control Center Admin"])
 
     async def _enforce_admin_security(
@@ -1016,9 +1064,22 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_TASK", "message": "task é obrigatória para obter sugestão."},
             )
 
-        track: TrackType = body.get("track", "economica")
-        if track not in {"free", "economica", "inteligente"}:
-            track = "economica"
+        track_raw = body.get("track")
+        if track_raw is None:
+            track: TrackType = "economica"
+        elif track_raw not in {"free", "economica", "inteligente"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_TRACK",
+                    "message": (
+                        f"Trilha '{track_raw}' não é suportada. "
+                        "As trilhas válidas são: 'free', 'economica' e 'inteligente'."
+                    ),
+                },
+            )
+        else:
+            track = track_raw
 
         constraints_input = body.get("constraints") or {}
         req_kwargs: dict[str, Any] = {"task": task}
@@ -1029,6 +1090,8 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         try:
             exec_req = ExecutionRequest.model_validate(req_kwargs)
+        except ValidationError as err:
+            return _invalid_request(_validation_issues(err))
         except Exception as err:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1301,15 +1364,30 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         try:
             execution_request = ExecutionRequest.model_validate(exec_payload)
+        except ValidationError as val_err:
+            return _invalid_request(_validation_issues(val_err))
         except Exception as val_err:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "INVALID_CONSTRAINTS", "message": f"Restrições inválidas: {val_err}"},
             )
 
-        track: TrackType = body.get("track", "economica")
-        if track not in {"free", "economica", "inteligente"}:
-            track = "economica"
+        track_raw = body.get("track")
+        if track_raw is None:
+            track: TrackType = "economica"
+        elif track_raw not in {"free", "economica", "inteligente"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_TRACK",
+                    "message": (
+                        f"Trilha '{track_raw}' não é suportada. "
+                        "As trilhas válidas são: 'free', 'economica' e 'inteligente'."
+                    ),
+                },
+            )
+        else:
+            track = track_raw
 
         catalog_snapshot = control_state.current_catalog.snapshot()
         adapter_snapshot = _snapshot_adapters(

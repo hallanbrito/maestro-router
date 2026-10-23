@@ -29,6 +29,7 @@ export const App: React.FC = () => {
   const [maxCostCurrency, setMaxCostCurrency] = useState('USD');
   const [apiResponse, setApiResponse] = useState<ExecutionApiResponse | null>(null);
   const [routingPreview, setRoutingPreview] = useState<RoutingPreview | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   // Operational Config Info
   const [configInfo, setConfigInfo] = useState<{
@@ -100,6 +101,8 @@ export const App: React.FC = () => {
             setApiResponse={setApiResponse}
             routingPreview={routingPreview}
             setRoutingPreview={setRoutingPreview}
+            isLoading={isLoading}
+            setIsLoading={setIsLoading}
             onNavigateTab={setActiveTab}
             configInfo={configInfo}
             onExecutionResult={(outcome) => {

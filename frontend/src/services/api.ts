@@ -109,14 +109,64 @@ async function mapExecutionResponse(response: Response): Promise<ExecutionApiRes
     };
   }
 
-  const errorResponse = responseData as ExecutionErrorResponse;
+  // Normalização defensiva do payload de erro (compatibilidade com envelopes {error: ...} e {detail: ...})
+  let normalizedError: ExecutionErrorResponse;
+  const rawObj = responseData as any;
+  if (rawObj && typeof rawObj === 'object' && 'error' in rawObj && rawObj.error) {
+    normalizedError = rawObj as ExecutionErrorResponse;
+  } else if (rawObj && typeof rawObj === 'object' && 'detail' in rawObj) {
+    const detail = rawObj.detail;
+    if (typeof detail === 'string') {
+      normalizedError = {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: detail,
+        },
+      };
+    } else if (Array.isArray(detail)) {
+      normalizedError = {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'A solicitação contém parâmetros inválidos.',
+          issues: detail.map((d: any) => ({
+            path: Array.isArray(d.loc) ? '/' + d.loc.filter((p: any) => p !== 'body').join('/') : undefined,
+            message: d.msg || 'Valor inválido',
+          })),
+        },
+      };
+    } else if (typeof detail === 'object' && detail !== null) {
+      normalizedError = {
+        error: {
+          code: detail.code || 'INVALID_REQUEST',
+          message: detail.message || 'Erro na solicitação.',
+          issues: detail.issues,
+        },
+        decision: detail.decision,
+        economics: detail.economics,
+      };
+    } else {
+      normalizedError = {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Solicitação administrativa inválida.',
+        },
+      };
+    }
+  } else {
+    normalizedError = {
+      error: {
+        code: 'INVALID_REQUEST',
+        message: `Erro na resposta do servidor (HTTP ${response.status}).`,
+      },
+    };
+  }
 
   // 422 Unprocessable Content: Recusa do roteamento (NO_ELIGIBLE_ROUTE ou INSUFFICIENT_ECONOMIC_INFORMATION)
   if (response.status === 422) {
     return {
       kind: 'refusal',
       status: 422,
-      error: errorResponse,
+      error: normalizedError,
     };
   }
 
@@ -125,7 +175,7 @@ async function mapExecutionResponse(response: Response): Promise<ExecutionApiRes
     return {
       kind: 'client_error',
       status: response.status,
-      error: errorResponse,
+      error: normalizedError,
     };
   }
 
@@ -138,7 +188,7 @@ async function mapExecutionResponse(response: Response): Promise<ExecutionApiRes
     return {
       kind: 'execution_error',
       status: response.status,
-      error: errorResponse,
+      error: normalizedError,
     };
   }
 
@@ -147,7 +197,7 @@ async function mapExecutionResponse(response: Response): Promise<ExecutionApiRes
     return {
       kind: 'server_error',
       status: 500,
-      error: errorResponse,
+      error: normalizedError,
     };
   }
 
@@ -157,7 +207,7 @@ async function mapExecutionResponse(response: Response): Promise<ExecutionApiRes
     status: response.status,
     error: {
       code: 'UNEXPECTED_HTTP_STATUS',
-      message: `O servidor retornou status HTTP inesperado: ${response.status}.`,
+      message: normalizedError.error?.message || `O servidor retornou status HTTP inesperado: ${response.status}.`,
     },
   };
 }
@@ -204,9 +254,9 @@ export async function executeAdminTask(
   track: TrackType
 ): Promise<ExecutionApiResponse> {
   const bodyPayload = buildExecutionBody(request);
-  const token = await getAdminCsrfToken();
 
   try {
+    const token = await getAdminCsrfToken();
     const response = await fetch('/admin/executions', {
       method: 'POST',
       headers: {
@@ -279,7 +329,6 @@ export async function fetchAdminConfig(): Promise<{
   }
   return await res.json();
 }
-
 /**
  * Cadastra ou substitui uma chave de API na memória volátil do backend.
  */
@@ -304,7 +353,6 @@ export async function saveCredential(
   }
   return await res.json();
 }
-
 /**
  * Remove a credencial de um provedor da memória volátil do servidor.
  */
@@ -326,7 +374,6 @@ export async function removeCredential(
   }
   return await res.json();
 }
-
 /**
  * Aciona a verificação explícita da credencial via listagem neutra de modelos (zero geração paga).
  */
@@ -355,7 +402,6 @@ export async function verifyCredential(
   }
   return await res.json();
 }
-
 /**
  * Consulta a lista de modelos suportados / verificados.
  */
@@ -370,7 +416,6 @@ export async function fetchModels(): Promise<{
   }
   return await res.json();
 }
-
 /**
  * Salva ou atualiza uma rota na configuração ativa em memória.
  */
@@ -394,7 +439,6 @@ export async function saveRoute(
   }
   return await res.json();
 }
-
 /**
  * Alterna habilitação (enable/disable) de uma rota.
  */
@@ -416,7 +460,6 @@ export async function toggleRoute(
   }
   return await res.json();
 }
-
 /**
  * Remove uma rota da configuração ativa.
  */
@@ -438,7 +481,6 @@ export async function deleteRoute(
   }
   return await res.json();
 }
-
 /**
  * Solicita uma sugestão e prévia explicável de roteamento com custo zero.
  */
@@ -463,4 +505,3 @@ export async function fetchRoutingPreview(params: {
   }
   return await res.json();
 }
-

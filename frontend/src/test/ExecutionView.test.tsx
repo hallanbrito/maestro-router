@@ -242,4 +242,83 @@ describe('ExecutionView component', () => {
       );
     });
   });
+
+  it('apresenta erro de validação junto ao campo de teto de custo sem quebrar a tela quando o valor for inválido', async () => {
+    render(<ExecutionView />);
+
+    // Expande a seção de restrições
+    const toggleConstraintsBtn = screen.getByRole('button', {
+      name: /Restrições da Solicitação/i,
+    });
+    fireEvent.click(toggleConstraintsBtn);
+
+    const costInput = screen.getByLabelText(/Teto de Custo Estimado/i);
+    // Digita valor inválido
+    fireEvent.change(costInput, { target: { value: 'abc' } });
+
+    // O erro deve ser renderizado inline junto ao campo
+    const errorEl = screen.getByTestId('cost-limit-error');
+    expect(errorEl).toBeInTheDocument();
+    expect(errorEl.textContent).toContain('O teto de custo deve ser um valor decimal não negativo válido');
+  });
+
+  it('trata resposta de erro com envelope detail sem gerar TypeError', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'client_error',
+      status: 400,
+      error: {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Parâmetro inválido',
+          issues: [
+            {
+              path: '/constraints/max_estimated_cost/amount',
+              message: 'O valor deve ser decimal no formato 0.0000',
+            },
+          ],
+        },
+      },
+    });
+
+    render(<ExecutionView />);
+
+    // Expande restrições
+    const toggleConstraintsBtn = screen.getByRole('button', {
+      name: /Restrições da Solicitação/i,
+    });
+    fireEvent.click(toggleConstraintsBtn);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa com teto inválido' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      const errorEl = screen.getByTestId('cost-limit-error');
+      expect(errorEl).toBeInTheDocument();
+      expect(errorEl.textContent).toContain('O valor deve ser decimal no formato 0.0000');
+    });
+  });
+
+  it('sempre encerra o estado de carregamento via finally mesmo quando a sessão ou requisição falhar', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockRejectedValueOnce(
+      new Error('Falha no handshake CSRF')
+    );
+
+    render(<ExecutionView />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa para teste de falha' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    // O botão deve voltar a ficar ativo após a falha, sem ficar preso em "Processando..."
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Executar Rota/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Executar Rota/i })).not.toBeDisabled();
+      expect(screen.getByText(/Falha no handshake CSRF/i)).toBeInTheDocument();
+    });
+  });
 });

@@ -13,6 +13,7 @@ import {
   ToggleRight,
   Info,
   Terminal,
+  Edit2,
 } from 'lucide-react';
 import {
   ProviderInfo,
@@ -54,12 +55,22 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
 
   // Route Form State
   const [showRouteModal, setShowRouteModal] = useState(false);
+  const [isEditingRoute, setIsEditingRoute] = useState(false);
   const [routeModel, setRouteModel] = useState('gpt-4o-mini');
   const [customModel, setCustomModel] = useState('');
   const [newRouteId, setNewRouteId] = useState('route-openai-gpt4o-mini');
   const [routeCapabilities, setRouteCapabilities] = useState('text_generation');
   const [routeQualityCriteria, setRouteQualityCriteria] = useState('');
   const [routeEvidenceReferences, setRouteEvidenceReferences] = useState('');
+
+  // Economic Configuration State
+  const [configureEconomics, setConfigureEconomics] = useState(false);
+  const [routeCurrency, setRouteCurrency] = useState('USD');
+  const [routeInputRate, setRouteInputRate] = useState('');
+  const [routeOutputRate, setRouteOutputRate] = useState('');
+  const [routeEstimatedInput, setRouteEstimatedInput] = useState('1500');
+  const [routeEstimatedOutput, setRouteEstimatedOutput] = useState('500');
+  const [economicError, setEconomicError] = useState<string | null>(null);
 
   const loadConfig = async () => {
     try {
@@ -176,13 +187,65 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   };
 
   const handleOpenAddRoute = () => {
+    setIsEditingRoute(false);
     setNewRouteId(`route-openai-${Date.now().toString().slice(-4)}`);
     setRouteModel(config.models[0] || 'gpt-4o-mini');
     setCustomModel('');
     setRouteCapabilities('text_generation');
     setRouteQualityCriteria('');
     setRouteEvidenceReferences('');
+    setConfigureEconomics(false);
+    setRouteCurrency('USD');
+    setRouteInputRate('');
+    setRouteOutputRate('');
+    setRouteEstimatedInput('1500');
+    setRouteEstimatedOutput('500');
+    setEconomicError(null);
     setShowRouteModal(true);
+  };
+
+  const handleOpenEditRoute = (route: RouteConfig) => {
+    setIsEditingRoute(true);
+    setNewRouteId(route.route_id);
+    if (config.models.includes(route.model)) {
+      setRouteModel(route.model);
+      setCustomModel('');
+    } else {
+      setRouteModel('custom');
+      setCustomModel(route.model);
+    }
+    setRouteCapabilities(route.capabilities.join(', '));
+    setRouteQualityCriteria(route.quality_criteria.join(', '));
+    setRouteEvidenceReferences('referencia-auditada-operador');
+
+    if (route.price_reference && route.price_reference.rates) {
+      setConfigureEconomics(true);
+      setRouteCurrency(route.price_reference.currency || 'USD');
+      const inRate = route.price_reference.rates.find((r) => r.unit === 'input_token')?.rate || '0.00';
+      const outRate = route.price_reference.rates.find((r) => r.unit === 'output_token')?.rate || '0.00';
+      setRouteInputRate(inRate);
+      setRouteOutputRate(outRate);
+      setRouteEstimatedInput(String(route.estimated_usage?.input_token || 1500));
+      setRouteEstimatedOutput(String(route.estimated_usage?.output_token || 500));
+    } else {
+      setConfigureEconomics(false);
+      setRouteCurrency('USD');
+      setRouteInputRate('');
+      setRouteOutputRate('');
+      setRouteEstimatedInput('1500');
+      setRouteEstimatedOutput('500');
+    }
+    setEconomicError(null);
+    setShowRouteModal(true);
+  };
+
+  const handleSetZeroRates = () => {
+    setConfigureEconomics(true);
+    setRouteInputRate('0.00');
+    setRouteOutputRate('0.00');
+    setRouteEstimatedInput('1000');
+    setRouteEstimatedOutput('500');
+    setEconomicError(null);
   };
 
   const handleSaveRouteForm = async (e: React.FormEvent) => {
@@ -220,15 +283,69 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
       evidence_references: evidenceRefs,
     }));
 
+    let priceRefObj: any = null;
+    let estUsageObj: any = null;
+
+    if (configureEconomics) {
+      const inRate = routeInputRate.trim();
+      const outRate = routeOutputRate.trim();
+      const inTokens = parseInt(routeEstimatedInput.trim(), 10);
+      const outTokens = parseInt(routeEstimatedOutput.trim(), 10);
+
+      if (
+        !inRate ||
+        !outRate ||
+        isNaN(Number(inRate)) ||
+        isNaN(Number(outRate)) ||
+        Number(inRate) < 0 ||
+        Number(outRate) < 0
+      ) {
+        setEconomicError(
+          'Tarifas de entrada e saída devem ser valores numéricos decimais não negativos (ex: 0.1500 ou 0.00).'
+        );
+        return;
+      }
+      if (isNaN(inTokens) || isNaN(outTokens) || inTokens <= 0 || outTokens <= 0) {
+        setEconomicError('Previsão de tokens de entrada e saída deve conter números inteiros positivos.');
+        return;
+      }
+
+      priceRefObj = {
+        id: `pricing-openai-${finalModel}-${newRouteId.trim()}`,
+        currency: routeCurrency,
+        version: '2026-10',
+        source: 'Configurado pelo operador via Control Center',
+        rates: [
+          { unit: 'input_token', rate: inRate, base: 1000000 },
+          { unit: 'output_token', rate: outRate, base: 1000000 },
+        ],
+        conditions: ['configurado via control center'],
+        context_complete: true,
+        units_exhaustive: true,
+        no_double_counting: true,
+        model_identity_exact: true,
+      };
+
+      estUsageObj = {
+        input_token: inTokens,
+        output_token: outTokens,
+        applicability_confirmed: true,
+      };
+    }
+
     try {
       setLoading(true);
       await saveRoute({
         route_id: newRouteId.trim(),
         provider: 'openai',
         model: finalModel,
-        enabled: true,
+        enabled: isEditingRoute
+          ? (config.routes.find((r) => r.route_id === newRouteId.trim())?.enabled ?? true)
+          : true,
         capabilities: caps,
         quality_criteria: qcs as any,
+        price_reference: priceRefObj,
+        estimated_usage: estUsageObj,
       });
       setShowRouteModal(false);
       await loadConfig();
@@ -493,9 +610,35 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                         {route.capabilities.join(', ') || 'Nenhuma'} • Critérios:{' '}
                         {route.quality_criteria.join(', ') || 'Nenhum'}
                       </div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                        {route.price_reference && route.price_reference.rates ? (
+                          <span>
+                            Tarifas: <strong>{route.price_reference.currency}</strong> (In:{' '}
+                            {route.price_reference.rates.find((r) => r.unit === 'input_token')?.rate || '0.00'} / Out:{' '}
+                            {route.price_reference.rates.find((r) => r.unit === 'output_token')?.rate || '0.00'}) • Previsão:{' '}
+                            {route.estimated_usage?.input_token ?? 0} in / {route.estimated_usage?.output_token ?? 0} out
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            Dados econômicos: Não configurados (economicamente indisponível)
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ padding: '0.35rem 0.65rem', fontSize: '0.8rem' }}
+                        onClick={() => handleOpenEditRoute(route)}
+                        title="Editar Rota e Dados Econômicos"
+                        data-testid={`edit-route-${route.route_id}`}
+                      >
+                        <Edit2 size={14} />
+                        Editar
+                      </button>
+
                       <button
                         type="button"
                         className="btn btn-secondary"
@@ -583,7 +726,9 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
             }}
           >
             <div className="card-header" style={{ marginBottom: '1rem' }}>
-              <h3 className="card-title">Cadastrar / Configurar Rota</h3>
+              <h3 className="card-title">
+                {isEditingRoute ? `Editar Rota: ${newRouteId}` : 'Cadastrar / Configurar Rota'}
+              </h3>
               <button
                 type="button"
                 className="btn btn-secondary"
@@ -605,8 +750,14 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                   value={newRouteId}
                   onChange={(e) => setNewRouteId(e.target.value)}
                   placeholder="ex: route-openai-gpt4o-mini"
+                  disabled={isEditingRoute}
                   required
                 />
+                {isEditingRoute && (
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    O identificador é imutável durante a edição.
+                  </span>
+                )}
               </div>
 
               <div>
@@ -684,13 +835,144 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                 </div>
               )}
 
-              <div style={{ padding: '0.75rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)' }}>
-                <span style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: '0.25rem' }}>
-                  Referência Econômica e Previsão de Uso
-                </span>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
-                  Novas rotas cadastradas (incluindo gpt-4o-mini) não possuem tarifas nem previsão de tokens pré-preenchidas automaticamente. Dados econômicos ausentes permanecem explicitamente indisponíveis até que sejam configurados pelo operador.
-                </p>
+              <div style={{ padding: '0.75rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', margin: 0, fontWeight: 600, fontSize: '0.85rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={configureEconomics}
+                      onChange={(e) => setConfigureEconomics(e.target.checked)}
+                      data-testid="toggle-economics-config"
+                    />
+                    Configurar Referência Econômica e Previsão de Uso
+                  </label>
+                  {configureEconomics && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={handleSetZeroRates}
+                      style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                      title="Preenche tarifas zero para qualificar na trilha Free"
+                      data-testid="btn-set-zero-rates"
+                    >
+                      Definir Tarifas Zero (Free)
+                    </button>
+                  )}
+                </div>
+
+                {configureEconomics ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', marginTop: '0.5rem' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                          Moeda
+                        </label>
+                        <select
+                          className="input-field"
+                          value={routeCurrency}
+                          onChange={(e) => setRouteCurrency(e.target.value)}
+                          style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                        >
+                          <option value="USD">USD</option>
+                          <option value="BRL">BRL</option>
+                          <option value="EUR">EUR</option>
+                        </select>
+                      </div>
+                      <div>
+                        <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '1.2rem' }}>
+                          Base: 1.000.000 tokens
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                          Tarifa Entrada (por 1M tokens)
+                        </label>
+                        <input
+                          type="text"
+                          className="input-field"
+                          value={routeInputRate}
+                          onChange={(e) => {
+                            setRouteInputRate(e.target.value);
+                            setEconomicError(null);
+                          }}
+                          placeholder="ex: 0.1500 ou 0.00"
+                          style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                          data-testid="route-input-rate"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                          Tarifa Saída (por 1M tokens)
+                        </label>
+                        <input
+                          type="text"
+                          className="input-field"
+                          value={routeOutputRate}
+                          onChange={(e) => {
+                            setRouteOutputRate(e.target.value);
+                            setEconomicError(null);
+                          }}
+                          placeholder="ex: 0.6000 ou 0.00"
+                          style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                          data-testid="route-output-rate"
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                          Previsão Tokens Entrada
+                        </label>
+                        <input
+                          type="number"
+                          className="input-field"
+                          value={routeEstimatedInput}
+                          onChange={(e) => {
+                            setRouteEstimatedInput(e.target.value);
+                            setEconomicError(null);
+                          }}
+                          placeholder="ex: 1500"
+                          style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                          data-testid="route-estimated-input"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                          Previsão Tokens Saída
+                        </label>
+                        <input
+                          type="number"
+                          className="input-field"
+                          value={routeEstimatedOutput}
+                          onChange={(e) => {
+                            setRouteEstimatedOutput(e.target.value);
+                            setEconomicError(null);
+                          }}
+                          placeholder="ex: 500"
+                          style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                          data-testid="route-estimated-output"
+                        />
+                      </div>
+                    </div>
+
+                    {economicError && (
+                      <span
+                        style={{ color: 'var(--color-danger)', fontSize: '0.75rem', display: 'block', marginTop: '0.25rem', fontWeight: 500 }}
+                        data-testid="route-economic-error"
+                      >
+                        {economicError}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
+                    Novas rotas cadastradas (incluindo gpt-4o-mini) não possuem tarifas nem previsão de tokens pré-preenchidas automaticamente. Dados econômicos ausentes permanecem explicitamente indisponíveis até que sejam configurados pelo operador.
+                  </p>
+                )}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.5rem' }}>
@@ -702,7 +984,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                   Cancelar
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={loading}>
-                  Salvar Rota
+                  {isEditingRoute ? 'Salvar Alterações' : 'Salvar Rota'}
                 </button>
               </div>
             </form>

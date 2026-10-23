@@ -149,4 +149,78 @@ describe('Onboarding and State Preservation Integration', () => {
     const routesInput = screen.getByLabelText(/Rotas Permitidas/i) as HTMLInputElement;
     expect(routesInput.value).toBe('route-openai-gpt4o-mini');
   });
+
+  it('preserva o estado de execução pendente ao navegar entre abas e impede envio duplicado', async () => {
+    let resolveExecution!: (val: any) => void;
+    const executionPromise = new Promise((resolve) => {
+      resolveExecution = resolve;
+    });
+
+    const executeSpy = vi.spyOn(apiService, 'executeAdminTask').mockImplementation(
+      () => executionPromise as any
+    );
+
+    render(<App />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa concorrente' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    // Deve entrar em estado de processamento
+    await waitFor(() => {
+      expect(screen.getByText(/Processando\.\.\./i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Processando\.\.\./i })).toBeDisabled();
+    });
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+
+    // Navega para a aba "Aprender" enquanto a execução ainda está pendente
+    const learnTabBtn = screen.getByRole('button', { name: /Aprender/i });
+    fireEvent.click(learnTabBtn);
+    expect(screen.getByText(/O que é o Maestro Router\?/i)).toBeInTheDocument();
+
+    // Retorna para a aba de Execução
+    const executionTabBtn = screen.getByRole('button', { name: /Execução/i });
+    fireEvent.click(executionTabBtn);
+
+    // O botão ainda deve estar em estado "Processando..." e desabilitado
+    const processingBtn = screen.getByRole('button', { name: /Processando\.\.\./i });
+    expect(processingBtn).toBeInTheDocument();
+    expect(processingBtn).toBeDisabled();
+
+    // Clicar no botão desabilitado não deve disparar nova execução
+    fireEvent.click(processingBtn);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+
+    // Conclui a execução pendente
+    resolveExecution({
+      kind: 'success',
+      status: 200,
+      data: {
+        result: { content: 'Sucesso retornado.' },
+        decision: {
+          outcome: 'selected',
+          route: { id: 'route-openai-gpt4o-mini', provider: 'openai', model: 'gpt-4o-mini' },
+          strategy: { id: 'lowest-estimated-cost', applied: true },
+          applied_constraints: [],
+          reason: 'Rota selecionada.',
+          factors: [],
+        },
+        economics: {
+          estimate: { status: 'available', amount: '0.000100', currency: 'USD', price_reference: 'ref', assumptions: [] },
+          usage: { status: 'available', items: [] },
+          calculated_cost: { status: 'available', amount: '0.000100', currency: 'USD', price_reference: 'ref', assumptions: [] },
+        },
+      },
+    });
+
+    // Aguarda retorno ao estado normal
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Executar Rota/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Executar Rota/i })).not.toBeDisabled();
+      expect(screen.getByText('Sucesso retornado.')).toBeInTheDocument();
+    });
+  });
 });

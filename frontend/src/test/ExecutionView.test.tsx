@@ -26,7 +26,7 @@ describe('ExecutionView component', () => {
   });
 
   it('permite preenchimento de task, context e required_quality_criteria preservando valores', async () => {
-    const mockExecute = vi.spyOn(apiService, 'executeTask').mockResolvedValueOnce({
+    const mockExecute = vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
       kind: 'success',
       status: 200,
       data: {
@@ -94,13 +94,16 @@ describe('ExecutionView component', () => {
     fireEvent.click(submitBtn);
 
     await waitFor(() => {
-      expect(mockExecute).toHaveBeenCalledWith({
-        task: '  Instrução técnica com espaços  ',
-        context: 'Contexto relevante.',
-        constraints: {
-          required_quality_criteria: ['summary_faithfulness_accepted'],
+      expect(mockExecute).toHaveBeenCalledWith(
+        {
+          task: '  Instrução técnica com espaços  ',
+          context: 'Contexto relevante.',
+          constraints: {
+            required_quality_criteria: ['summary_faithfulness_accepted'],
+          },
         },
-      });
+        'economica'
+      );
       expect(
         screen.getByText('Texto gerado pelo Maestro Router.')
       ).toBeInTheDocument();
@@ -110,7 +113,7 @@ describe('ExecutionView component', () => {
   });
 
   it('exibe RefusalCard com orientações quando a API retorna NO_ELIGIBLE_ROUTE (422)', async () => {
-    vi.spyOn(apiService, 'executeTask').mockResolvedValueOnce({
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
       kind: 'refusal',
       status: 422,
       error: {
@@ -179,5 +182,143 @@ describe('ExecutionView component', () => {
     } finally {
       window.history.pushState({}, '', '/');
     }
+  });
+
+  it('exibe aviso e terminologia de gratuidade declarada pelo operador ao selecionar a trilha Free', async () => {
+    const mockExecute = vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'success',
+      status: 200,
+      data: {
+        result: { content: 'Executado com rota gratuita' },
+        decision: {
+          outcome: 'selected',
+          route: { id: 'route-free', provider: 'openai', model: 'mock-free' },
+          strategy: { id: 'lowest-estimated-cost', applied: true },
+          applied_constraints: [],
+          reason: 'Rota gratuita selecionada.',
+          factors: [],
+        },
+        economics: {
+          estimate: { status: 'available', amount: '0.000000', currency: 'USD', price_reference: 'free', assumptions: [] },
+          usage: { status: 'available', items: [] },
+          calculated_cost: { status: 'available', amount: '0.000000', currency: 'USD', price_reference: 'free', assumptions: [] },
+        },
+      },
+    });
+
+    render(<ExecutionView />);
+
+    // Verifica que a descrição inicial da trilha Free usa a nova terminologia honesta
+    expect(
+      screen.getByText(/Somente candidatos com tarifas zero declaradas pelo operador\./i)
+    ).toBeInTheDocument();
+
+    // Seleciona a trilha Free
+    const freeCard = screen.getByText('Free').closest('div')!;
+    fireEvent.click(freeCard);
+
+    // O aviso explícito sobre faturamento deve surgir
+    expect(
+      screen.getByTestId('free-track-disclaimer')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Aviso sobre a Trilha Free \(Gratuidade declarada pelo operador\):/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Ela não confirma se a sua conta ou cota no provedor realmente possuem isenção de faturamento/i)
+    ).toBeInTheDocument();
+
+    // Digita tarefa e executa na trilha Free
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa sob trilha Free' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(mockExecute).toHaveBeenCalledWith(
+        expect.objectContaining({ task: 'Tarefa sob trilha Free' }),
+        'free'
+      );
+    });
+  });
+
+  it('apresenta erro de validação junto ao campo de teto de custo sem quebrar a tela quando o valor for inválido', async () => {
+    render(<ExecutionView />);
+
+    // Expande a seção de restrições
+    const toggleConstraintsBtn = screen.getByRole('button', {
+      name: /Restrições da Solicitação/i,
+    });
+    fireEvent.click(toggleConstraintsBtn);
+
+    const costInput = screen.getByLabelText(/Teto de Custo Estimado/i);
+    // Digita valor inválido
+    fireEvent.change(costInput, { target: { value: 'abc' } });
+
+    // O erro deve ser renderizado inline junto ao campo
+    const errorEl = screen.getByTestId('cost-limit-error');
+    expect(errorEl).toBeInTheDocument();
+    expect(errorEl.textContent).toContain('O teto de custo deve ser um valor decimal não negativo válido');
+  });
+
+  it('trata resposta de erro com envelope detail sem gerar TypeError', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'client_error',
+      status: 400,
+      error: {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Parâmetro inválido',
+          issues: [
+            {
+              path: '/constraints/max_estimated_cost/amount',
+              message: 'O valor deve ser decimal no formato 0.0000',
+            },
+          ],
+        },
+      },
+    });
+
+    render(<ExecutionView />);
+
+    // Expande restrições
+    const toggleConstraintsBtn = screen.getByRole('button', {
+      name: /Restrições da Solicitação/i,
+    });
+    fireEvent.click(toggleConstraintsBtn);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa com teto inválido' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      const errorEl = screen.getByTestId('cost-limit-error');
+      expect(errorEl).toBeInTheDocument();
+      expect(errorEl.textContent).toContain('O valor deve ser decimal no formato 0.0000');
+    });
+  });
+
+  it('sempre encerra o estado de carregamento via finally mesmo quando a sessão ou requisição falhar', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockRejectedValueOnce(
+      new Error('Falha no handshake CSRF')
+    );
+
+    render(<ExecutionView />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa para teste de falha' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    // O botão deve voltar a ficar ativo após a falha, sem ficar preso em "Processando..."
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Executar Rota/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Executar Rota/i })).not.toBeDisabled();
+      expect(screen.getByText(/Falha no handshake CSRF/i)).toBeInTheDocument();
+    });
   });
 });

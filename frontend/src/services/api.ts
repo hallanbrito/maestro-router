@@ -25,27 +25,17 @@ import {
 export const API_ENDPOINT = '/v1/executions';
 
 /**
- * Envia uma solicitação síncrona de execução ao Maestro Router.
- *
- * Acionado estritamente por comando explícito do usuário (botão ou atalho de teclado),
- * nunca em segundo plano ou em laços de repetição autônomos.
+ * Constrói o corpo da solicitação preservando espaços significativos e a gramática do contrato.
  */
-export async function executeTask(
-  request: ExecutionRequest
-): Promise<ExecutionApiResponse> {
-  // Construção estrita do payload (sem campos nulos ou membros vazios indevidos).
-  // task é enviado exatamente como digitado pelo usuário, preservando espaços significativos.
+function buildExecutionBody(request: ExecutionRequest): Record<string, unknown> {
   const bodyPayload: Record<string, unknown> = {
     task: request.task,
   };
 
-  // context só é incluído se contiver ao menos um caractere não-branco, sendo transmitido
-  // exatamente com os caracteres e espaços digitados, sem trim truncador.
   if (request.context !== undefined && request.context.trim().length > 0) {
     bodyPayload.context = request.context;
   }
 
-  // Composição opcional de restrições respeitando a gramática fechada do contrato
   if (request.constraints) {
     const constraintsPayload: Record<string, unknown> = {};
 
@@ -78,7 +68,6 @@ export async function executeTask(
       request.constraints.max_estimated_cost.amount !== undefined &&
       request.constraints.max_estimated_cost.currency !== undefined
     ) {
-      // amount e currency são transmitidos exatamente como fornecidos, sem correção silenciosa
       constraintsPayload.max_estimated_cost = {
         amount: request.constraints.max_estimated_cost.amount,
         currency: request.constraints.max_estimated_cost.currency,
@@ -90,6 +79,149 @@ export async function executeTask(
     }
   }
 
+  return bodyPayload;
+}
+
+/**
+ * Mapeia as respostas HTTP conforme a taxonomia rigorosa de status e tipos da API pública v1.
+ */
+async function mapExecutionResponse(response: Response): Promise<ExecutionApiResponse> {
+  let responseData: unknown = null;
+  try {
+    responseData = await response.json();
+  } catch {
+    return {
+      kind: 'protocol_error',
+      status: response.status,
+      error: {
+        code: 'INVALID_SERVER_RESPONSE',
+        message: `O servidor retornou status HTTP ${response.status} com corpo incompatível com JSON.`,
+      },
+    };
+  }
+
+  // 200 OK: Execução concluída com resultado válido
+  if (response.status === 200) {
+    return {
+      kind: 'success',
+      status: 200,
+      data: responseData as ExecutionSuccessResponse,
+    };
+  }
+
+  // Normalização defensiva do payload de erro (compatibilidade com envelopes {error: ...} e {detail: ...})
+  let normalizedError: ExecutionErrorResponse;
+  const rawObj = responseData as any;
+  if (rawObj && typeof rawObj === 'object' && 'error' in rawObj && rawObj.error) {
+    normalizedError = rawObj as ExecutionErrorResponse;
+  } else if (rawObj && typeof rawObj === 'object' && 'detail' in rawObj) {
+    const detail = rawObj.detail;
+    if (typeof detail === 'string') {
+      normalizedError = {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: detail,
+        },
+      };
+    } else if (Array.isArray(detail)) {
+      normalizedError = {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'A solicitação contém parâmetros inválidos.',
+          issues: detail.map((d: any) => ({
+            path: Array.isArray(d.loc) ? '/' + d.loc.filter((p: any) => p !== 'body').join('/') : undefined,
+            message: d.msg || 'Valor inválido',
+          })),
+        },
+      };
+    } else if (typeof detail === 'object' && detail !== null) {
+      normalizedError = {
+        error: {
+          code: detail.code || 'INVALID_REQUEST',
+          message: detail.message || 'Erro na solicitação.',
+          issues: detail.issues,
+        },
+        decision: detail.decision,
+        economics: detail.economics,
+      };
+    } else {
+      normalizedError = {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Solicitação administrativa inválida.',
+        },
+      };
+    }
+  } else {
+    normalizedError = {
+      error: {
+        code: 'INVALID_REQUEST',
+        message: `Erro na resposta do servidor (HTTP ${response.status}).`,
+      },
+    };
+  }
+
+  // 422 Unprocessable Content: Recusa do roteamento (NO_ELIGIBLE_ROUTE ou INSUFFICIENT_ECONOMIC_INFORMATION)
+  if (response.status === 422) {
+    return {
+      kind: 'refusal',
+      status: 422,
+      error: normalizedError,
+    };
+  }
+
+  // 400 Bad Request / 415 Unsupported Media Type: Erro de validação da solicitação
+  if (response.status === 400 || response.status === 415) {
+    return {
+      kind: 'client_error',
+      status: response.status,
+      error: normalizedError,
+    };
+  }
+
+  // 502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout: Falha no acionamento do provedor pós-seleção
+  if (
+    response.status === 502 ||
+    response.status === 503 ||
+    response.status === 504
+  ) {
+    return {
+      kind: 'execution_error',
+      status: response.status,
+      error: normalizedError,
+    };
+  }
+
+  // 500 Internal Server Error (INVALID_CONFIGURATION ou INVALID_DECISION)
+  if (response.status === 500) {
+    return {
+      kind: 'server_error',
+      status: 500,
+      error: normalizedError,
+    };
+  }
+
+  // Qualquer outro status HTTP inesperado fora do contrato público v1
+  return {
+    kind: 'protocol_error',
+    status: response.status,
+    error: {
+      code: 'UNEXPECTED_HTTP_STATUS',
+      message: normalizedError.error?.message || `O servidor retornou status HTTP inesperado: ${response.status}.`,
+    },
+  };
+}
+
+/**
+ * Envia uma solicitação síncrona de execução à API pública v1 (docs/05-API.md).
+ *
+ * Comunica-se exclusivamente com POST /v1/executions sem interpretar cabeçalhos ou trilhas.
+ */
+export async function executeTask(
+  request: ExecutionRequest
+): Promise<ExecutionApiResponse> {
+  const bodyPayload = buildExecutionBody(request);
+
   try {
     const response = await fetch(API_ENDPOINT, {
       method: 'POST',
@@ -99,89 +231,277 @@ export async function executeTask(
       body: JSON.stringify(bodyPayload),
     });
 
-    let responseData: unknown = null;
-    try {
-      responseData = await response.json();
-    } catch {
-      return {
-        kind: 'protocol_error',
-        status: response.status,
-        error: {
-          code: 'INVALID_SERVER_RESPONSE',
-          message: `O servidor retornou status HTTP ${response.status} com corpo incompatível com JSON.`,
-        },
-      };
-    }
-
-    // 200 OK: Execução concluída com resultado válido
-    if (response.status === 200) {
-      return {
-        kind: 'success',
-        status: 200,
-        data: responseData as ExecutionSuccessResponse,
-      };
-    }
-
-    const errorResponse = responseData as ExecutionErrorResponse;
-
-    // 422 Unprocessable Content: Recusa do roteamento (NO_ELIGIBLE_ROUTE ou INSUFFICIENT_ECONOMIC_INFORMATION)
-    if (response.status === 422) {
-      return {
-        kind: 'refusal',
-        status: 422,
-        error: errorResponse,
-      };
-    }
-
-    // 400 Bad Request / 415 Unsupported Media Type: Erro de validação da solicitação
-    if (response.status === 400 || response.status === 415) {
-      return {
-        kind: 'client_error',
-        status: response.status,
-        error: errorResponse,
-      };
-    }
-
-    // 502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout: Falha no acionamento do provedor pós-seleção
-    if (
-      response.status === 502 ||
-      response.status === 503 ||
-      response.status === 504
-    ) {
-      return {
-        kind: 'execution_error',
-        status: response.status,
-        error: errorResponse,
-      };
-    }
-
-    // 500 Internal Server Error (INVALID_CONFIGURATION ou INVALID_DECISION)
-    if (response.status === 500) {
-      return {
-        kind: 'server_error',
-        status: 500,
-        error: errorResponse,
-      };
-    }
-
-    // Qualquer outro status HTTP inesperado fora do contrato público v1
-    return {
-      kind: 'protocol_error',
-      status: response.status,
-      error: {
-        code: 'UNEXPECTED_HTTP_STATUS',
-        message: `O servidor retornou status HTTP inesperado: ${response.status}.`,
-      },
-    };
+    return await mapExecutionResponse(response);
   } catch (_err: unknown) {
-    // Falha de rede ou servidor FastAPI inacessível
     return {
       kind: 'network_error',
       status: 0,
       message:
         'Não foi possível estabelecer conexão com o Maestro Router em http://127.0.0.1:8000.',
       details:
-        'Certifique-se de que o backend FastAPI esteja em execução. Exemplo: "python -m uvicorn --app-dir src maestro_router.api:app".',
+        'Certifique-se de que o backend FastAPI esteja em execução. Exemplo: "python -m uvicorn --app-dir src maestro_router.control_center:app".',
     };
   }
+}
+
+/**
+ * Envia uma solicitação de execução operacional governada pela trilha selecionada no Control Center.
+ *
+ * Aciona o endpoint administrativo local POST /admin/executions (ADR 0012) com autenticação CSRF.
+ */
+export async function executeAdminTask(
+  request: ExecutionRequest,
+  track: TrackType
+): Promise<ExecutionApiResponse> {
+  const bodyPayload = buildExecutionBody(request);
+
+  try {
+    const token = await getAdminCsrfToken();
+    const response = await fetch('/admin/executions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Maestro-CSRF-Token': token,
+      },
+      body: JSON.stringify({
+        ...bodyPayload,
+        track,
+      }),
+    });
+
+    return await mapExecutionResponse(response);
+  } catch (_err: unknown) {
+    return {
+      kind: 'network_error',
+      status: 0,
+      message:
+        'Não foi possível estabelecer conexão com o Maestro Router em http://127.0.0.1:8000.',
+      details:
+        'Certifique-se de que o backend FastAPI esteja em execução. Exemplo: "python -m uvicorn --app-dir src maestro_router.control_center:app".',
+    };
+  }
+}
+
+// ==============================================================================
+// Serviços Administrativos Locais do Control Center (ADR 0012)
+// ==============================================================================
+
+import {
+  ProviderInfo,
+  RouteConfig,
+  RoutingPreview,
+  TrackType,
+} from '../types';
+
+let cachedCsrfToken: string | null = null;
+
+export function resetAdminCsrfTokenForTesting(): void {
+  cachedCsrfToken = null;
+}
+
+/**
+ * Obtém ou reutiliza o token CSRF dinâmico gerado pelo backend administrativo em memória.
+ */
+export async function getAdminCsrfToken(): Promise<string> {
+  if (cachedCsrfToken) {
+    return cachedCsrfToken;
+  }
+  const res = await fetch('/admin/session', { method: 'GET' });
+  if (!res.ok) {
+    throw new Error(`Falha no handshake de sessão administrativa: HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  cachedCsrfToken = data.csrf_token;
+  return data.csrf_token;
+}
+
+/**
+ * Consulta o estado seguro da configuração operacional (provedores, credenciais e rotas).
+ */
+export async function fetchAdminConfig(): Promise<{
+  providers: ProviderInfo[];
+  routes: RouteConfig[];
+  models: string[];
+}> {
+  const res = await fetch('/admin/config', { method: 'GET' });
+  if (!res.ok) {
+    throw new Error(`Falha ao consultar configuração administrativa: HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+/**
+ * Cadastra ou substitui uma chave de API na memória volátil do backend.
+ */
+export async function saveCredential(
+  provider: string,
+  apiKey: string
+): Promise<{ provider: string; status: string; message: string }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch('/admin/credentials', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Maestro-CSRF-Token': token,
+    },
+    body: JSON.stringify({ provider, api_key: apiKey }),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao salvar credencial: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+/**
+ * Remove a credencial de um provedor da memória volátil do servidor.
+ */
+export async function removeCredential(
+  provider: string
+): Promise<{ provider: string; status: string; message: string }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch(`/admin/credentials?provider=${encodeURIComponent(provider)}`, {
+    method: 'DELETE',
+    headers: {
+      'X-Maestro-CSRF-Token': token,
+    },
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao remover credencial: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+/**
+ * Aciona a verificação explícita da credencial via listagem neutra de modelos (zero geração paga).
+ */
+export async function verifyCredential(
+  provider: string
+): Promise<{
+  provider: string;
+  status: string;
+  models?: string[];
+  message: string;
+}> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch('/admin/credentials/verify', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Maestro-CSRF-Token': token,
+    },
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao verificar credencial: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+/**
+ * Consulta a lista de modelos suportados / verificados.
+ */
+export async function fetchModels(): Promise<{
+  provider: string;
+  models: string[];
+  verified: boolean;
+}> {
+  const res = await fetch('/admin/models', { method: 'GET' });
+  if (!res.ok) {
+    throw new Error(`Falha ao obter lista de modelos: HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+/**
+ * Salva ou atualiza uma rota na configuração ativa em memória.
+ */
+export async function saveRoute(
+  route: Partial<RouteConfig>
+): Promise<{ status: string; route: RouteConfig }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch('/admin/routes', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Maestro-CSRF-Token': token,
+    },
+    body: JSON.stringify(route),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao salvar rota: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+/**
+ * Alterna habilitação (enable/disable) de uma rota.
+ */
+export async function toggleRoute(
+  routeId: string
+): Promise<{ route_id: string; enabled: boolean }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch(`/admin/routes/${encodeURIComponent(routeId)}/toggle`, {
+    method: 'PATCH',
+    headers: {
+      'X-Maestro-CSRF-Token': token,
+    },
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao alternar rota: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+/**
+ * Remove uma rota da configuração ativa.
+ */
+export async function deleteRoute(
+  routeId: string
+): Promise<{ status: string; route_id: string }> {
+  const token = await getAdminCsrfToken();
+  const res = await fetch(`/admin/routes/${encodeURIComponent(routeId)}`, {
+    method: 'DELETE',
+    headers: {
+      'X-Maestro-CSRF-Token': token,
+    },
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao excluir rota: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
+}
+/**
+ * Solicita uma sugestão e prévia explicável de roteamento com custo zero.
+ */
+export async function fetchRoutingPreview(params: {
+  task: string;
+  context?: string;
+  track: TrackType;
+  constraints?: Record<string, unknown>;
+}): Promise<RoutingPreview> {
+  const res = await fetch('/admin/preview', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(
+      errorBody.detail?.message || `Erro ao obter sugestão: HTTP ${res.status}`
+    );
+  }
+  return await res.json();
 }

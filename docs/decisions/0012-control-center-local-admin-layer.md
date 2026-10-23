@@ -1,0 +1,73 @@
+# 0012. Camada administrativa local e experiência de primeiro uso do Control Center
+
+- **Status:** Proposta em revisão após auditoria de conformidade (Draft PR #27)
+- **Data:** 2026-10-23
+- **Autor:** Maestro Router Team
+- **Decisores:** PO Hallan (em revisão de homologação)
+
+## Contexto
+
+O Maestro Router foi concebido sob princípios estritos de neutralidade entre provedores, explicabilidade e segurança defensiva. A API pública v1 (`docs/05-API.md`) expõe intencionalmente apenas `POST /v1/executions`, operando com um catálogo imutável configurado pelo operador via variáveis de ambiente (`bootstrap.py`).
+
+Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26), identificou-se que a experiência de primeiro uso para um engenheiro de software que nunca utilizou o Maestro apresentava barreiras significativas:
+1. A interface não oferecia um percurso educativo sobre os conceitos centrais do produto (diferenças entre provedor, modelo, rota e trilha; regras de elegibilidade e custos).
+2. Não era possível cadastrar, testar ou substituir chaves de provedores pela interface, exigindo manipulação manual de variáveis de ambiente.
+3. Não havia mecanismo interativo para consultar o catálogo, habilitar/desabilitar rotas ou obter sugestões explicáveis (prévia de roteamento) antes de disparar uma execução.
+4. O usuário preenchia qualquer tarefa e deparava-se imediatamente com a recusa protetiva `NO_ELIGIBLE_ROUTE`, sem caminhos visíveis de resolução.
+
+## Decisão
+
+1. **Camada Administrativa Local e Opcional (`/admin/*`):**
+   - Cria-se uma composição operacional dedicada ao Control Center (`src/maestro_router/control_center.py`), separada da aplicação neutra estrita de produção (`src/maestro_router/api.py`).
+   - A aplicação pública v1 permanece inalterada, estritamente neutra e fiel a `docs/05-API.md`. O endpoint público `POST /v1/executions` não aceita nem interpreta seleção de trilha ou estratégia via cabeçalhos (como `X-Maestro-Track`) ou payloads.
+   - O Control Center monta `POST /v1/executions` utilizando os mesmos componentes de domínio e regras de elegibilidade do Maestro, complementado pelos endpoints administrativos locais protegidos.
+   - Percurso inicial sem chave cadastrada: quando nenhuma chave de API estiver presente na memória volátil, rotas que dependem de adaptador externo são marcadas operacionalmente como desabilitadas na composição. Isso assegura que requisições iniciais a `POST /v1/executions` resultem rigorosamente na recusa normativa HTTP 422 `NO_ELIGIBLE_ROUTE` (informando que a rota está desabilitada por ausência de credencial), eliminando qualquer risco de erro interno HTTP 500 `INVALID_CONFIGURATION`.
+
+2. **Segurança de Credenciais e Proteção de Sessão/CSRF:**
+   - Credenciais de provedores (ex.: OpenAI API Key) cadastradas via frontend residem **exclusivamente na memória volátil** do processo backend. Nenhuma credencial é gravada em disco, logs, repositório, sessionStorage ou localStorage.
+   - O backend nunca retorna o segredo para o frontend; apenas metadados seguros e o estado da credencial são trafegados.
+   - Proteção de sessão dinâmica: na carga inicial, o frontend obtém um identificador de sessão e um token CSRF criptograficamente seguro via `GET /admin/session`. Requisições administrativas de mutação exigem o cabeçalho `X-Maestro-CSRF-Token` e validação de `Origin`/`Referer` restrito a loopback local (`localhost`/`127.0.0.1`).
+   - Nenhum segredo ou chave mestra é embutido no bundle estático do frontend.
+
+3. **Ciclo de Vida da Credencial:**
+   - O estado da credencial é categorizado rigorosamente em cinco situações distintas:
+     - `Credencial cadastrada`: chave presente na memória, mas ainda não testada externamente.
+     - `Credencial verificada`: chave validada com sucesso contra o provedor via chamada segura que não gera tokens pagos.
+     - `Acesso recusado`: provedor retornou erro de autenticação ou permissão (HTTP 401/403).
+     - `Sem saldo`: cota esgotada ou ausência de créditos no provedor (HTTP 429 com insuficiência de cota).
+     - `Verificação indisponível`: falha de conectividade ou indisponibilidade do provedor externo.
+   - Verificações externas são estritamente explícitas (acionadas pelo usuário) e utilizam métodos neutros e gratuitos (ex.: listagem de modelos via SDK oficial), nunca gerando texto pago.
+
+4. **Gerenciamento Operacional de Rotas e Validação Integral Prévia:**
+   - O Control Center mantém um catálogo reconfigurável em memória. Alterações em rotas ou credenciais realizam uma troca atômica do snapshot do `RouteCatalog` e do registro de adaptadores.
+   - Execuções em andamento capturam o snapshot no instante do recebimento da requisição, garantindo que mutações na configuração administrativa não interfiram em tarefas em processamento.
+   - **Validação Integral Prévia:** Todos os dados recebidos em `POST /admin/routes` são rigorosamente validados antes de qualquer mutação de estado. Tipos incompatíveis (ex.: booleanos enviados como string), provedores sem adaptador implementado e critérios de qualidade desacompanhados de referências de evidências auditáveis fornecidas pelo operador resultam em rejeição imediata (HTTP 400), preservando o estado anterior integralmente intacto.
+   - **Ausência de Preenchimento Automático Indevido:** A referência oficial auditada documentada (ADR 0008) pertence exclusivamente à rota pré-configurada inicial de `gpt-4o-mini`. Novas rotas cadastradas pelo operador (incluindo rotas adicionais com modelo `gpt-4o-mini` ou outros modelos) não herdam nem preenchem automaticamente tarifas ou estimativas de uso. Na ausência de dados fornecidos pelo operador, as informações tarifárias e estimativas permanecem explicitamente marcadas como indisponíveis, vedando qualquer confirmação não atestada de aplicabilidade ou identidade tarifária.
+
+5. **Trilhas de Roteamento e Execução Administrativa (`POST /admin/executions`):**
+   - O Control Center disponibiliza a execução governada por trilhas operacionais através de um endpoint administrativo local dedicado: `POST /admin/executions`. Este endpoint requer proteção de sessão/CSRF e reutiliza integralmente o motor neutro de roteamento (`route_request`) e despacho (`_execute_selection`), sem alterar a API pública v1:
+     - **Free (Gratuidade declarada pelo operador):** Restringe os candidatos estritamente a rotas cujo custo seja declarado em zero pelo operador (tarifas unitárias declaradas em zero e estimativa prévia calculada em zero). Rotas pagas, com estimativas indisponíveis ou custos desconhecidos permanecem terminantemente excluídas. O Maestro alerta explicitamente que essa trilha baseia-se em declaração local e não confirma condições reais de faturamento ou limites de cota da conta do operador junto ao provedor externo. Se não houver rotas gratuitas compatíveis com a tarefa, a requisição é recusada (HTTP 422 `NO_ELIGIBLE_ROUTE`), impedindo qualquer execução tarifada.
+     - **Econômica:** Aplica a estratégia canônica `lowest-estimated-cost` do Maestro entre rotas elegíveis com dados comparáveis de estimativa prévia calculada.
+     - **Inteligente:** Utiliza estritamente os requisitos explícitos da tarefa (capacidades exigidas e critérios de qualidade aceitos) associados a referências de evidências documentadas informadas pelo operador. Não infere pontuações, rankings universais ou notas de inteligência; aplica a elegibilidade técnica aos critérios declarados e, entre as rotas conformes, adota o menor custo estimado.
+
+6. **Sugestões Explicáveis (Prévia de Roteamento):**
+   - Endpoint `POST /admin/preview` executa a decisão de elegibilidade e ranqueamento sobre o catálogo ativo sem acionar o provedor externo, com custo zero de tokens.
+   - Retorna a rota recomendada, justificativa, fatores de decisão, exclusões fundamentadas e situação dos dados econômicos, permitindo aplicação direta ao formulário antes do envio.
+
+7. **Modo Estudante e Preservação de Estado:**
+   - A interface incorpora uma aba educativa "Aprender / Modo Estudante", com orientações passo a passo, glossário, explicações de recusa e links normativos.
+   - O estado do formulário de execução é preservado na memória da aplicação React durante a navegação entre abas, evitando perda de trabalho e impedindo envios duplicados.
+
+## Consequências
+
+- **Positivas:**
+  - Engenheiros de software podem compreender, configurar e testar o Maestro Router pelo navegador de ponta a ponta sem recorrer ao terminal ou arquivos de ambiente.
+  - Segurança defensiva rigorosa preservada: credenciais efêmeras em memória, CSRF dinâmico, verificação sem custos e ausência de vazamentos.
+  - Preservação estrita e inviolável do contrato público v1 (`POST /v1/executions` permanece neutro e agnóstico a trilhas).
+  - Execução administrativa orientada a trilhas via `POST /admin/executions`, garantindo isolamento da trilha Free sem risco de fallback para rotas pagas.
+  - Comunicação transparente sobre "gratuidade declarada pelo operador", sem falsas promessas de faturamento zero no provedor.
+  - Validação atômica e proteção de integridade do estado em mutações administrativas.
+- **Limitações Registradas:**
+  - Chaves de API cadastradas pela interface não persistem após o encerramento do processo do servidor (requerem novo cadastro ao reiniciar).
+  - Apenas o adaptador OpenAI está operacional no MVP atual; outros provedores são explicitamente apresentados como não implementados.
+  - A persistência segura de credenciais em repouso exigirá decisão arquitetural futura própria caso venha a ser requerida.

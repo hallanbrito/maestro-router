@@ -1,7 +1,7 @@
 import React from 'react';
-import { Layers, Play, DollarSign, Compass } from 'lucide-react';
+import { Layers, Play, DollarSign, Compass, BookOpen } from 'lucide-react';
 
-export type ActiveTab = 'execution' | 'providers' | 'reports';
+export type ActiveTab = 'execution' | 'providers' | 'learn' | 'reports';
 export type ConnectionState = 'idle' | 'connected' | 'disconnected';
 
 interface HeaderProps {
@@ -49,6 +49,16 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Layers size={16} aria-hidden="true" />
             <span>Provedores & Rotas</span>
+          </button>
+
+          <button
+            type="button"
+            className={`nav-button ${activeTab === 'learn' ? 'active' : ''}`}
+            onClick={() => onSelectTab('learn')}
+            aria-current={activeTab === 'learn' ? 'page' : undefined}
+          >
+            <BookOpen size={16} aria-hidden="true" />
+            <span>Aprender</span>
           </button>
 
           <button

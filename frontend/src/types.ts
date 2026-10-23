@@ -275,3 +275,89 @@ export type ExecutionApiResponse =
   | { kind: 'server_error'; status: 500; error: ExecutionErrorResponse }
   | { kind: 'protocol_error'; status: number; error: ProtocolErrorPayload }
   | { kind: 'network_error'; status: 0; message: string; details?: string };
+
+// --- Tipos Operacionais da Camada Administrativa Local do Control Center (ADR 0012) ---
+
+export type TrackType = 'free' | 'economica' | 'inteligente';
+
+export type CredentialStatus =
+  | 'not_registered'
+  | 'registered'
+  | 'verified'
+  | 'access_denied'
+  | 'insufficient_quota'
+  | 'verification_unavailable';
+
+export interface ProviderCredential {
+  registered: boolean;
+  status: CredentialStatus;
+  verified_at: string | null;
+  message: string | null;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  implemented: boolean;
+  credential: ProviderCredential;
+}
+
+export interface RouteConfig {
+  route_id: string;
+  provider: string;
+  model: string;
+  enabled: boolean;
+  known_unavailable: boolean;
+  capabilities: string[];
+  quality_criteria: string[];
+  price_reference?: {
+    id: string;
+    currency: string;
+    rates?: Array<{ unit: string; rate: string; base: number }>;
+  };
+  estimated_usage?: {
+    input_token: number;
+    output_token: number;
+    applicability_confirmed?: boolean;
+  };
+  status: 'ready' | 'blocked';
+  blockers: string[];
+}
+
+export interface RoutingPreview {
+  track: TrackType;
+  policy_description: string;
+  recommended_route: {
+    route_id: string;
+    provider: string;
+    model: string;
+    estimate: {
+      amount: string | null;
+      currency: string | null;
+      status: string;
+    };
+    price_reference: {
+      id: string;
+      currency: string;
+    } | null;
+    justification: string;
+  } | null;
+  candidate_evaluations: Array<{
+    route_id: string;
+    status: string;
+    reason: string;
+  }>;
+  factors: Array<{
+    category: string;
+    description: string;
+  }>;
+  exclusions: Array<{
+    route_id: string;
+    reason: string;
+    description?: string;
+  }>;
+  economic_data_status: string;
+  billing_warning: boolean;
+  explanation: string;
+  refusal_code?: string;
+}

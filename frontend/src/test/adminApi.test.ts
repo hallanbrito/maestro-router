@@ -11,6 +11,7 @@ import {
   toggleRoute,
   deleteRoute,
   fetchRoutingPreview,
+  executeAdminTask,
 } from '../services/api';
 
 describe('Admin API client methods', () => {
@@ -174,5 +175,48 @@ describe('Admin API client methods', () => {
 
     const delRouteRes = await deleteRoute('r1');
     expect(delRouteRes.status).toBe('deleted');
+  });
+
+  it('executa tarefa administrativa via POST /admin/executions com CSRF e trilha', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ csrf_token: 'csrf-admin-exec' }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: { content: 'Resposta mock' },
+          decision: { outcome: 'selected', route: { id: 'r1' } },
+        }),
+      } as Response);
+
+    const res = await executeAdminTask(
+      {
+        task: 'Minha tarefa administrativa',
+        context: 'Contexto relevante',
+      },
+      'free'
+    );
+
+    expect(res.kind).toBe('success');
+    expect(fetchSpy).toHaveBeenLastCalledWith(
+      '/admin/executions',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'X-Maestro-CSRF-Token': 'csrf-admin-exec',
+        }),
+        body: JSON.stringify({
+          task: 'Minha tarefa administrativa',
+          context: 'Contexto relevante',
+          track: 'free',
+        }),
+      })
+    );
   });
 });

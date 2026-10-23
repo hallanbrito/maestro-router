@@ -8,7 +8,6 @@ preservando estritamente o contrato neutro da API pública v1 (docs/05-API.md).
 
 from __future__ import annotations
 
-import contextvars
 import json
 import secrets
 import threading
@@ -20,6 +19,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -30,7 +30,12 @@ from openai import (
 )
 
 from .adapters import OpenAIResponsesAdapter
-from .api import create_app
+from .api import (
+    create_app,
+    _execute_selection,
+    _is_valid_adapter,
+    _snapshot_adapters,
+)
 from .contracts import ExecutionRequest
 from .economics import calculate_pre_execution_amount
 from .execution import ExecutionAdapter
@@ -48,12 +53,6 @@ from .bootstrap import (
     _is_structurally_valid_string,
     _estimated_usage_assumption,
     _DISABLED_ROUTE_ESTIMATE_REASON,
-)
-
-# ContextVar assíncrono para propagar a trilha selecionada durante a requisição de execução.
-# Permite que a trilha 'Free' restrinja efetivamente a execução pública sem violar o schema do body.
-active_track_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "active_track_ctx", default=None
 )
 
 CredentialStatus = Literal[
@@ -100,14 +99,19 @@ INITIAL_GPT4O_MINI_ESTIMATED_USAGE = {
 }
 
 
-def is_proven_free_route(route: Route) -> bool:
-    """Verifica se a rota possui gratuidade efetivamente comprovada.
+def is_operator_declared_free_route(route: Route) -> bool:
+    """Verifica se a rota possui gratuidade declarada pelo operador.
 
-    Para ser considerada gratuita no Maestro Router:
+    Para qualificar na trilha Free no Maestro Router:
     1. A rota precisa estar habilitada e não marcada como indisponível.
-    2. A referência de preço deve existir e conter taxas exclusivamente iguais a zero.
-    3. A estimativa prévia de custo deve estar disponível com montante aritmético igual a zero.
-    4. Rotas com custo desconhecido, estimativa indisponível ou preço > 0 não são gratuitas.
+    2. A referência de preço declarada pelo operador deve existir e conter taxas exclusivamente iguais a zero ("0", "0.0", "0.00").
+    3. A estimativa prévia calculada de custo deve estar disponível com montante igual a zero.
+    4. Rotas com custo positivo declarado, custo desconhecido ou estimativa indisponível são estritamente excluídas.
+
+    Nota de transparência e auditoria (Bloqueador 1):
+    Esta checagem reflete unicamente as tarifas e estimativas declaradas localmente na
+    configuração operacional pelo operador. O Maestro Router não valida, confirma nem garante
+    ausência de cobrança ou faturamento real na conta do usuário junto ao provedor de IA.
     """
     if not route.enabled or route.known_unavailable:
         return False
@@ -124,6 +128,10 @@ def is_proven_free_route(route: Route) -> bool:
     except Exception:
         return False
     return True
+
+
+# Alias para compatibilidade de interfaces anteriores
+is_proven_free_route = is_operator_declared_free_route
 
 
 class ControlCenterState:
@@ -416,8 +424,8 @@ class ControlCenterState:
 class DynamicRouteCatalog(RouteCatalog):
     """Proxy de catálogo que repassa chamadas ao catálogo ativo em memória.
 
-    Ao receber chamadas no contexto da trilha 'Free', restringe a allowlist
-    efetiva exclusivamente às rotas com gratuidade comprovada.
+    Preserva a fidelidade integral à interface RouteCatalog sem interceptar
+    cabeçalhos ou manipular estratégias de forma oculta (Bloqueador 2).
     """
 
     def __init__(self, state: ControlCenterState) -> None:
@@ -442,25 +450,9 @@ class DynamicRouteCatalog(RouteCatalog):
 
     @property
     def operational_constraints(self) -> OperationalConstraints | None:
-        base_constraints = getattr(
+        return getattr(
             self._state.current_catalog, "operational_constraints", None
-        ) or OperationalConstraints()
-
-        # Se a execução corrente estiver marcada na trilha 'Free', restringe a allowlist
-        # operacional para conter APENAS rotas com gratuidade comprovada.
-        track = active_track_ctx.get()
-        if track == "free":
-            snapshot = self._state.current_catalog.snapshot()
-            free_ids = frozenset(r.id for r in snapshot if is_proven_free_route(r))
-            return OperationalConstraints(
-                required_capabilities=base_constraints.required_capabilities,
-                required_quality_criteria=base_constraints.required_quality_criteria,
-                allowed_route_ids=free_ids,
-                max_estimated_costs=base_constraints.max_estimated_costs,
-                defaults=base_constraints.defaults,
-            )
-
-        return base_constraints
+        )
 
 
 class DynamicAdapterRegistry(Mapping[str, ExecutionAdapter]):
@@ -688,18 +680,8 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
     dynamic_adapters = DynamicAdapterRegistry(control_state)
 
     # Aplicação núcleo de execução expondo POST /v1/executions em conformidade com docs/05-API.md
+    # O endpoint público v1 não interpreta trilhas, cabeçalhos ou estratégias externas.
     app = create_app(catalog=dynamic_catalog, adapters=dynamic_adapters)
-
-    # Middleware para capturar o cabeçalho X-Maestro-Track durante requisições de execução.
-    # Permite que a trilha 'Free' filtre efetivamente a execução pública sem alterar o contrato do corpo.
-    @app.middleware("http")
-    async def track_middleware(request: Request, call_next):
-        track_header = request.headers.get("x-maestro-track", "").lower()
-        token = active_track_ctx.set(track_header if track_header else None)
-        try:
-            return await call_next(request)
-        finally:
-            active_track_ctx.reset(token)
 
     admin_router = APIRouter(prefix="/admin", tags=["Control Center Admin"])
 
@@ -1059,26 +1041,26 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         # Apresentação realista e auditável das políticas de trilha
         track_policies = {
-            "free": "Trilha Free: aceita exclusivamente candidatos cuja gratuidade esteja comprovada por referência de preço com taxas zero e condições documentadas.",
+            "free": "Trilha Free: aceita exclusivamente candidatos com gratuidade declarada pelo operador (tarifas e estimativa prévia calculada iguais a zero). Não atesta faturamento real no provedor externo.",
             "economica": "Trilha Econômica: aplica a estratégia canônica de menor custo estimado entre todos os candidatos elegíveis com dados econômicos comparáveis.",
             "inteligente": "Trilha Inteligente: aplica estritamente os critérios de qualidade obrigatórios (required_quality_criteria) com evidências documentadas, selecionando o menor custo entre as rotas qualificadas.",
         }
 
-        # Tratamento da Trilha Free (Item 1):
-        # Exclui ativamente qualquer rota que não tenha gratuidade comprovada.
+        # Tratamento da Trilha Free (Bloqueador 1):
+        # Exclui ativamente qualquer rota que não tenha gratuidade declarada pelo operador.
         if track == "free":
             free_candidates: list[Route] = []
             exclusions: list[dict[str, str]] = []
 
             for r in catalog_snapshot:
-                if is_proven_free_route(r):
+                if is_operator_declared_free_route(r):
                     free_candidates.append(r)
                 else:
                     reason_desc = (
-                        f"{r.id} foi excluída por possuir custos associados maiores que zero "
+                        f"{r.id} foi excluída por possuir tarifas declaradas maiores que zero "
                         "(incompatível com a trilha Free)."
                         if (r.price_reference and any(Decimal(rt.rate) > Decimal("0") for rt in r.price_reference.rates))
-                        else f"{r.id} foi excluída por não comprovar gratuidade aplicável (preço ou estimativa ausente/indisponível na trilha Free)."
+                        else f"{r.id} foi excluída por não possuir gratuidade declarada pelo operador (tarifas ausentes ou estimativa indisponível na trilha Free)."
                     )
                     exclusions.append({
                         "route_id": r.id,
@@ -1098,15 +1080,16 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     "factors": [
                         {
                             "category": "economic",
-                            "description": "Nenhuma rota gratuita comprovada está disponível na configuração ativa.",
+                            "description": "Trilha Free: exige tarifas e estimativas declaradas em zero pelo operador. Não confirma faturamento real na conta do provedor.",
                         }
                     ],
                     "exclusions": exclusions,
-                    "economic_data_status": "Nenhum candidato com gratuidade comprovada.",
+                    "economic_data_status": "Nenhum candidato com gratuidade declarada pelo operador.",
                     "billing_warning": False,
                     "explanation": (
-                        "A trilha Free requer comprovação estrita de custo zero. "
-                        "Todas as rotas configuradas atualmente possuem custos associados ou dados econômicos desconhecidos. "
+                        "A trilha Free requer gratuidade declarada pelo operador (tarifas e estimativas calculadas iguais a zero). "
+                        "Todas as rotas configuradas atualmente possuem tarifas positivas ou dados econômicos indisponíveis. "
+                        "Aviso: o Maestro Router não valida faturamento real junto ao provedor. "
                         "Selecione a trilha 'Econômica' ou 'Inteligente' para utilizar as rotas configuradas."
                     ),
                 }
@@ -1130,19 +1113,22 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                         "model": selected.model,
                         "estimate": {"amount": "0.0000", "currency": selected.estimate.currency or "USD", "status": "available"},
                         "price_reference": {"id": selected.price_reference.id, "currency": selected.price_reference.currency} if selected.price_reference else None,
-                        "justification": f"{selected.id} foi selecionada com gratuidade comprovada na trilha Free.",
+                        "justification": f"{selected.id} foi selecionada com base em gratuidade declarada pelo operador na trilha Free.",
                     },
                     "candidate_evaluations": [
-                        {"route_id": selected.id, "status": "selected", "reason": "Gratuidade comprovada e requisitos satisfeitos."}
+                        {"route_id": selected.id, "status": "selected", "reason": "Gratuidade declarada pelo operador e requisitos satisfeitos."}
                     ] + [
                         {"route_id": e["route_id"], "status": "excluded", "reason": e["description"]}
                         for e in exclusions
                     ],
                     "factors": [{"category": f.category, "description": f.description} for f in routing_decision.factors],
                     "exclusions": exclusions,
-                    "economic_data_status": "Gratuidade comprovada (0.0000 USD).",
+                    "economic_data_status": "Gratuidade declarada pelo operador (0.0000 USD).",
                     "billing_warning": False,
-                    "explanation": f"{selected.id} atende a todas as restrições e possui custo zero comprovado.",
+                    "explanation": (
+                        f"{selected.id} atende a todas as restrições da tarefa e possui gratuidade declarada pelo operador "
+                        "(tarifas e estimativa calculada iguais a zero). Aviso: cabe ao operador validar condições de faturamento junto ao provedor."
+                    ),
                 }
             else:
                 # Candidatos gratuitos existiam, mas foram eliminados por restrições da tarefa (ex: capacidade ausente)
@@ -1157,10 +1143,10 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     ],
                     "factors": refusal_data.get("decision", {}).get("factors", []),
                     "exclusions": exclusions,
-                    "economic_data_status": "Rotas gratuitas existentes são incompatíveis com os requisitos da tarefa.",
+                    "economic_data_status": "Rotas com gratuidade declarada existentes são incompatíveis com os requisitos da tarefa.",
                     "billing_warning": False,
                     "explanation": (
-                        "As rotas gratuitas configuradas foram excluídas por não atenderem aos requisitos da tarefa "
+                        "As rotas com gratuidade declarada pelo operador foram excluídas por não atenderem aos requisitos da tarefa "
                         "(ex.: capacidades exigidas ou critérios ausentes). Rotas pagas permanecem estritamente excluídas na trilha Free."
                     ),
                     "refusal_code": refusal_data.get("error", {}).get("code"),
@@ -1235,7 +1221,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 ],
                 "exclusions": [],
                 "economic_data_status": f"Referência de preço ativa; estimativa: {est_status}.",
-                "billing_warning": selected.provider != "local" and not is_proven_free_route(selected),
+                "billing_warning": selected.provider != "local" and not is_operator_declared_free_route(selected),
                 "explanation": explanation,
             }
         else:
@@ -1266,6 +1252,210 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 "explanation": explanation,
                 "refusal_code": error_info.get("code"),
             }
+
+    @admin_router.post("/executions")
+    async def admin_execute(
+        request: Request,
+        x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
+    ) -> Response:
+        """Execução operacional governada pela trilha selecionada no Control Center (ADR 0012).
+
+        Fronteira administrativa local estritamente separada de POST /v1/executions (docs/05-API.md).
+        Reutiliza integralmente o motor neutro de roteamento (routing.py) e os adaptadores de execução
+        sem duplicar o motor nem alterar a semântica da API pública v1 (Bloqueador 2).
+        """
+        await _enforce_admin_security(request, x_maestro_csrf_token)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_JSON", "message": "Corpo JSON inválido."},
+            )
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_JSON", "message": "O corpo deve ser um objeto JSON."},
+            )
+
+        task = body.get("task")
+        if not _is_structurally_valid_string(task):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_TASK", "message": "task é obrigatória e deve ser uma string não vazia."},
+            )
+
+        context = body.get("context")
+        if context is not None and not isinstance(context, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_CONTEXT", "message": "context deve ser uma string quando fornecido."},
+            )
+
+        exec_payload: dict[str, Any] = {"task": task}
+        if context is not None and context.strip():
+            exec_payload["context"] = context
+        if "constraints" in body and body["constraints"]:
+            exec_payload["constraints"] = body["constraints"]
+
+        try:
+            execution_request = ExecutionRequest.model_validate(exec_payload)
+        except Exception as val_err:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_CONSTRAINTS", "message": f"Restrições inválidas: {val_err}"},
+            )
+
+        track: TrackType = body.get("track", "economica")
+        if track not in {"free", "economica", "inteligente"}:
+            track = "economica"
+
+        catalog_snapshot = control_state.current_catalog.snapshot()
+        adapter_snapshot = _snapshot_adapters(
+            control_state.current_catalog, control_state.current_adapters
+        )
+        enabled_routes = tuple(route for route in catalog_snapshot if route.enabled)
+        has_api_key = bool(control_state.credentials.get("openai", {}).get("api_key"))
+
+        # Sem chave de API cadastrada, rotas externas não possuem execução válida -> 422 NO_ELIGIBLE_ROUTE
+        if not has_api_key or not enabled_routes:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "NO_ELIGIBLE_ROUTE",
+                        "message": "Nenhuma rota configurada, habilitada e válida satisfaz as restrições aplicáveis.",
+                    },
+                    "decision": {
+                        "outcome": "refused",
+                        "strategy": {"id": "lowest-estimated-cost", "applied": False},
+                        "applied_constraints": [],
+                        "reason": "Nenhuma rota habilitada possui credencial/adaptador configurado no ambiente local.",
+                        "factors": [
+                            {
+                                "category": "route",
+                                "description": "Nenhuma chave de API está cadastrada na memória do servidor.",
+                            }
+                        ],
+                        "exclusions": [
+                            {
+                                "route_id": r.id,
+                                "reason": "missing_credential",
+                                "description": f"{r.id} está desabilitada por ausência de credencial de API.",
+                            }
+                            for r in catalog_snapshot
+                        ],
+                    },
+                },
+            )
+
+        catalog_invalid_ids = frozenset(
+            route.id
+            for route in enabled_routes
+            if not _is_valid_adapter(adapter_snapshot.get(route.adapter_id))
+        )
+        locally_invalid_ids = catalog_invalid_ids | getattr(
+            control_state.current_catalog, "configuration_invalid_route_ids", frozenset()
+        )
+
+        base_constraints = getattr(
+            control_state.current_catalog, "operational_constraints", None
+        ) or OperationalConstraints()
+
+        # Trilha Free: restrição estrita a rotas com gratuidade declarada pelo operador
+        if track == "free":
+            free_candidates = tuple(
+                r for r in catalog_snapshot if is_operator_declared_free_route(r)
+            )
+            if not free_candidates:
+                # Recusa imediata sem acionar provedor externo nem realizar fallback para rotas pagas
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "error": {
+                            "code": "NO_ELIGIBLE_ROUTE",
+                            "message": (
+                                "Nenhuma rota com gratuidade declarada pelo operador está disponível. "
+                                "A trilha Free exige que todas as tarifas declaradas e estimativas calculadas sejam 0.00. "
+                                "Rotas com tarifas positivas ou estimativas indisponíveis permanecem estritamente excluídas."
+                            ),
+                        },
+                        "decision": {
+                            "outcome": "refused",
+                            "strategy": {"id": "lowest-estimated-cost", "applied": False},
+                            "applied_constraints": [],
+                            "reason": "Nenhuma rota no catálogo possui gratuidade declarada pelo operador.",
+                            "factors": [
+                                {
+                                    "category": "economics",
+                                    "description": "Trilha Free: exige tarifas e estimativas declaradas em zero pelo operador. Não confirma faturamento real na conta do provedor.",
+                                }
+                            ],
+                            "exclusions": [
+                                {
+                                    "route_id": r.id,
+                                    "reason": "paid_or_unknown_cost",
+                                    "description": f"{r.id} foi excluída por não possuir tarifas e estimativa declaradas em zero pelo operador.",
+                                }
+                                for r in catalog_snapshot
+                            ],
+                        },
+                    },
+                )
+
+            free_ids = frozenset(r.id for r in free_candidates)
+            free_constraints = OperationalConstraints(
+                required_capabilities=base_constraints.required_capabilities,
+                required_quality_criteria=base_constraints.required_quality_criteria,
+                allowed_route_ids=free_ids,
+                max_estimated_costs=base_constraints.max_estimated_costs,
+                defaults=base_constraints.defaults,
+            )
+
+            routing_result = route_request(
+                execution_request,
+                control_state.current_catalog,
+                operational_constraints=free_constraints,
+                locally_invalid_route_ids=locally_invalid_ids,
+                invalid_execution_route_ids=catalog_invalid_ids,
+            )
+
+            if isinstance(routing_result, SelectedDecision):
+                # Defesa em profundidade: impede terminantemente fallback para rota tarifada
+                if not is_operator_declared_free_route(routing_result.route):
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "error": {
+                                "code": "NO_ELIGIBLE_ROUTE",
+                                "message": "A rota selecionada não satisfaz a exigência de gratuidade declarada na trilha Free.",
+                            }
+                        },
+                    )
+                return await _execute_selection(execution_request, routing_result, adapter_snapshot)
+
+            return JSONResponse(
+                status_code=422,
+                content=routing_result.model_dump(exclude_none=True),
+            )
+
+        # Trilhas Econômica e Inteligente:
+        routing_result = route_request(
+            execution_request,
+            control_state.current_catalog,
+            operational_constraints=base_constraints,
+            locally_invalid_route_ids=locally_invalid_ids,
+            invalid_execution_route_ids=catalog_invalid_ids,
+        )
+
+        if isinstance(routing_result, SelectedDecision):
+            return await _execute_selection(execution_request, routing_result, adapter_snapshot)
+
+        return JSONResponse(
+            status_code=422,
+            content=routing_result.model_dump(exclude_none=True),
+        )
 
     app.include_router(admin_router)
     return app

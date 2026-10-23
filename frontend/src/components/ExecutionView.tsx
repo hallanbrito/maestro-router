@@ -8,6 +8,7 @@ import {
   Copy,
   Check,
   AlertOctagon,
+  AlertCircle,
   WifiOff,
   Terminal,
   FileText,
@@ -28,7 +29,7 @@ import {
   RoutingPreview,
   TrackType,
 } from '../types';
-import { executeTask, fetchRoutingPreview } from '../services/api';
+import { executeAdminTask, fetchRoutingPreview } from '../services/api';
 import { DecisionCard } from './DecisionCard';
 import { EconomicsCard } from './EconomicsCard';
 import { RefusalCard } from './RefusalCard';
@@ -359,7 +360,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
       }
     }
 
-    const response = await executeTask(requestPayload, track);
+    const response = await executeAdminTask(requestPayload, track);
     setApiResponse(response);
     setIsLoading(false);
 
@@ -504,7 +505,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             <div className="alert-card info" style={{ marginBottom: '0.75rem', fontSize: '0.8rem' }}>
               <p style={{ margin: 0 }}>
                 <strong>Trilha:</strong> determina a política que o Maestro aplicará para selecionar a rota.
-                A trilha <em>Free</em> exige gratuidade auditada comprovada. A trilha <em>Econômica</em> busca o menor custo estimado entre as rotas aptas comparáveis. A trilha <em>Inteligente</em> aplica critérios de qualidade e requisitos técnicos explicitamente declarados com evidências auditáveis.
+                A trilha <em>Free</em> exige tarifas zero declaradas pelo operador e estimativa calculada igual a zero; não confirma faturamento na conta do provedor. A trilha <em>Econômica</em> busca o menor custo estimado entre as rotas aptas comparáveis. A trilha <em>Inteligente</em> aplica critérios de qualidade e requisitos técnicos explicitamente declarados com evidências auditáveis.
               </p>
             </div>
           )}
@@ -525,7 +526,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 <strong style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>Free</strong>
               </div>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginTop: '0.2rem' }}>
-                Somente candidatos com custo zero comprovado.
+                Somente candidatos com tarifas zero declaradas pelo operador.
               </span>
             </div>
 
@@ -568,6 +569,23 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               </span>
             </div>
           </div>
+
+          {track === 'free' && (
+            <div
+              className="alert-card warning"
+              style={{ marginTop: '0.75rem', fontSize: '0.8rem' }}
+              data-testid="free-track-disclaimer"
+            >
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
+                <AlertCircle size={16} color="var(--color-warning)" style={{ flexShrink: 0, marginTop: '2px' }} />
+                <div>
+                  <strong>Aviso sobre a Trilha Free (Gratuidade declarada pelo operador):</strong>{' '}
+                  A trilha Free valida apenas se as tarifas cadastradas localmente pelo operador são iguais a zero e se a estimativa calculada é zero.
+                  Ela não confirma se a sua conta ou cota no provedor realmente possuem isenção de faturamento; cabe ao operador validar as condições e políticas comerciais do provedor.
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Card de Sugestão / Prévia Explicável (Section 7) */}

@@ -25,28 +25,17 @@ import {
 export const API_ENDPOINT = '/v1/executions';
 
 /**
- * Envia uma solicitação síncrona de execução ao Maestro Router.
- *
- * Acionado estritamente por comando explícito do usuário (botão ou atalho de teclado),
- * nunca em segundo plano ou em laços de repetição autônomos.
+ * Constrói o corpo da solicitação preservando espaços significativos e a gramática do contrato.
  */
-export async function executeTask(
-  request: ExecutionRequest,
-  track?: TrackType
-): Promise<ExecutionApiResponse> {
-  // Construção estrita do payload (sem campos nulos ou membros vazios indevidos).
-  // task é enviado exatamente como digitado pelo usuário, preservando espaços significativos.
+function buildExecutionBody(request: ExecutionRequest): Record<string, unknown> {
   const bodyPayload: Record<string, unknown> = {
     task: request.task,
   };
 
-  // context só é incluído se contiver ao menos um caractere não-branco, sendo transmitido
-  // exatamente com os caracteres e espaços digitados, sem trim truncador.
   if (request.context !== undefined && request.context.trim().length > 0) {
     bodyPayload.context = request.context;
   }
 
-  // Composição opcional de restrições respeitando a gramática fechada do contrato
   if (request.constraints) {
     const constraintsPayload: Record<string, unknown> = {};
 
@@ -79,7 +68,6 @@ export async function executeTask(
       request.constraints.max_estimated_cost.amount !== undefined &&
       request.constraints.max_estimated_cost.currency !== undefined
     ) {
-      // amount e currency são transmitidos exatamente como fornecidos, sem correção silenciosa
       constraintsPayload.max_estimated_cost = {
         amount: request.constraints.max_estimated_cost.amount,
         currency: request.constraints.max_estimated_cost.currency,
@@ -91,96 +79,148 @@ export async function executeTask(
     }
   }
 
+  return bodyPayload;
+}
+
+/**
+ * Mapeia as respostas HTTP conforme a taxonomia rigorosa de status e tipos da API pública v1.
+ */
+async function mapExecutionResponse(response: Response): Promise<ExecutionApiResponse> {
+  let responseData: unknown = null;
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (track) {
-      headers['X-Maestro-Track'] = track;
-    }
-
-    const response = await fetch(API_ENDPOINT, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(bodyPayload),
-    });
-
-    let responseData: unknown = null;
-    try {
-      responseData = await response.json();
-    } catch {
-      return {
-        kind: 'protocol_error',
-        status: response.status,
-        error: {
-          code: 'INVALID_SERVER_RESPONSE',
-          message: `O servidor retornou status HTTP ${response.status} com corpo incompatível com JSON.`,
-        },
-      };
-    }
-
-    // 200 OK: Execução concluída com resultado válido
-    if (response.status === 200) {
-      return {
-        kind: 'success',
-        status: 200,
-        data: responseData as ExecutionSuccessResponse,
-      };
-    }
-
-    const errorResponse = responseData as ExecutionErrorResponse;
-
-    // 422 Unprocessable Content: Recusa do roteamento (NO_ELIGIBLE_ROUTE ou INSUFFICIENT_ECONOMIC_INFORMATION)
-    if (response.status === 422) {
-      return {
-        kind: 'refusal',
-        status: 422,
-        error: errorResponse,
-      };
-    }
-
-    // 400 Bad Request / 415 Unsupported Media Type: Erro de validação da solicitação
-    if (response.status === 400 || response.status === 415) {
-      return {
-        kind: 'client_error',
-        status: response.status,
-        error: errorResponse,
-      };
-    }
-
-    // 502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout: Falha no acionamento do provedor pós-seleção
-    if (
-      response.status === 502 ||
-      response.status === 503 ||
-      response.status === 504
-    ) {
-      return {
-        kind: 'execution_error',
-        status: response.status,
-        error: errorResponse,
-      };
-    }
-
-    // 500 Internal Server Error (INVALID_CONFIGURATION ou INVALID_DECISION)
-    if (response.status === 500) {
-      return {
-        kind: 'server_error',
-        status: 500,
-        error: errorResponse,
-      };
-    }
-
-    // Qualquer outro status HTTP inesperado fora do contrato público v1
+    responseData = await response.json();
+  } catch {
     return {
       kind: 'protocol_error',
       status: response.status,
       error: {
-        code: 'UNEXPECTED_HTTP_STATUS',
-        message: `O servidor retornou status HTTP inesperado: ${response.status}.`,
+        code: 'INVALID_SERVER_RESPONSE',
+        message: `O servidor retornou status HTTP ${response.status} com corpo incompatível com JSON.`,
       },
     };
+  }
+
+  // 200 OK: Execução concluída com resultado válido
+  if (response.status === 200) {
+    return {
+      kind: 'success',
+      status: 200,
+      data: responseData as ExecutionSuccessResponse,
+    };
+  }
+
+  const errorResponse = responseData as ExecutionErrorResponse;
+
+  // 422 Unprocessable Content: Recusa do roteamento (NO_ELIGIBLE_ROUTE ou INSUFFICIENT_ECONOMIC_INFORMATION)
+  if (response.status === 422) {
+    return {
+      kind: 'refusal',
+      status: 422,
+      error: errorResponse,
+    };
+  }
+
+  // 400 Bad Request / 415 Unsupported Media Type: Erro de validação da solicitação
+  if (response.status === 400 || response.status === 415) {
+    return {
+      kind: 'client_error',
+      status: response.status,
+      error: errorResponse,
+    };
+  }
+
+  // 502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout: Falha no acionamento do provedor pós-seleção
+  if (
+    response.status === 502 ||
+    response.status === 503 ||
+    response.status === 504
+  ) {
+    return {
+      kind: 'execution_error',
+      status: response.status,
+      error: errorResponse,
+    };
+  }
+
+  // 500 Internal Server Error (INVALID_CONFIGURATION ou INVALID_DECISION)
+  if (response.status === 500) {
+    return {
+      kind: 'server_error',
+      status: 500,
+      error: errorResponse,
+    };
+  }
+
+  // Qualquer outro status HTTP inesperado fora do contrato público v1
+  return {
+    kind: 'protocol_error',
+    status: response.status,
+    error: {
+      code: 'UNEXPECTED_HTTP_STATUS',
+      message: `O servidor retornou status HTTP inesperado: ${response.status}.`,
+    },
+  };
+}
+
+/**
+ * Envia uma solicitação síncrona de execução à API pública v1 (docs/05-API.md).
+ *
+ * Comunica-se exclusivamente com POST /v1/executions sem interpretar cabeçalhos ou trilhas.
+ */
+export async function executeTask(
+  request: ExecutionRequest
+): Promise<ExecutionApiResponse> {
+  const bodyPayload = buildExecutionBody(request);
+
+  try {
+    const response = await fetch(API_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(bodyPayload),
+    });
+
+    return await mapExecutionResponse(response);
   } catch (_err: unknown) {
-    // Falha de rede ou servidor FastAPI inacessível
+    return {
+      kind: 'network_error',
+      status: 0,
+      message:
+        'Não foi possível estabelecer conexão com o Maestro Router em http://127.0.0.1:8000.',
+      details:
+        'Certifique-se de que o backend FastAPI esteja em execução. Exemplo: "python -m uvicorn --app-dir src maestro_router.control_center:app".',
+    };
+  }
+}
+
+/**
+ * Envia uma solicitação de execução operacional governada pela trilha selecionada no Control Center.
+ *
+ * Aciona o endpoint administrativo local POST /admin/executions (ADR 0012) com autenticação CSRF.
+ */
+export async function executeAdminTask(
+  request: ExecutionRequest,
+  track: TrackType
+): Promise<ExecutionApiResponse> {
+  const bodyPayload = buildExecutionBody(request);
+  const token = await getAdminCsrfToken();
+
+  try {
+    const response = await fetch('/admin/executions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Maestro-CSRF-Token': token,
+      },
+      body: JSON.stringify({
+        ...bodyPayload,
+        track,
+      }),
+    });
+
+    return await mapExecutionResponse(response);
+  } catch (_err: unknown) {
     return {
       kind: 'network_error',
       status: 0,

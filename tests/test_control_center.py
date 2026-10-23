@@ -305,7 +305,7 @@ def test_route_toggle_and_crud(client: TestClient, clean_state: ControlCenterSta
 
 
 def test_preview_track_free_refusal_when_only_paid_routes(client: TestClient, clean_state: ControlCenterState) -> None:
-    """Track Free refuses when all routes have prices > 0."""
+    """Track Free recusa quando todas as rotas configuradas possuem tarifas > 0 ou preço ausente."""
     clean_state.set_credential("openai", "sk-active-key")
     preview_resp = client.post(
         "/admin/preview",
@@ -315,7 +315,9 @@ def test_preview_track_free_refusal_when_only_paid_routes(client: TestClient, cl
     data = preview_resp.json()
     assert data["track"] == "free"
     assert data["recommended_route"] is None
-    assert "comprovação estrita de custo zero" in data["explanation"]
+    # Bloqueador 1: terminologia honesta baseada em declaração do operador e aviso de faturamento
+    assert "gratuidade declarada pelo operador" in data["explanation"]
+    assert "não valida faturamento real" in data["explanation"]
 
 
 def test_preview_track_economica_recommends_route(client: TestClient, clean_state: ControlCenterState) -> None:
@@ -334,17 +336,28 @@ def test_preview_track_economica_recommends_route(client: TestClient, clean_stat
     assert len(data["factors"]) > 0
 
 
-def test_free_execution_without_preview_excludes_paid_routes(clean_state: ControlCenterState) -> None:
-    """Regressão 1: Execução na trilha Free sem consultar a prévia recusa rotas pagas.
+def test_public_executions_ignores_track_header(clean_state: ControlCenterState) -> None:
+    """Bloqueador 2 (Prova 1): POST /v1/executions ignora qualquer cabeçalho de trilha e preserva o contrato v1.
 
-    Mesmo que o cliente envie a requisição diretamente para POST /v1/executions com o cabeçalho
-    X-Maestro-Track: free e exista uma rota habilitada com adaptador ativo, se ela for paga
-    (como a rota padrão do GPT-4o-mini), a requisição deve ser recusada com 422 NO_ELIGIBLE_ROUTE
-    sem acionar o adaptador do provedor externo.
+    O endpoint público /v1/executions não possui conceito de trilhas. Se um cliente enviar
+    X-Maestro-Track: free em um ambiente onde apenas uma rota paga está habilitada com adaptador,
+    a requisição pública v1 executa normalmente a rota paga configurada com HTTP 200, comprovando
+    que o cabeçalho não altera a estratégia do endpoint público.
     """
     clean_state.set_credential("openai", "sk-active-test-key")
     mock_adapter = MagicMock()
-    mock_adapter.execute = AsyncMock()
+    mock_adapter.execute = AsyncMock(
+        return_value=TextExecutionResult(
+            content="Resposta gerada via contrato público v1.",
+            usage=NormalizedUsage(
+                status="available",
+                items=(
+                    NormalizedUsageItem(unit="input_token", quantity=10),
+                    NormalizedUsageItem(unit="output_token", quantity=5),
+                ),
+            ),
+        )
+    )
     clean_state.current_adapters["openai-responses"] = mock_adapter
 
     app = create_control_center_app(clean_state)
@@ -354,32 +367,107 @@ def test_free_execution_without_preview_excludes_paid_routes(clean_state: Contro
         "/v1/executions",
         headers={
             "Content-Type": "application/json",
-            "X-Maestro-Track": "free",
+            "X-Maestro-Track": "free",  # Deve ser estritamente ignorado por /v1/executions
         },
-        json={"task": "Gere um texto curto sem custo."},
+        json={"task": "Execução via contrato público padrão."},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["result"]["content"] == "Resposta gerada via contrato público v1."
+    assert data["decision"]["route"]["id"] == "route-openai-gpt4o-mini"
+    mock_adapter.execute.assert_called_once()
+
+
+def test_admin_executions_track_free_refuses_paid_routes(clean_state: ControlCenterState) -> None:
+    """Bloqueador 2 (Prova 2): Execução administrativa local na trilha Free recusa rotas pagas.
+
+    Quando acionada via POST /admin/executions com track='free' e o catálogo só contém rotas pagas,
+    a execução é recusada com 422 NO_ELIGIBLE_ROUTE sem acionar o adaptador do provedor externo.
+    """
+    clean_state.set_credential("openai", "sk-active-test-key")
+    mock_adapter = MagicMock()
+    mock_adapter.execute = AsyncMock()
+    clean_state.current_adapters["openai-responses"] = mock_adapter
+
+    app = create_control_center_app(clean_state)
+    local_client = TestClient(app, base_url="http://localhost:8000")
+
+    session_resp = local_client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    resp = local_client.post(
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={"task": "Gere um texto curto sem custo.", "track": "free"},
     )
 
     assert resp.status_code == 422
     data = resp.json()
     assert data["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+    assert "gratuidade declarada pelo operador" in data["error"]["message"]
     mock_adapter.execute.assert_not_called()
 
 
-def test_mixed_catalog_free_track_incompatible_free_and_paid_routes(clean_state: ControlCenterState) -> None:
-    """Regressão 2: Catálogo misto com rota gratuita incompatível e rota paga.
+def test_admin_executions_track_economica_succeeds(clean_state: ControlCenterState) -> None:
+    """Bloqueador 2 (Prova 3): Execução administrativa local na trilha Econômica funciona normalmente.
+
+    Quando acionada via POST /admin/executions com track='economica', o fluxo seleciona
+    a rota de menor custo estimado e conclui a execução com HTTP 200.
+    """
+    clean_state.set_credential("openai", "sk-active-test-key")
+    mock_adapter = MagicMock()
+    mock_adapter.execute = AsyncMock(
+        return_value=TextExecutionResult(
+            content="Resultado econômico do Control Center.",
+            usage=NormalizedUsage(
+                status="available",
+                items=(
+                    NormalizedUsageItem(unit="input_token", quantity=20),
+                    NormalizedUsageItem(unit="output_token", quantity=10),
+                ),
+            ),
+        )
+    )
+    clean_state.current_adapters["openai-responses"] = mock_adapter
+
+    app = create_control_center_app(clean_state)
+    local_client = TestClient(app, base_url="http://localhost:8000")
+
+    session_resp = local_client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    resp = local_client.post(
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={"task": "Resuma este documento na trilha econômica.", "track": "economica"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["result"]["content"] == "Resultado econômico do Control Center."
+    assert data["decision"]["route"]["id"] == "route-openai-gpt4o-mini"
+    mock_adapter.execute.assert_called_once()
+
+
+def test_mixed_catalog_admin_execution_free_track_incompatible_free_and_paid_routes(
+    clean_state: ControlCenterState,
+) -> None:
+    """Bloqueador 2: Catálogo misto no endpoint administrativo não realiza fallback para rota paga.
 
     Em um catálogo contendo:
-    - Rota A (gratuita comprovada, mas com capabilities=['text_generation'])
-    - Rota B (paga, com capabilities=['text_generation', 'code_analysis'])
+    - Rota A (gratuidade declarada pelo operador, mas apenas com capability 'text_generation')
+    - Rota B (paga, com capabilities 'text_generation' e 'code_analysis')
 
-    Quando uma requisição na trilha Free exige 'code_analysis':
-    - A rota gratuita é excluída por não atender às restrições da tarefa.
-    - A rota paga não pode ser utilizada como fallback silencioso na trilha Free.
-    - O resultado deve ser recusa (422 na execução e recommended_route=None na prévia).
+    Quando POST /admin/executions solicita 'code_analysis' na trilha Free:
+    - A rota gratuita declarada é excluída por não atender às restrições da tarefa.
+    - A rota paga permanece terminantemente excluída na trilha Free (sem fallback silencioso).
+    - O resultado deve ser 422 NO_ELIGIBLE_ROUTE sem acionar nenhum adaptador.
     """
     clean_state.set_credential("openai", "sk-active-test-key")
 
-    # Cadastra uma rota comprovadamente gratuita (preço zero e estimativa zero)
     free_route_payload = {
         "route_id": "route-free-model",
         "provider": "openai",
@@ -417,6 +505,9 @@ def test_mixed_catalog_free_track_incompatible_free_and_paid_routes(clean_state:
     app = create_control_center_app(clean_state)
     local_client = TestClient(app, base_url="http://localhost:8000")
 
+    session_resp = local_client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
     # 1. Verifica na prévia explicável
     preview_resp = local_client.post(
         "/admin/preview",
@@ -431,16 +522,15 @@ def test_mixed_catalog_free_track_incompatible_free_and_paid_routes(clean_state:
     assert preview_data["recommended_route"] is None
     assert "Rotas pagas permanecem estritamente excluídas na trilha Free" in preview_data["explanation"]
 
-    # 2. Verifica na execução direta com header X-Maestro-Track
+    # 2. Verifica na execução administrativa com track='free'
     exec_resp = local_client.post(
-        "/v1/executions",
-        headers={
-            "Content-Type": "application/json",
-            "X-Maestro-Track": "free",
-        },
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
         json={
             "task": "Analise o código de alta complexidade.",
             "constraints": {"required_capabilities": ["code_analysis"]},
+            "track": "free",
         },
     )
     assert exec_resp.status_code == 422
@@ -628,3 +718,80 @@ def test_invalid_admin_registration_does_not_mutate_state(client: TestClient, cl
     # Confirma que nenhuma mutação ocorreu no estado
     assert len(clean_state.routes_raw) == initial_routes_count
     assert [r["route_id"] for r in clean_state.routes_raw] == initial_route_ids
+
+
+def test_new_route_gpt4o_mini_does_not_inherit_price_reference(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Bloqueador 3: Nenhuma rota recém-criada herda preço ou estimativa sem dados explícitos.
+
+    Garante que cadastrar uma rota adicional para o modelo gpt-4o-mini sem informar
+    explicitamente price_reference nem estimated_usage resulte em rota com dados econômicos
+    nulos e estimativa indisponível (status 'unavailable'), sem auto-preenchimento indevido.
+    """
+    clean_state.set_credential("openai", "sk-active-test-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    create_resp = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-new-gpt4o-mini-no-price",
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "enabled": True,
+            "capabilities": ["text_generation"],
+        },
+    )
+    assert create_resp.status_code == 200
+
+    config_resp = client.get("/admin/config")
+    assert config_resp.status_code == 200
+    config_data = config_resp.json()
+    new_route = next(
+        r for r in config_data["routes"] if r["route_id"] == "route-new-gpt4o-mini-no-price"
+    )
+
+    # Dados econômicos devem permanecer nulos
+    assert new_route["price_reference"] is None
+    assert new_route["estimated_usage"] is None
+
+    # No catálogo em memória, a estimativa deve ser unavailable
+    snapshot_route = next(
+        r
+        for r in clean_state.current_catalog.snapshot()
+        if r.id == "route-new-gpt4o-mini-no-price"
+    )
+    assert snapshot_route.price_reference is None
+    assert snapshot_route.estimate is not None
+    assert snapshot_route.estimate.status == "unavailable"
+
+
+def test_free_track_terminology_operator_declared_and_disclaimer(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Bloqueador 1: Terminologia de gratuidade declarada pelo operador e aviso de faturamento.
+
+    A prévia explicável da trilha Free deve explicitar que a gratuidade é 'declarada pelo operador'
+    e alertar que o Maestro Router não valida nem confirma o faturamento real junto ao provedor.
+    Não devem ser usadas promessas enganosas como 'gratuidade comprovada' ou 'custo zero garantido'.
+    """
+    clean_state.set_credential("openai", "sk-active-key")
+    preview_resp = client.post(
+        "/admin/preview",
+        json={"task": "Verificação de conformidade terminológica.", "track": "free"},
+    )
+    assert preview_resp.status_code == 200
+    data = preview_resp.json()
+
+    # Confirma terminologia transparente
+    assert "gratuidade declarada pelo operador" in data["policy_description"].lower()
+    assert "gratuidade declarada pelo operador" in data["explanation"].lower()
+    assert "não valida faturamento real" in data["explanation"].lower()
+
+    # Assegura ausência de promessas não comprovadas
+    assert "gratuidade comprovada" not in data["explanation"].lower()
+    assert "sem custo garantido" not in data["explanation"].lower()
+    assert "custo zero garantido" not in data["explanation"].lower()

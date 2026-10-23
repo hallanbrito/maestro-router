@@ -144,7 +144,7 @@ export const LearnView: React.FC<LearnViewProps> = ({
           <div style={{ borderLeft: '3px solid var(--color-danger)', paddingLeft: '1rem' }}>
             <h4 style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)' }}>Trilha</h4>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0.25rem 0' }}>
-              A política de decisão orientada ao usuário: <strong>Free</strong> (somente gratuidade comprovada),
+              A política de decisão orientada ao usuário: <strong>Free</strong> (somente tarifas zero declaradas pelo operador; não confirma faturamento na conta do provedor),
               <strong> Econômica</strong> (menor custo estimado entre rotas comparáveis) ou <strong>Inteligente</strong> (aplica critérios de qualidade e requisitos explicitamente informados com evidências auditáveis, sem inferência de scores ou rankings universais).
             </p>
           </div>

@@ -190,4 +190,39 @@ describe('ProvidersView component', () => {
       expect(toggleSpy).toHaveBeenCalledWith('route-test-toggle');
     });
   });
+
+  it('exibe aviso no modal informando que novas rotas não possuem dados econômicos preenchidos automaticamente', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: ['gpt-4o-mini'],
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    expect(
+      screen.getByText(/Novas rotas cadastradas \(incluindo gpt-4o-mini\) não possuem tarifas nem previsão de tokens pré-preenchidas automaticamente/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Dados econômicos ausentes permanecem explicitamente indisponíveis até que sejam configurados pelo operador\./i)
+    ).toBeInTheDocument();
+  });
 });

@@ -26,7 +26,7 @@ describe('ExecutionView component', () => {
   });
 
   it('permite preenchimento de task, context e required_quality_criteria preservando valores', async () => {
-    const mockExecute = vi.spyOn(apiService, 'executeTask').mockResolvedValueOnce({
+    const mockExecute = vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
       kind: 'success',
       status: 200,
       data: {
@@ -113,7 +113,7 @@ describe('ExecutionView component', () => {
   });
 
   it('exibe RefusalCard com orientações quando a API retorna NO_ELIGIBLE_ROUTE (422)', async () => {
-    vi.spyOn(apiService, 'executeTask').mockResolvedValueOnce({
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
       kind: 'refusal',
       status: 422,
       error: {
@@ -182,5 +182,64 @@ describe('ExecutionView component', () => {
     } finally {
       window.history.pushState({}, '', '/');
     }
+  });
+
+  it('exibe aviso e terminologia de gratuidade declarada pelo operador ao selecionar a trilha Free', async () => {
+    const mockExecute = vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'success',
+      status: 200,
+      data: {
+        result: { content: 'Executado com rota gratuita' },
+        decision: {
+          outcome: 'selected',
+          route: { id: 'route-free', provider: 'openai', model: 'mock-free' },
+          strategy: { id: 'lowest-estimated-cost', applied: true },
+          applied_constraints: [],
+          reason: 'Rota gratuita selecionada.',
+          factors: [],
+        },
+        economics: {
+          estimate: { status: 'available', amount: '0.000000', currency: 'USD', price_reference: 'free', assumptions: [] },
+          usage: { status: 'available', items: [] },
+          calculated_cost: { status: 'available', amount: '0.000000', currency: 'USD', price_reference: 'free', assumptions: [] },
+        },
+      },
+    });
+
+    render(<ExecutionView />);
+
+    // Verifica que a descrição inicial da trilha Free usa a nova terminologia honesta
+    expect(
+      screen.getByText(/Somente candidatos com tarifas zero declaradas pelo operador\./i)
+    ).toBeInTheDocument();
+
+    // Seleciona a trilha Free
+    const freeCard = screen.getByText('Free').closest('div')!;
+    fireEvent.click(freeCard);
+
+    // O aviso explícito sobre faturamento deve surgir
+    expect(
+      screen.getByTestId('free-track-disclaimer')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Aviso sobre a Trilha Free \(Gratuidade declarada pelo operador\):/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Ela não confirma se a sua conta ou cota no provedor realmente possuem isenção de faturamento/i)
+    ).toBeInTheDocument();
+
+    // Digita tarefa e executa na trilha Free
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa sob trilha Free' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(mockExecute).toHaveBeenCalledWith(
+        expect.objectContaining({ task: 'Tarefa sob trilha Free' }),
+        'free'
+      );
+    });
   });
 });

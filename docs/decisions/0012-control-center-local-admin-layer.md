@@ -1,7 +1,7 @@
 # 0012. Camada administrativa local e experiência de primeiro uso do Control Center
 
-- **Status:** Proposta em validação técnica (Draft PR #27)
-- **Data:** 2026-10-22
+- **Status:** Proposta em revisão após auditoria de conformidade (Draft PR #27)
+- **Data:** 2026-10-23
 - **Autor:** Maestro Router Team
 - **Decisores:** PO Hallan (em revisão de homologação)
 
@@ -19,7 +19,7 @@ Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26)
 
 1. **Camada Administrativa Local e Opcional (`/admin/*`):**
    - Cria-se uma composição operacional dedicada ao Control Center (`src/maestro_router/control_center.py`), separada da aplicação neutra estrita de produção (`src/maestro_router/api.py`).
-   - A aplicação neutra de produção permanece inalterada e fiel a `docs/05-API.md`, expondo unicamente `POST /v1/executions`.
+   - A aplicação pública v1 permanece inalterada, estritamente neutra e fiel a `docs/05-API.md`. O endpoint público `POST /v1/executions` não aceita nem interpreta seleção de trilha ou estratégia via cabeçalhos (como `X-Maestro-Track`) ou payloads.
    - O Control Center monta `POST /v1/executions` utilizando os mesmos componentes de domínio e regras de elegibilidade do Maestro, complementado pelos endpoints administrativos locais protegidos.
    - Percurso inicial sem chave cadastrada: quando nenhuma chave de API estiver presente na memória volátil, rotas que dependem de adaptador externo são marcadas operacionalmente como desabilitadas na composição. Isso assegura que requisições iniciais a `POST /v1/executions` resultem rigorosamente na recusa normativa HTTP 422 `NO_ELIGIBLE_ROUTE` (informando que a rota está desabilitada por ausência de credencial), eliminando qualquer risco de erro interno HTTP 500 `INVALID_CONFIGURATION`.
 
@@ -42,12 +42,13 @@ Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26)
    - O Control Center mantém um catálogo reconfigurável em memória. Alterações em rotas ou credenciais realizam uma troca atômica do snapshot do `RouteCatalog` e do registro de adaptadores.
    - Execuções em andamento capturam o snapshot no instante do recebimento da requisição, garantindo que mutações na configuração administrativa não interfiram em tarefas em processamento.
    - **Validação Integral Prévia:** Todos os dados recebidos em `POST /admin/routes` são rigorosamente validados antes de qualquer mutação de estado. Tipos incompatíveis (ex.: booleanos enviados como string), provedores sem adaptador implementado e critérios de qualidade desacompanhados de referências de evidências auditáveis fornecidas pelo operador resultam em rejeição imediata (HTTP 400), preservando o estado anterior integralmente intacto.
-   - **Ausência de Preenchimento Automático Indevido:** Referências de preços e perfis de uso documentados do GPT-4o-mini aplicam-se estritamente à sua rota padrão inicial. Cadastros de novos modelos exigem dados econômicos explícitos; na sua ausência, as informações tarifárias e estimativas permanecem explicitamente marcadas como indisponíveis, vedando qualquer confirmação não atestada de aplicabilidade ou identidade tarifária.
+   - **Ausência de Preenchimento Automático Indevido:** A referência oficial auditada documentada (ADR 0008) pertence exclusivamente à rota pré-configurada inicial de `gpt-4o-mini`. Novas rotas cadastradas pelo operador (incluindo rotas adicionais com modelo `gpt-4o-mini` ou outros modelos) não herdam nem preenchem automaticamente tarifas ou estimativas de uso. Na ausência de dados fornecidos pelo operador, as informações tarifárias e estimativas permanecem explicitamente marcadas como indisponíveis, vedando qualquer confirmação não atestada de aplicabilidade ou identidade tarifária.
 
-5. **Trilhas de Roteamento (Free, Econômica e Inteligente):**
-   - **Free:** Restringe os candidatos estritamente a rotas cujo custo seja comprovadamente zero por tarifas unitárias nulas e estimativa prévia calculada em zero monetário. Rotas pagas, com estimativas indisponíveis ou custos desconhecidos permanecem terminantemente excluídas. Na execução direta via `POST /v1/executions`, a restrição é propagada através do cabeçalho `X-Maestro-Track: free` capturado por ContextVar em middleware HTTP, reduzindo a allowlist operacional (`allowed_route_ids`) às rotas comprovadamente gratuitas sem violar a gramática fechada do corpo JSON da API pública v1. Se não houver rotas gratuitas compatíveis com a tarefa, a requisição é recusada (HTTP 422 `NO_ELIGIBLE_ROUTE`), impedindo qualquer execução de rota tarifada.
-   - **Econômica:** Aplica a estratégia canônica `lowest-estimated-cost` do Maestro entre rotas elegíveis com dados comparáveis de estimativa prévia calculada.
-   - **Inteligente:** Utiliza estritamente os requisitos explícitos da tarefa (capacidades exigidas e critérios de qualidade aceitos) associados a referências de evidências documentadas informadas pelo operador. Não infere pontuações, rankings universais ou notas de inteligência; aplica a elegibilidade técnica aos critérios declarados e, entre as rotas conformes, adota o menor custo estimado.
+5. **Trilhas de Roteamento e Execução Administrativa (`POST /admin/executions`):**
+   - O Control Center disponibiliza a execução governada por trilhas operacionais através de um endpoint administrativo local dedicado: `POST /admin/executions`. Este endpoint requer proteção de sessão/CSRF e reutiliza integralmente o motor neutro de roteamento (`route_request`) e despacho (`_execute_selection`), sem alterar a API pública v1:
+     - **Free (Gratuidade declarada pelo operador):** Restringe os candidatos estritamente a rotas cujo custo seja declarado em zero pelo operador (tarifas unitárias declaradas em zero e estimativa prévia calculada em zero). Rotas pagas, com estimativas indisponíveis ou custos desconhecidos permanecem terminantemente excluídas. O Maestro alerta explicitamente que essa trilha baseia-se em declaração local e não confirma condições reais de faturamento ou limites de cota da conta do operador junto ao provedor externo. Se não houver rotas gratuitas compatíveis com a tarefa, a requisição é recusada (HTTP 422 `NO_ELIGIBLE_ROUTE`), impedindo qualquer execução tarifada.
+     - **Econômica:** Aplica a estratégia canônica `lowest-estimated-cost` do Maestro entre rotas elegíveis com dados comparáveis de estimativa prévia calculada.
+     - **Inteligente:** Utiliza estritamente os requisitos explícitos da tarefa (capacidades exigidas e critérios de qualidade aceitos) associados a referências de evidências documentadas informadas pelo operador. Não infere pontuações, rankings universais ou notas de inteligência; aplica a elegibilidade técnica aos critérios declarados e, entre as rotas conformes, adota o menor custo estimado.
 
 6. **Sugestões Explicáveis (Prévia de Roteamento):**
    - Endpoint `POST /admin/preview` executa a decisão de elegibilidade e ranqueamento sobre o catálogo ativo sem acionar o provedor externo, com custo zero de tokens.
@@ -62,8 +63,9 @@ Durante os primeiros testes do Maestro Control Center (commit `8087742`, PR #26)
 - **Positivas:**
   - Engenheiros de software podem compreender, configurar e testar o Maestro Router pelo navegador de ponta a ponta sem recorrer ao terminal ou arquivos de ambiente.
   - Segurança defensiva rigorosa preservada: credenciais efêmeras em memória, CSRF dinâmico, verificação sem custos e ausência de vazamentos.
-  - Compatibilidade integral com os contratos normativos existentes (`docs/05-API.md`), mantendo o motor e a API pública inviolados.
-  - Isolamento estrito da trilha Free tanto na prévia quanto na execução, bloqueando chamadas pagas inadvertidas.
+  - Preservação estrita e inviolável do contrato público v1 (`POST /v1/executions` permanece neutro e agnóstico a trilhas).
+  - Execução administrativa orientada a trilhas via `POST /admin/executions`, garantindo isolamento da trilha Free sem risco de fallback para rotas pagas.
+  - Comunicação transparente sobre "gratuidade declarada pelo operador", sem falsas promessas de faturamento zero no provedor.
   - Validação atômica e proteção de integridade do estado em mutações administrativas.
 - **Limitações Registradas:**
   - Chaves de API cadastradas pela interface não persistem após o encerramento do processo do servidor (requerem novo cadastro ao reiniciar).

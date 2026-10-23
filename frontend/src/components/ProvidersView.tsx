@@ -689,9 +689,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                   Referência Econômica e Previsão de Uso
                 </span>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
-                  {(customModel.trim() || routeModel) === 'gpt-4o-mini'
-                    ? 'O modelo gpt-4o-mini utilizará a referência oficial auditada documentada (ADR 0008) com estimativas prévias no motor.'
-                    : 'Outros modelos iniciam sem tarifas ou estimativas pré-preenchidas. Dados econômicos ausentes permanecem explicitamente indisponíveis até configuração explícita.'}
+                  Novas rotas cadastradas (incluindo gpt-4o-mini) não possuem tarifas nem previsão de tokens pré-preenchidas automaticamente. Dados econômicos ausentes permanecem explicitamente indisponíveis até que sejam configurados pelo operador.
                 </p>
               </div>
 

@@ -1,4 +1,9 @@
-"""OpenAI Responses API implementation of the neutral execution boundary."""
+"""Implementação da OpenAI Responses API para a fronteira neutra de execução.
+
+Este módulo é o tradutor entre o contrato interno do Maestro e o SDK da OpenAI.
+Ele não escolhe rotas nem calcula preços: apenas executa a rota já autorizada e
+normaliza o resultado para que o restante do núcleo não dependa do provedor.
+"""
 
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ _MISSING = object()
 
 
 class OpenAIResponsesAdapter:
-    """Translate the neutral execution contract to the OpenAI Responses API."""
+    """Traduz o contrato neutro de execução para a OpenAI Responses API."""
 
     def __init__(
         self,
@@ -42,10 +47,11 @@ class OpenAIResponsesAdapter:
         *,
         retry_policy_configured: bool = False,
     ) -> None:
-        """Store an explicitly constructed asynchronous OpenAI client."""
+        """Armazena um cliente assíncrono da OpenAI construído explicitamente."""
 
-        # Freeze the retry policy once when the adapter joins the application
-        # snapshot. Rebuilding SDK options per request could re-read process state.
+        # Congela a política de repetição quando o adaptador entra no snapshot da
+        # aplicação. Recriar opções do SDK a cada requisição poderia reler o estado
+        # do processo e produzir um comportamento diferente durante a execução.
         self._client = (
             client
             if retry_policy_configured
@@ -55,16 +61,17 @@ class OpenAIResponsesAdapter:
     async def execute(
         self, request: TextExecutionRequest, route: ExecutionRoute
     ) -> TextExecutionResult:
-        """Execute the selected model and translate failures to neutral errors.
+        """Executa o modelo selecionado e converte falhas em erros neutros.
 
-        The adapter does not select routes, infer prices, or expose provider
-        payloads.  It sends one non-streaming Responses API request and returns
-        only validated text and normalized usage.
+        O adaptador não seleciona rotas, não deduz preços e não expõe o payload
+        bruto do provedor. Ele envia uma única requisição sem streaming e devolve
+        somente texto validado e uso normalizado.
         """
 
         try:
-            # SDK retries are disabled (max_retries=0) when the adapter is initialized
-            # to guarantee that the core's single execution authorization is respected.
+            # As repetições automáticas do SDK são desativadas (max_retries=0) na
+            # inicialização. Assim, uma autorização de execução do núcleo gera no
+            # máximo uma chamada externa, preservando o contrato do Maestro.
             response = await self._client.responses.create(
                 model=route.model,
                 input=_response_input(request),
@@ -83,15 +90,15 @@ class OpenAIResponsesAdapter:
         except OpenAIError as error:
             raise ExecutionFailedError(_FAILED_MESSAGE) from error
         except Exception as error:
-            # Unexpected SDK shapes must cross the boundary as the same
-            # sanitized provider-neutral failure, never as raw provider data.
+            # Formatos inesperados do SDK atravessam a fronteira como a mesma
+            # falha sanitizada e neutra, nunca como dados brutos do provedor.
             raise ExecutionFailedError(_FAILED_MESSAGE) from error
 
         return _normalize_response(response)
 
 
 def _response_input(request: TextExecutionRequest) -> list[dict[str, object]]:
-    """Build the narrow Responses API input supported by the MVP."""
+    """Monta a entrada mínima da Responses API aceita pelo MVP."""
 
     content = [{"type": "input_text", "text": request.task}]
     if request.context is not None:
@@ -100,7 +107,7 @@ def _response_input(request: TextExecutionRequest) -> list[dict[str, object]]:
 
 
 def _normalize_response(response: object) -> TextExecutionResult:
-    """Validate a completed text response and project it into the core model."""
+    """Valida uma resposta textual concluída e a projeta no modelo do núcleo."""
 
     try:
         if getattr(response, "status", None) != "completed":
@@ -125,11 +132,11 @@ def _normalize_response(response: object) -> TextExecutionResult:
 
 
 def _normalize_usage(response: object) -> NormalizedUsage:
-    """Map supported OpenAI token counters to provider-neutral usage units.
+    """Converte contadores de tokens da OpenAI em unidades neutras de uso.
 
-    Complete input and output counts become ``available`` usage.  One valid
-    count becomes ``uncertain`` usage, while absent or malformed counts become
-    ``unavailable`` rather than being guessed.
+    Contagens completas de entrada e saída produzem uso ``available``. Apenas
+    uma contagem válida produz uso ``uncertain``. Dados ausentes ou malformados
+    produzem ``unavailable`` em vez de o Maestro inventar uma quantidade.
     """
 
     usage = _read_attribute(response, "usage")
@@ -164,11 +171,11 @@ def _normalize_usage(response: object) -> NormalizedUsage:
 
 
 def _normalize_observed_model(response: object) -> str | None:
-    """Extract and validate the model identifier reported by the provider.
+    """Extrai e valida o identificador de modelo informado pelo provedor.
 
-    Returns the model string if it is non-blank and free of isolated Unicode
-    surrogates; otherwise returns None so post-execution validation rejects
-    unverifiable model identities.
+    Retorna o identificador quando ele não está em branco e não contém
+    ``surrogates`` Unicode isolados. Caso contrário, retorna ``None`` para que a
+    validação pós-execução rejeite uma identidade de modelo não verificável.
     """
     model = _read_attribute(response, "model")
     if (
@@ -181,7 +188,7 @@ def _normalize_observed_model(response: object) -> str | None:
 
 
 def _read_attribute(value: object, name: str) -> object:
-    """Read an SDK attribute without letting hostile accessors escape."""
+    """Lê um atributo do SDK sem permitir que acessores hostis escapem."""
 
     try:
         return getattr(value, name)
@@ -190,7 +197,7 @@ def _read_attribute(value: object, name: str) -> object:
 
 
 def _has_valid_text_output(output: list[object]) -> bool:
-    """Confirm that the provider output contains structurally valid text."""
+    """Confirma que a saída do provedor contém texto estruturalmente válido."""
 
     found_text = False
     for item in output:

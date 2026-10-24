@@ -1,4 +1,4 @@
-"""Concrete provider adapters."""
+"""Adaptadores concretos dos provedores externos suportados."""
 
 from .openai import OpenAIResponsesAdapter
 

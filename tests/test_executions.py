@@ -891,7 +891,7 @@ def test_fastapi_does_not_publish_auxiliary_endpoints() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ADR 0009: Operational Routing Constraints Execution & Decision Tests
+# ADR 0009: testes de execução e decisão com restrições operacionais de roteamento
 # ---------------------------------------------------------------------------
 
 def client_with_catalog(

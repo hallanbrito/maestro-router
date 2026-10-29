@@ -419,4 +419,30 @@ describe('executeTask service', () => {
       expect(result.details).toContain('python -m uvicorn');
     }
   });
+
+  it('preserva estritamente o contrato da API pública v1 sem enviar cabeçalho de trilha X-Maestro-Track', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      status: 200,
+      json: async () => ({
+        result: { content: 'ok' },
+        decision: { outcome: 'selected', route: { id: 'r1' } },
+      }),
+    } as unknown as Response);
+
+    await executeTask({
+      task: 'Tarefa neutra',
+      context: 'Contexto neutro',
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchSpy.mock.calls[0];
+    expect(url).toBe('/v1/executions');
+    expect(options?.headers).toEqual({
+      'Content-Type': 'application/json',
+    });
+    // Garante que X-Maestro-Track não existe
+    expect((options?.headers as Record<string, string>)?.['X-Maestro-Track']).toBeUndefined();
+    const body = JSON.parse(options?.body as string);
+    expect(body.track).toBeUndefined();
+  });
 });

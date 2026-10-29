@@ -1,16 +1,34 @@
 import React from 'react';
-import { ArrowRight, ShieldAlert, Terminal } from 'lucide-react';
+import { ArrowRight, ShieldAlert, Terminal, Layers, HelpCircle } from 'lucide-react';
 import { ExecutionErrorResponse } from '../types';
 import { DecisionCard } from './DecisionCard';
 
 interface RefusalCardProps {
   errorResponse: ExecutionErrorResponse;
+  onNavigateToProviders?: () => void;
+  onNavigateToLearn?: () => void;
 }
 
-export const RefusalCard: React.FC<RefusalCardProps> = ({ errorResponse }) => {
+export const RefusalCard: React.FC<RefusalCardProps> = ({
+  errorResponse,
+  onNavigateToProviders,
+  onNavigateToLearn,
+}) => {
   const { error, decision } = errorResponse;
   const isNoEligibleRoute = error.code === 'NO_ELIGIBLE_ROUTE';
   const isInsufficientEconomics = error.code === 'INSUFFICIENT_ECONOMIC_INFORMATION';
+
+  // Confirmed human-readable explanation
+  let headlineMessage = 'O Maestro Router avaliou a solicitação e recusou o encaminhamento antes de acionar qualquer modelo externo.';
+  if (isNoEligibleRoute) {
+    if (decision?.factors?.some((f) => f.description.includes('catálogo') || f.description.includes('0 rotas'))) {
+      headlineMessage = 'Falta configurar uma rota de IA. O servidor respondeu, mas não há rotas configuradas para executar sua tarefa.';
+    } else {
+      headlineMessage = 'Nenhuma rota atendeu aos requisitos exigidos pela tarefa (capacidades, critérios ou rotas permitidas).';
+    }
+  } else if (isInsufficientEconomics) {
+    headlineMessage = 'Informações econômicas insuficientes para comparação de custos. As rotas candidatas necessitam de tabelas de preços auditáveis.';
+  }
 
   return (
     <div style={{ marginTop: '1.5rem' }}>
@@ -30,8 +48,8 @@ export const RefusalCard: React.FC<RefusalCardProps> = ({ errorResponse }) => {
         </div>
 
         <p className="alert-message">
-          {error.message ||
-            'O Maestro Router avaliou a solicitação e recusou o encaminhamento antes de acionar qualquer modelo externo.'}
+          <strong>{headlineMessage}</strong>
+          {error.message && error.message !== headlineMessage && ` ${error.message}`}
         </p>
 
         {/* Recomendações e Próximos Passos */}
@@ -41,56 +59,59 @@ export const RefusalCard: React.FC<RefusalCardProps> = ({ errorResponse }) => {
             Próximas Ações Recomendadas
           </h4>
 
-          {isNoEligibleRoute && (
-            <div className="recommendation-text">
-              <p style={{ marginBottom: '0.5rem' }}>
-                O Maestro Router opera com <strong>neutralidade estrita</strong>. Esta recusa ocorre normalmente por um dos seguintes motivos:
-              </p>
-              <ul style={{ paddingLeft: '1.25rem', marginBottom: '0.75rem', lineHeight: 1.6 }}>
-                <li>
-                  <strong>Aplicativo Neutro Padrão:</strong> Se você iniciou com{' '}
-                  <code style={{ color: 'var(--color-primary)' }}>maestro_router.api:app</code>,
-                  o catálogo em memória é deliberadamente vazio (0 rotas), comprovando que o roteador não inventa rotas.
-                </li>
-                <li>
-                  <strong>Restrições Estritas:</strong> Verifique se capacidades exigidas (
-                  <code>required_capabilities</code>), critérios de qualidade ou teto de custo (
-                  <code>max_estimated_cost</code>) eliminaram as rotas existentes.
-                </li>
-              </ul>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.5rem', marginBottom: '1rem' }}>
+            {onNavigateToProviders && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={onNavigateToProviders}
+                style={{ fontSize: '0.85rem', padding: '0.4rem 0.8rem' }}
+              >
+                <Layers size={15} />
+                Configurar Provedores & Rotas
+              </button>
+            )}
 
-              <div style={{ marginTop: '0.75rem' }}>
-                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
-                  <Terminal size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-                  Para rodar com rotas operacionais configuradas:
-                </span>
-                <pre className="code-snippet">
-python -m uvicorn --factory --app-dir src maestro_router.bootstrap:create_openai_app_from_env
-                </pre>
-              </div>
-            </div>
-          )}
+            {onNavigateToLearn && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onNavigateToLearn}
+                style={{ fontSize: '0.85rem', padding: '0.4rem 0.8rem' }}
+              >
+                <HelpCircle size={15} />
+                Entender Regras de Elegibilidade
+              </button>
+            )}
+          </div>
 
-          {isInsufficientEconomics && (
-            <div className="recommendation-text">
-              <p>
-                Havia rotas candidatas, mas a estratégia selecionada exige avaliação de custos e nenhuma rota possuía referência de preço ou método de estimativa comparável.
+          <details style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--text-primary)' }}>
+              Ver detalhes técnicos e linha de comando
+            </summary>
+            <div style={{ marginTop: '0.5rem' }}>
+              <p style={{ margin: '0 0 0.5rem 0' }}>
+                Código do erro normativo: <code>{error.code}</code> (HTTP 422 Unprocessable Content).
               </p>
-              <p style={{ marginTop: '0.5rem' }}>
-                <strong>Ação:</strong> Forneça uma tabela de referência de preços auditável através de{' '}
-                <code>MAESTRO_OPENAI_PRICE_REFERENCE_JSON</code> ou nas rotas em{' '}
-                <code>MAESTRO_OPENAI_ROUTES_JSON</code>.
-              </p>
+              {isNoEligibleRoute && (
+                <ul style={{ paddingLeft: '1.25rem', marginBottom: '0.5rem', lineHeight: 1.6 }}>
+                  <li>
+                    <strong>Catálogo em Memória:</strong> Se nenhuma rota estiver habilitada com credencial válida, o roteador recusa de forma defensiva para evitar cobranças não autorizadas.
+                  </li>
+                  <li>
+                    <strong>Restrições Aplicadas:</strong> Caso tenha informado capacidades ou allowlist, certifique-se de que correspondem às rotas configuradas.
+                  </li>
+                </ul>
+              )}
+              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+                <Terminal size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
+                Inicialização via terminal (modo operacional):
+              </span>
+              <pre className="code-snippet">
+python -m uvicorn --app-dir src maestro_router.control_center:app --port 8000
+              </pre>
             </div>
-          )}
-
-          {!isNoEligibleRoute && !isInsufficientEconomics && (
-            <div className="recommendation-text">
-              <p>
-                Verifique os parâmetros enviados na solicitação e o estado das rotas no ambiente de execução.
-              </p>
-            </div>
-          )}
+          </details>
         </div>
       </div>
 

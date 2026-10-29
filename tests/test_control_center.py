@@ -858,3 +858,208 @@ def test_invalid_constraints_returns_standard_error_envelope(client: TestClient,
     assert data["error"]["code"] == "INVALID_REQUEST"
     assert "issues" in data["error"]
     assert any("amount" in str(issue) for issue in data["error"]["issues"])
+
+
+def test_route_editing_preserves_unmodified_evidence_and_economics(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Edição parcial de rota (ex: apenas capacidades) preserva integralmente evidências de qualidade e dados econômicos (B2)."""
+    clean_state.set_credential("openai", "sk-active-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    # 1. Cria uma rota completa com critérios de qualidade contendo evidências reais e dados econômicos
+    create_payload = {
+        "route_id": "route-audit-preserved",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "enabled": True,
+        "capabilities": ["text"],
+        "quality_criteria": [
+            {
+                "criterion": "strict_instruction_following",
+                "evidence_references": ["auditoria-interna-2026-q3", "benchmark-eval-42"],
+            }
+        ],
+        "price_reference": INITIAL_GPT4O_MINI_PRICE_REFERENCE,
+        "estimated_usage": INITIAL_GPT4O_MINI_ESTIMATED_USAGE,
+    }
+    create_res = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json=create_payload,
+    )
+    assert create_res.status_code == 200
+
+    # Verifica que get_safe_config retorna os critérios com suas evidências intactas (sem achatamento)
+    cfg_res = client.get("/admin/config")
+    assert cfg_res.status_code == 200
+    route_cfg = next(r for r in cfg_res.json()["routes"] if r["route_id"] == "route-audit-preserved")
+    assert len(route_cfg["quality_criteria"]) == 1
+    qc = route_cfg["quality_criteria"][0]
+    assert qc["criterion"] == "strict_instruction_following"
+    assert qc["evidence_references"] == ["auditoria-interna-2026-q3", "benchmark-eval-42"]
+
+    # 2. Agora o operador edita APENAS as capacidades, omitindo quality_criteria, price_reference e estimated_usage
+    update_res = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={
+            "route_id": "route-audit-preserved",
+            "capabilities": ["text", "code", "summarization"],
+        },
+    )
+    assert update_res.status_code == 200
+    updated_route = update_res.json()["route"]
+
+    # Capacidades foram atualizadas
+    assert updated_route["capabilities"] == ["text", "code", "summarization"]
+    # Qualidade e evidências foram integralmente preservadas (B2)
+    assert len(updated_route["quality_criteria"]) == 1
+    assert updated_route["quality_criteria"][0]["criterion"] == "strict_instruction_following"
+    assert updated_route["quality_criteria"][0]["evidence_references"] == [
+        "auditoria-interna-2026-q3",
+        "benchmark-eval-42",
+    ]
+    # Dados econômicos originais foram integralmente preservados (B2)
+    assert updated_route["price_reference"] is not None
+    assert updated_route["price_reference"]["id"] == INITIAL_GPT4O_MINI_PRICE_REFERENCE["id"]
+    assert updated_route["estimated_usage"] is not None
+    assert (
+        updated_route["estimated_usage"]["input_token"]
+        == INITIAL_GPT4O_MINI_ESTIMATED_USAGE["input_token"]
+    )
+
+
+def test_credential_verification_superseded_race_condition(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Verificação assíncrona atrasada não altera o status de uma credencial modificada ou removida concorrentemente (B3)."""
+    clean_state.set_credential("openai", "sk-initial-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    async def delayed_models_list(*args, **kwargs):
+        # Simula que o operador removeu a credencial enquanto a chamada remota estava em trânsito
+        clean_state.remove_credential("openai")
+        mock_response = MagicMock()
+        mock_item = MagicMock()
+        mock_item.id = "gpt-4o-mini"
+        mock_response.data = [mock_item]
+        return mock_response
+
+    with patch("maestro_router.control_center.AsyncOpenAI") as mock_openai_cls:
+        mock_instance = MagicMock()
+        mock_instance.models.list = AsyncMock(side_effect=delayed_models_list)
+        mock_openai_cls.return_value = mock_instance
+
+        resp = client.post(
+            "/admin/credentials/verify",
+            headers={"X-Maestro-CSRF-Token": csrf_token},
+            cookies=session_resp.cookies,
+        )
+        # O backend detecta que a credencial foi alterada/removida durante a verificação e rejeita com 409
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["error"]["code"] == "CREDENTIAL_SUPERSEDED"
+
+    # Confirma que a credencial removida NÃO foi marcada como verified
+    assert clean_state.credentials["openai"]["api_key"] is None
+    assert clean_state.credentials["openai"]["status"] == "not_registered"
+
+
+def test_security_remote_client_blocked(clean_state: ControlCenterState) -> None:
+    """Clientes com IP remoto (fora do loopback local) são terminantemente bloqueados com HTTP 403 (B4)."""
+    app = create_control_center_app(clean_state)
+    # Simula cliente vindo de IP externo de rede
+    remote_client = TestClient(app, base_url="http://192.168.1.100:8000", client=("192.168.1.50", 42100))
+
+    # Tentativa de obter sessão a partir de cliente remoto
+    resp = remote_client.get("/admin/session")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "FORBIDDEN"
+    assert "Acesso administrativo restrito a conexões locais" in resp.json()["error"]["message"]
+
+    # Tentativa de mutação a partir de cliente remoto
+    resp_mut = remote_client.post(
+        "/admin/credentials",
+        json={"provider": "openai", "api_key": "sk-remote-test"},
+    )
+    assert resp_mut.status_code == 403
+    assert resp_mut.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_security_unauthorized_origin_and_referer(client: TestClient, clean_state: ControlCenterState) -> None:
+    """Solicitações com Origin ou Referer apontando para domínios externos não autorizados são bloqueadas (B4)."""
+    clean_state.set_credential("openai", "sk-active-key")
+
+    # 1. Origin maliciosa em /admin/session
+    res_session = client.get("/admin/session", headers={"Origin": "https://malicious-site.example.com"})
+    assert res_session.status_code == 403
+    assert res_session.json()["error"]["code"] == "FORBIDDEN"
+
+    # 2. Referer malicioso em /admin/session
+    res_ref = client.get("/admin/session", headers={"Referer": "https://attacker.org/phishing"})
+    assert res_ref.status_code == 403
+    assert res_ref.json()["error"]["code"] == "FORBIDDEN"
+
+    # 3. Origin maliciosa em mutação administrativa
+    session_valid = client.get("/admin/session")
+    csrf_token = session_valid.json()["csrf_token"]
+    res_mut = client.post(
+        "/admin/credentials",
+        headers={
+            "Origin": "http://evil-domain.com",
+            "X-Maestro-CSRF-Token": csrf_token,
+        },
+        cookies=session_valid.cookies,
+        json={"provider": "openai", "api_key": "sk-test"},
+    )
+    assert res_mut.status_code == 403
+    assert res_mut.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_defensive_validation_non_dict_and_unhashable_track(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Validação defensiva rejeita payloads não-objeto e tracks não-hashable com HTTP 400 sem gerar erro 500 (B4)."""
+    clean_state.set_credential("openai", "sk-active-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    # 1. JSON array em /admin/preview
+    res_array = client.post(
+        "/admin/preview",
+        headers={"Content-Type": "application/json"},
+        content="[1, 2, 3]",
+    )
+    assert res_array.status_code == 400
+    assert res_array.json()["error"]["code"] == "INVALID_JSON"
+
+    # 2. Valor de track como lista em /admin/preview (não hashable)
+    res_list_track = client.post(
+        "/admin/preview",
+        json={"task": "Minha tarefa", "track": ["free"]},
+    )
+    assert res_list_track.status_code == 400
+    assert res_list_track.json()["error"]["code"] == "INVALID_TRACK"
+
+    # 3. Valor de track como dicionário em /admin/preview (não hashable)
+    res_dict_track = client.post(
+        "/admin/preview",
+        json={"task": "Minha tarefa", "track": {"tipo": "free"}},
+    )
+    assert res_dict_track.status_code == 400
+    assert res_dict_track.json()["error"]["code"] == "INVALID_TRACK"
+
+    # 4. Valor de track não textual em /admin/executions
+    res_exec_track = client.post(
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={"task": "Minha tarefa", "track": ["economica"]},
+    )
+    assert res_exec_track.status_code == 400
+    assert res_exec_track.json()["error"]["code"] == "INVALID_TRACK"

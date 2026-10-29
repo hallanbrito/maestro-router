@@ -13,8 +13,10 @@ import secrets
 import threading
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -351,18 +353,33 @@ class ControlCenterState:
         status: CredentialStatus,
         message: str | None = None,
         models: list[str] | None = None,
-    ) -> None:
+        expected_key: str | None = None,
+    ) -> bool:
         with self._lock:
             if provider in self.credentials:
-                self.credentials[provider]["status"] = status
-                self.credentials[provider]["message"] = message
+                cred = self.credentials[provider]
+                # Se expected_key foi fornecido, impede que uma verificação atrasada
+                # sobrescreva o estado de uma chave que já foi alterada ou removida (B3).
+                if expected_key is not None and cred.get("api_key") != expected_key:
+                    return False
+                cred["status"] = status
+                cred["message"] = message
                 if status == "verified":
-                    self.credentials[provider]["verified_at"] = datetime.now(
+                    cred["verified_at"] = datetime.now(
                         timezone.utc
                     ).isoformat()
                     if models:
-                        self.credentials[provider]["models"] = models
-            self._rebuild_runtime_locked()
+                        cred["models"] = models
+                self._rebuild_runtime_locked()
+                return True
+            return False
+
+    def get_runtime_snapshot(
+        self,
+    ) -> tuple[RouteCatalog, Mapping[str, ExecutionAdapter]]:
+        """Retorna uma composição atômica e coerente do catálogo e adaptadores (B3)."""
+        with self._lock:
+            return self.current_catalog, MappingProxyType(dict(self.current_adapters))
 
     def get_safe_config(self) -> dict[str, Any]:
         with self._lock:
@@ -406,7 +423,16 @@ class ControlCenterState:
                         "known_unavailable": r.get("known_unavailable", False),
                         "capabilities": r.get("capabilities", []),
                         "quality_criteria": [
-                            item["criterion"] if isinstance(item, dict) else str(item)
+                            {
+                                "criterion": item["criterion"]
+                                if isinstance(item, dict)
+                                else str(item),
+                                "evidence_references": list(
+                                    item.get("evidence_references", [])
+                                )
+                                if isinstance(item, dict)
+                                else [],
+                            }
                             for item in r.get("quality_criteria", [])
                         ],
                         "price_reference": r.get("price_reference"),
@@ -425,29 +451,41 @@ class ControlCenterState:
             }
 
 
+_request_composition: ContextVar[
+    tuple[RouteCatalog, Mapping[str, ExecutionAdapter]] | None
+] = ContextVar("_request_composition", default=None)
+
+
 class DynamicRouteCatalog(RouteCatalog):
     """Proxy de catálogo que repassa chamadas ao catálogo ativo em memória.
 
     Preserva a fidelidade integral à interface RouteCatalog sem interceptar
     cabeçalhos ou manipular estratégias de forma oculta (Bloqueador 2).
+    Utiliza snapshot atômico por requisição quando disponível (B3).
     """
 
     def __init__(self, state: ControlCenterState) -> None:
         self._state = state
 
+    def _get_active_catalog(self) -> RouteCatalog:
+        comp = _request_composition.get()
+        if comp is not None:
+            return comp[0]
+        return self._state.current_catalog
+
     def snapshot(self) -> tuple[Route, ...]:
-        return self._state.current_catalog.snapshot()
+        return self._get_active_catalog().snapshot()
 
     @property
     def configuration_invalid_route_ids(self) -> frozenset[str]:
         return getattr(
-            self._state.current_catalog, "configuration_invalid_route_ids", frozenset()
+            self._get_active_catalog(), "configuration_invalid_route_ids", frozenset()
         )
 
     @property
     def configuration_disabled_invalid_route_ids(self) -> frozenset[str]:
         return getattr(
-            self._state.current_catalog,
+            self._get_active_catalog(),
             "configuration_disabled_invalid_route_ids",
             frozenset(),
         )
@@ -455,31 +493,48 @@ class DynamicRouteCatalog(RouteCatalog):
     @property
     def operational_constraints(self) -> OperationalConstraints | None:
         return getattr(
-            self._state.current_catalog, "operational_constraints", None
+            self._get_active_catalog(), "operational_constraints", None
         )
 
 
 class DynamicAdapterRegistry(Mapping[str, ExecutionAdapter]):
-    """Proxy de registro que delega a busca de adaptadores ao estado ativo."""
+    """Proxy de registro que delega a busca de adaptadores ao estado ativo.
+    Utiliza snapshot atômico por requisição quando disponível (B3).
+    """
 
     def __init__(self, state: ControlCenterState) -> None:
         self._state = state
 
+    def _get_active_adapters(self) -> Mapping[str, ExecutionAdapter]:
+        comp = _request_composition.get()
+        if comp is not None:
+            return comp[1]
+        return self._state.current_adapters
+
     def __getitem__(self, key: str) -> ExecutionAdapter:
-        return self._state.current_adapters[key]
+        return self._get_active_adapters()[key]
 
     def __iter__(self):
-        return iter(self._state.current_adapters)
+        return iter(self._get_active_adapters())
 
     def __len__(self) -> int:
-        return len(self._state.current_adapters)
+        return len(self._get_active_adapters())
 
     def get(self, key: str, default=None):
-        return self._state.current_adapters.get(key, default)
+        return self._get_active_adapters().get(key, default)
+
+
+def _is_local_client(request: Request) -> bool:
+    """Verifica se a conexão TCP provém do loopback local (B4)."""
+    client = request.client
+    if client is None:
+        return True
+    host = (client.host or "").lower()
+    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
 def _is_safe_origin(origin: str | None) -> bool:
-    """Valida se as solicitações administrativas se originam do loopback local."""
+    """Valida se as solicitações administrativas se originam do loopback local (B4)."""
     if origin is None:
         return True
     try:
@@ -687,6 +742,16 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
     # O endpoint público v1 não interpreta trilhas, cabeçalhos ou estratégias externas.
     app = create_app(catalog=dynamic_catalog, adapters=dynamic_adapters)
 
+    @app.middleware("http")
+    async def composition_snapshot_middleware(request: Request, call_next):
+        """Congela a composição operacional (catálogo e adaptadores) por requisição (B3)."""
+        snapshot = control_state.get_runtime_snapshot()
+        token = _request_composition.set(snapshot)
+        try:
+            return await call_next(request)
+        finally:
+            _request_composition.reset(token)
+
     # Padroniza envelopes de erro HTTP e de validação para a camada administrativa do Control Center
     @app.exception_handler(HTTPException)
     async def custom_http_exception_handler(request: Request, exc: HTTPException):
@@ -737,14 +802,32 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         request: Request,
         x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
     ) -> None:
-        """Valida token CSRF, Origin e Sessão para operações administrativas mutantes."""
-        origin = request.headers.get("origin") or request.headers.get("referer")
-        if not _is_safe_origin(origin):
+        """Valida token CSRF, Origin e Sessão para operações administrativas mutantes (B4)."""
+        if not _is_local_client(request):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Acesso administrativo restrito a conexões locais de loopback.",
+                },
+            )
+
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        if origin is not None and not _is_safe_origin(origin):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "code": "FORBIDDEN",
                     "message": "Origem da solicitação administrativa não autorizada.",
+                },
+            )
+        if referer is not None and not _is_safe_origin(referer):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Referência (Referer) da solicitação administrativa não autorizada.",
                 },
             )
 
@@ -760,7 +843,33 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.get("/session")
     async def get_session(response: Response, request: Request) -> dict[str, str]:
-        """Obtém ou atualiza a sessão administrativa local segura e token CSRF."""
+        """Obtém ou atualiza a sessão administrativa local segura e token CSRF (B4)."""
+        if not _is_local_client(request):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Acesso administrativo restrito a conexões locais de loopback.",
+                },
+            )
+        origin = request.headers.get("origin")
+        if origin is not None and not _is_safe_origin(origin):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Origem da solicitação administrativa não autorizada.",
+                },
+            )
+        referer = request.headers.get("referer")
+        if referer is not None and not _is_safe_origin(referer):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Referência (Referer) da solicitação administrativa não autorizada.",
+                },
+            )
         existing_session = request.cookies.get("maestro_admin_session")
         if existing_session and existing_session in control_state.sessions:
             csrf_token = control_state.sessions[existing_session]["csrf_token"]
@@ -879,23 +988,35 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
             )
             final_models = relevant_models if relevant_models else model_ids[:20]
 
-            control_state.update_credential_status(
+            updated = control_state.update_credential_status(
                 "openai",
                 "verified",
                 message="Credencial verificada com sucesso via consulta oficial de modelos.",
                 models=final_models,
+                expected_key=api_key,
             )
+            if not updated:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CREDENTIAL_SUPERSEDED",
+                        "message": "A credencial foi modificada ou removida durante a verificação.",
+                    },
+                )
             return {
                 "provider": "openai",
                 "status": "verified",
                 "models": final_models,
                 "message": "Credencial verificada com sucesso. Modelos disponíveis atualizados.",
             }
+        except HTTPException:
+            raise
         except AuthenticationError:
             control_state.update_credential_status(
                 "openai",
                 "access_denied",
                 message="Acesso recusado pelo provedor. Verifique se a chave está correta.",
+                expected_key=api_key,
             )
             return {
                 "provider": "openai",
@@ -907,6 +1028,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 "openai",
                 "access_denied",
                 message="Permissão negada pelo provedor para a credencial informada.",
+                expected_key=api_key,
             )
             return {
                 "provider": "openai",
@@ -920,6 +1042,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     "openai",
                     "insufficient_quota",
                     message="Sem saldo ou cota de uso excedida na conta do provedor.",
+                    expected_key=api_key,
                 )
                 return {
                     "provider": "openai",
@@ -930,6 +1053,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 "openai",
                 "verification_unavailable",
                 message="Limite de taxa atingido durante a verificação.",
+                expected_key=api_key,
             )
             return {
                 "provider": "openai",
@@ -941,6 +1065,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 "openai",
                 "verification_unavailable",
                 message="Não foi possível conectar ao provedor. Verifique sua conexão.",
+                expected_key=api_key,
             )
             return {
                 "provider": "openai",
@@ -952,6 +1077,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 "openai",
                 "verification_unavailable",
                 message=f"Falha inesperada na verificação: {type(err).__name__}",
+                expected_key=api_key,
             )
             return {
                 "provider": "openai",
@@ -985,8 +1111,51 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_JSON", "message": "Corpo JSON inválido."},
             )
 
-        # Validação integral dos dados ANTES de qualquer modificação de estado (Item 5).
-        validated_route = _validate_route_payload(body)
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_JSON", "message": "O corpo deve ser um objeto JSON."},
+            )
+
+        route_id = body.get("route_id")
+        if not _is_structurally_valid_string(route_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_ROUTE_ID",
+                    "message": "route_id é obrigatório e deve ser uma string não vazia.",
+                },
+            )
+
+        with control_state._lock:
+            existing_route = next(
+                (r for r in control_state.routes_raw if r.get("route_id") == route_id),
+                None,
+            )
+
+        # Se for edição de rota existente e o operador omitir campos no payload,
+        # preserva os dados originais (qualidade com evidências, tarifas e estimativas) (B2)
+        merged_body = dict(body)
+        if existing_route is not None:
+            if "provider" not in merged_body:
+                merged_body["provider"] = existing_route.get("provider", "openai")
+            if "model" not in merged_body:
+                merged_body["model"] = existing_route.get("model")
+            if "capabilities" not in merged_body:
+                merged_body["capabilities"] = existing_route.get("capabilities", [])
+            if "quality_criteria" not in merged_body:
+                merged_body["quality_criteria"] = existing_route.get("quality_criteria", [])
+            if "price_reference" not in merged_body and existing_route.get("price_reference") is not None:
+                merged_body["price_reference"] = existing_route.get("price_reference")
+            if "estimated_usage" not in merged_body and existing_route.get("estimated_usage") is not None:
+                merged_body["estimated_usage"] = existing_route.get("estimated_usage")
+            if "enabled" not in merged_body:
+                merged_body["enabled"] = existing_route.get("enabled", True)
+            if "known_unavailable" not in merged_body:
+                merged_body["known_unavailable"] = existing_route.get("known_unavailable", False)
+
+        # Validação integral dos dados ANTES de qualquer modificação de estado.
+        validated_route = _validate_route_payload(merged_body)
 
         with control_state._lock:
             existing_idx = next(
@@ -1057,6 +1226,12 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_JSON", "message": "Corpo JSON inválido."},
             )
 
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_JSON", "message": "O corpo deve ser um objeto JSON."},
+            )
+
         task = body.get("task", "")
         if not isinstance(task, str) or not task.strip():
             raise HTTPException(
@@ -1067,7 +1242,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         track_raw = body.get("track")
         if track_raw is None:
             track: TrackType = "economica"
-        elif track_raw not in {"free", "economica", "inteligente"}:
+        elif not isinstance(track_raw, str) or track_raw not in {"free", "economica", "inteligente"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -1098,7 +1273,13 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 detail={"code": "INVALID_REQUEST", "message": f"Restrições inválidas: {err}"},
             )
 
-        catalog_snapshot = control_state.current_catalog.snapshot()
+        comp = _request_composition.get()
+        if comp is not None:
+            catalog_snapshot_obj, _ = comp
+        else:
+            catalog_snapshot_obj, _ = control_state.get_runtime_snapshot()
+
+        catalog_snapshot = catalog_snapshot_obj.snapshot()
         all_routes_count = len(catalog_snapshot)
         has_api_key = bool(control_state.credentials.get("openai", {}).get("api_key"))
 
@@ -1225,7 +1406,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         routing_decision = route_request(
             exec_req,
-            control_state.current_catalog,
+            catalog_snapshot_obj,
             locally_invalid_route_ids=locally_invalid_ids,
             invalid_execution_route_ids=invalid_exec_ids,
         )
@@ -1375,7 +1556,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         track_raw = body.get("track")
         if track_raw is None:
             track: TrackType = "economica"
-        elif track_raw not in {"free", "economica", "inteligente"}:
+        elif not isinstance(track_raw, str) or track_raw not in {"free", "economica", "inteligente"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -1389,9 +1570,15 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         else:
             track = track_raw
 
-        catalog_snapshot = control_state.current_catalog.snapshot()
+        comp = _request_composition.get()
+        if comp is not None:
+            active_catalog, active_adapters = comp
+        else:
+            active_catalog, active_adapters = control_state.get_runtime_snapshot()
+
+        catalog_snapshot = active_catalog.snapshot()
         adapter_snapshot = _snapshot_adapters(
-            control_state.current_catalog, control_state.current_adapters
+            active_catalog, active_adapters
         )
         enabled_routes = tuple(route for route in catalog_snapshot if route.enabled)
         has_api_key = bool(control_state.credentials.get("openai", {}).get("api_key"))
@@ -1434,11 +1621,11 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
             if not _is_valid_adapter(adapter_snapshot.get(route.adapter_id))
         )
         locally_invalid_ids = catalog_invalid_ids | getattr(
-            control_state.current_catalog, "configuration_invalid_route_ids", frozenset()
+            active_catalog, "configuration_invalid_route_ids", frozenset()
         )
 
         base_constraints = getattr(
-            control_state.current_catalog, "operational_constraints", None
+            active_catalog, "operational_constraints", None
         ) or OperationalConstraints()
 
         # Trilha Free: restrição estrita a rotas com gratuidade declarada pelo operador
@@ -1493,7 +1680,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
             routing_result = route_request(
                 execution_request,
-                control_state.current_catalog,
+                active_catalog,
                 operational_constraints=free_constraints,
                 locally_invalid_route_ids=locally_invalid_ids,
                 invalid_execution_route_ids=catalog_invalid_ids,
@@ -1521,7 +1708,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         # Trilhas Econômica e Inteligente:
         routing_result = route_request(
             execution_request,
-            control_state.current_catalog,
+            active_catalog,
             operational_constraints=base_constraints,
             locally_invalid_route_ids=locally_invalid_ids,
             invalid_execution_route_ids=catalog_invalid_ids,

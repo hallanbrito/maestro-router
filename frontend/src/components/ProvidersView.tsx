@@ -63,13 +63,22 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   const [routeQualityCriteria, setRouteQualityCriteria] = useState('');
   const [routeEvidenceReferences, setRouteEvidenceReferences] = useState('');
 
-  // Economic Configuration State
+  // Economic Configuration State (ADR 0006 e 0007 / B1)
   const [configureEconomics, setConfigureEconomics] = useState(false);
   const [routeCurrency, setRouteCurrency] = useState('USD');
+  const [routePriceId, setRoutePriceId] = useState('');
+  const [routePriceVersion, setRoutePriceVersion] = useState('2026-10');
+  const [routePriceSource, setRoutePriceSource] = useState('');
+  const [routePriceConditions, setRoutePriceConditions] = useState('');
   const [routeInputRate, setRouteInputRate] = useState('');
   const [routeOutputRate, setRouteOutputRate] = useState('');
-  const [routeEstimatedInput, setRouteEstimatedInput] = useState('1500');
-  const [routeEstimatedOutput, setRouteEstimatedOutput] = useState('500');
+  const [routeEstimatedInput, setRouteEstimatedInput] = useState('');
+  const [routeEstimatedOutput, setRouteEstimatedOutput] = useState('');
+
+  // Declarações conscientes e auditáveis do operador (B1)
+  const [declRatesComplete, setDeclRatesComplete] = useState(false);
+  const [declModelExact, setDeclModelExact] = useState(false);
+  const [declUsageApplicable, setDeclUsageApplicable] = useState(false);
   const [economicError, setEconomicError] = useState<string | null>(null);
 
   const loadConfig = async () => {
@@ -196,10 +205,17 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     setRouteEvidenceReferences('');
     setConfigureEconomics(false);
     setRouteCurrency('USD');
+    setRoutePriceId('');
+    setRoutePriceVersion('2026-10');
+    setRoutePriceSource('');
+    setRoutePriceConditions('');
     setRouteInputRate('');
     setRouteOutputRate('');
-    setRouteEstimatedInput('1500');
-    setRouteEstimatedOutput('500');
+    setRouteEstimatedInput('');
+    setRouteEstimatedOutput('');
+    setDeclRatesComplete(false);
+    setDeclModelExact(false);
+    setDeclUsageApplicable(false);
     setEconomicError(null);
     setShowRouteModal(true);
   };
@@ -215,25 +231,51 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
       setCustomModel(route.model);
     }
     setRouteCapabilities(route.capabilities.join(', '));
-    setRouteQualityCriteria(route.quality_criteria.join(', '));
-    setRouteEvidenceReferences('referencia-auditada-operador');
+
+    // Extrai critérios e suas evidências documentadas reais (B2)
+    const criteriaStrings = route.quality_criteria.map((qc) =>
+      typeof qc === 'string' ? qc : qc.criterion
+    );
+    const evidenceStrings = route.quality_criteria.flatMap((qc) =>
+      typeof qc === 'string' ? [] : qc.evidence_references
+    );
+    setRouteQualityCriteria(criteriaStrings.join(', '));
+    setRouteEvidenceReferences(evidenceStrings.join(', '));
 
     if (route.price_reference && route.price_reference.rates) {
       setConfigureEconomics(true);
       setRouteCurrency(route.price_reference.currency || 'USD');
+      setRoutePriceId(route.price_reference.id || '');
+      setRoutePriceVersion(route.price_reference.version || '2026-10');
+      setRoutePriceSource(route.price_reference.source || 'Configuração informada pelo operador');
+      setRoutePriceConditions((route.price_reference.conditions || []).join(', '));
       const inRate = route.price_reference.rates.find((r) => r.unit === 'input_token')?.rate || '0.00';
       const outRate = route.price_reference.rates.find((r) => r.unit === 'output_token')?.rate || '0.00';
       setRouteInputRate(inRate);
       setRouteOutputRate(outRate);
-      setRouteEstimatedInput(String(route.estimated_usage?.input_token || 1500));
-      setRouteEstimatedOutput(String(route.estimated_usage?.output_token || 500));
+      setRouteEstimatedInput(
+        route.estimated_usage?.input_token !== undefined ? String(route.estimated_usage.input_token) : ''
+      );
+      setRouteEstimatedOutput(
+        route.estimated_usage?.output_token !== undefined ? String(route.estimated_usage.output_token) : ''
+      );
+      setDeclRatesComplete(Boolean(route.price_reference.context_complete ?? true));
+      setDeclModelExact(Boolean(route.price_reference.model_identity_exact ?? true));
+      setDeclUsageApplicable(Boolean(route.estimated_usage?.applicability_confirmed ?? true));
     } else {
       setConfigureEconomics(false);
       setRouteCurrency('USD');
+      setRoutePriceId('');
+      setRoutePriceVersion('2026-10');
+      setRoutePriceSource('');
+      setRoutePriceConditions('');
       setRouteInputRate('');
       setRouteOutputRate('');
-      setRouteEstimatedInput('1500');
-      setRouteEstimatedOutput('500');
+      setRouteEstimatedInput('');
+      setRouteEstimatedOutput('');
+      setDeclRatesComplete(false);
+      setDeclModelExact(false);
+      setDeclUsageApplicable(false);
     }
     setEconomicError(null);
     setShowRouteModal(true);
@@ -243,8 +285,13 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     setConfigureEconomics(true);
     setRouteInputRate('0.00');
     setRouteOutputRate('0.00');
+    setRoutePriceSource('Gratuidade declarada pelo operador (ADR 0012)');
+    setRoutePriceConditions('declaracao-local-zero');
     setRouteEstimatedInput('1000');
     setRouteEstimatedOutput('500');
+    setDeclRatesComplete(true);
+    setDeclModelExact(true);
+    setDeclUsageApplicable(true);
     setEconomicError(null);
   };
 
@@ -291,6 +338,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
       const outRate = routeOutputRate.trim();
       const inTokens = parseInt(routeEstimatedInput.trim(), 10);
       const outTokens = parseInt(routeEstimatedOutput.trim(), 10);
+      const source = routePriceSource.trim();
 
       if (
         !inRate ||
@@ -309,17 +357,34 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         setEconomicError('Previsão de tokens de entrada e saída deve conter números inteiros positivos.');
         return;
       }
+      if (!source) {
+        setEconomicError('A fonte das tarifas (ex: documentação de preços do provedor) é obrigatória (ADR 0006).');
+        return;
+      }
+
+      // Validação das declarações conscientes obrigatórias do operador (B1 / ADR 0006 e 0007)
+      if (!declRatesComplete || !declModelExact || !declUsageApplicable) {
+        setEconomicError(
+          'É obrigatório que o operador confirme conscientemente todas as declarações de completude de tarifas, identidade exata do modelo e aplicabilidade da previsão (ADRs 0006 e 0007).'
+        );
+        return;
+      }
+
+      const conditions = routePriceConditions
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
 
       priceRefObj = {
-        id: `pricing-openai-${finalModel}-${newRouteId.trim()}`,
+        id: routePriceId.trim() || `pricing-openai-${finalModel}-${newRouteId.trim()}`,
         currency: routeCurrency,
-        version: '2026-10',
-        source: 'Configurado pelo operador via Control Center',
+        version: routePriceVersion.trim() || '2026-10',
+        source: source,
         rates: [
           { unit: 'input_token', rate: inRate, base: 1000000 },
           { unit: 'output_token', rate: outRate, base: 1000000 },
         ],
-        conditions: ['configurado via control center'],
+        conditions: conditions,
         context_complete: true,
         units_exhaustive: true,
         no_double_counting: true,
@@ -608,7 +673,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                       <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
                         Provedor: <strong>{route.provider}</strong> • Capacidades:{' '}
                         {route.capabilities.join(', ') || 'Nenhuma'} • Critérios:{' '}
-                        {route.quality_criteria.join(', ') || 'Nenhum'}
+                        {route.quality_criteria.map((qc) => typeof qc === 'string' ? qc : `${qc.criterion}${qc.evidence_references && qc.evidence_references.length > 0 ? ` [${qc.evidence_references.join(', ')}]` : ''}`).join(', ') || 'Nenhum'}
                       </div>
                       <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
                         {route.price_reference && route.price_reference.rates ? (
@@ -957,6 +1022,66 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                           data-testid="route-estimated-output"
                         />
                       </div>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                        Fonte das Tarifas (Obrigatório - ADR 0006)
+                      </label>
+                      <input
+                        type="text"
+                        className="input-field"
+                        value={routePriceSource}
+                        onChange={(e) => {
+                          setRoutePriceSource(e.target.value);
+                          setEconomicError(null);
+                        }}
+                        placeholder="ex: https://openai.com/api/pricing ou tabela oficial auditada"
+                        style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                        data-testid="route-price-source"
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', padding: '0.5rem', background: 'var(--bg-tertiary, #1f2937)', borderRadius: '4px', border: '1px solid var(--border-color, #374151)' }}>
+                      <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        Declarações Conscientes do Operador (ADR 0006 / ADR 0007):
+                      </span>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={declRatesComplete}
+                          onChange={(e) => {
+                            setDeclRatesComplete(e.target.checked);
+                            setEconomicError(null);
+                          }}
+                          data-testid="decl-rates-complete"
+                        />
+                        Declaro que as tarifas cobrem integralmente o contexto, unidades exaustivas e sem dupla contagem.
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={declModelExact}
+                          onChange={(e) => {
+                            setDeclModelExact(e.target.checked);
+                            setEconomicError(null);
+                          }}
+                          data-testid="decl-model-exact"
+                        />
+                        Declaro que a identidade do modelo e variante correspondem exatamente às tarifas informadas.
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={declUsageApplicable}
+                          onChange={(e) => {
+                            setDeclUsageApplicable(e.target.checked);
+                            setEconomicError(null);
+                          }}
+                          data-testid="decl-usage-applicable"
+                        />
+                        Declaro que a previsão de tokens informada é aplicável e representativa para esta rota.
+                      </label>
                     </div>
 
                     {economicError && (

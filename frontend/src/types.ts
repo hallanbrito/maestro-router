@@ -302,6 +302,11 @@ export interface ProviderInfo {
   credential: ProviderCredential;
 }
 
+export interface QualityCriterionItem {
+  criterion: string;
+  evidence_references: string[];
+}
+
 export interface RouteConfig {
   route_id: string;
   provider: string;
@@ -309,11 +314,18 @@ export interface RouteConfig {
   enabled: boolean;
   known_unavailable: boolean;
   capabilities: string[];
-  quality_criteria: string[];
+  quality_criteria: Array<string | QualityCriterionItem>;
   price_reference?: {
     id: string;
     currency: string;
+    version?: string;
+    source?: string;
     rates?: Array<{ unit: string; rate: string; base: number }>;
+    conditions?: string[];
+    context_complete?: boolean;
+    units_exhaustive?: boolean;
+    no_double_counting?: boolean;
+    model_identity_exact?: boolean;
   };
   estimated_usage?: {
     input_token: number;

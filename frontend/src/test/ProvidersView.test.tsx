@@ -292,11 +292,18 @@ describe('ProvidersView component', () => {
     const outputRate = screen.getByTestId('route-output-rate');
     const estInput = screen.getByTestId('route-estimated-input');
     const estOutput = screen.getByTestId('route-estimated-output');
+    const priceSource = screen.getByTestId('route-price-source');
 
     fireEvent.change(inputRate, { target: { value: '0.1500' } });
     fireEvent.change(outputRate, { target: { value: '0.6000' } });
     fireEvent.change(estInput, { target: { value: '2000' } });
     fireEvent.change(estOutput, { target: { value: '800' } });
+    fireEvent.change(priceSource, { target: { value: 'https://openai.com/api/pricing' } });
+
+    // Confirma conscientemente as declarações do operador (B1 / ADR 0006 e ADR 0007)
+    fireEvent.click(screen.getByTestId('decl-rates-complete'));
+    fireEvent.click(screen.getByTestId('decl-model-exact'));
+    fireEvent.click(screen.getByTestId('decl-usage-applicable'));
 
     // Salva o formulário
     const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
@@ -441,5 +448,148 @@ describe('ProvidersView component', () => {
       screen.getByText(/Tarifas de entrada e saída devem ser valores numéricos decimais não negativos/i)
     ).toBeInTheDocument();
     expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it('exige preenchimento de fonte e declarações conscientes do operador para salvar dados econômicos', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute');
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    const toggleEconomics = screen.getByTestId('toggle-economics-config');
+    fireEvent.click(toggleEconomics);
+
+    const inputRate = screen.getByTestId('route-input-rate');
+    const outputRate = screen.getByTestId('route-output-rate');
+    const estInput = screen.getByTestId('route-estimated-input');
+    const estOutput = screen.getByTestId('route-estimated-output');
+
+    fireEvent.change(inputRate, { target: { value: '0.1500' } });
+    fireEvent.change(outputRate, { target: { value: '0.6000' } });
+    fireEvent.change(estInput, { target: { value: '1500' } });
+    fireEvent.change(estOutput, { target: { value: '500' } });
+
+    // Tenta salvar sem preencher fonte
+    const saveBtn = screen.getByRole('button', { name: /Salvar Rota/i });
+    fireEvent.click(saveBtn);
+
+    expect(
+      screen.getByText(/A fonte das tarifas \(ex: documentação de preços do provedor\) é obrigatória/i)
+    ).toBeInTheDocument();
+    expect(saveSpy).not.toHaveBeenCalled();
+
+    // Preenche fonte mas não confirma declarações
+    const priceSource = screen.getByTestId('route-price-source');
+    fireEvent.change(priceSource, { target: { value: 'https://openai.com/api/pricing' } });
+    fireEvent.click(saveBtn);
+
+    expect(
+      screen.getByText(/É obrigatório que o operador confirme conscientemente todas as declarações/i)
+    ).toBeInTheDocument();
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it('preserva evidências documentadas e dados de qualidade ao editar uma rota (B2)', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [
+        {
+          route_id: 'route-evidence-test',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          enabled: true,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [
+            {
+              criterion: 'fast_response',
+              evidence_references: ['benchmarks/latency-q3.json#p95', 'docs/slo.md#fast'],
+            },
+          ],
+          status: 'ready',
+          blockers: [],
+        },
+      ],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute').mockResolvedValueOnce({
+      status: 'saved',
+      route: {
+        route_id: 'route-evidence-test',
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        enabled: true,
+        known_unavailable: false,
+        capabilities: ['text_generation'],
+        quality_criteria: [],
+        status: 'ready',
+        blockers: [],
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-route-route-evidence-test')).toBeInTheDocument();
+    });
+
+    // Clica no botão Editar da rota
+    fireEvent.click(screen.getByTestId('edit-route-route-evidence-test'));
+
+    expect(screen.getByText(/Editar Rota: route-evidence-test/i)).toBeInTheDocument();
+
+    // Salva o formulário diretamente
+    const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          route_id: 'route-evidence-test',
+          quality_criteria: [
+            {
+              criterion: 'fast_response',
+              evidence_references: ['benchmarks/latency-q3.json#p95', 'docs/slo.md#fast'],
+            },
+          ],
+        })
+      );
+    });
   });
 });

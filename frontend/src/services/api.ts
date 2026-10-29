@@ -322,6 +322,7 @@ export async function fetchAdminConfig(): Promise<{
   providers: ProviderInfo[];
   routes: RouteConfig[];
   models: string[];
+  models_by_provider?: { openai: string[]; google: string[] };
 }> {
   const res = await fetch('/admin/config', { method: 'GET' });
   if (!res.ok) {

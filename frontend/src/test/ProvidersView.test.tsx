@@ -820,4 +820,172 @@ describe('ProvidersView component', () => {
       );
     });
   });
+
+  it('permite alternar para Google Gemini, cadastrar chave na memória e verificar sem custos', async () => {
+    let googleRegistered = false;
+    vi.spyOn(apiService, 'fetchAdminConfig').mockImplementation(async () => ({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22T15:00:00Z',
+            message: 'Credencial verificada com sucesso.',
+          },
+        },
+        {
+          id: 'google',
+          name: 'Google',
+          implemented: true,
+          credential: {
+            registered: googleRegistered,
+            status: googleRegistered ? 'registered' : 'not_registered',
+            verified_at: null,
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: ['gpt-4o'],
+      models_by_provider: {
+        openai: ['gpt-4o'],
+        google: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+      },
+    }));
+
+    const saveSpy = vi.spyOn(apiService, 'saveCredential').mockImplementation(async () => {
+      googleRegistered = true;
+      return {
+        provider: 'google',
+        status: 'registered',
+        message: 'Credencial Google cadastrada na memória do servidor.',
+      };
+    });
+
+    const verifySpy = vi.spyOn(apiService, 'verifyCredential').mockResolvedValueOnce({
+      provider: 'google',
+      status: 'verified',
+      models: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+      message: 'Credencial Google verificada com sucesso.',
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tab-provider-google')).toBeInTheDocument();
+    });
+
+    // Alterna para Google Gemini
+    fireEvent.click(screen.getByTestId('tab-provider-google'));
+
+    expect(screen.getByText(/Credencial do Provedor \(Google Gemini\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Gemini API Key \(AIza\.\.\.\)/i)).toBeInTheDocument();
+
+    const input = screen.getByTestId('credential-api-key-input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'AIzaSyFakeKeyForTest123' } });
+    expect(input.value).toBe('AIzaSyFakeKeyForTest123');
+
+    fireEvent.click(screen.getByTestId('btn-save-credential'));
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith('google', 'AIzaSyFakeKeyForTest123');
+      expect(input.value).toBe('');
+      expect(screen.getByTestId('btn-verify-credential')).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByTestId('btn-verify-credential'));
+
+    await waitFor(() => {
+      expect(verifySpy).toHaveBeenCalledWith('google');
+    });
+  });
+
+  it('permite criar rota Google Gemini com provider "google" e dados econômicos conscientes', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'google',
+          name: 'Google',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-29T10:00:00Z',
+            message: 'OK',
+          },
+        },
+      ],
+      routes: [],
+      models: ['gemini-2.5-flash'],
+      models_by_provider: {
+        openai: ['gpt-4o'],
+        google: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+      },
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute').mockResolvedValueOnce({
+      status: 'saved',
+      route: {
+        route_id: 'route-google-gemini-flash',
+        provider: 'google',
+        model: 'gemini-2.5-flash',
+        enabled: true,
+        known_unavailable: false,
+        capabilities: ['text_generation'],
+        quality_criteria: [],
+        status: 'ready',
+        blockers: [],
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    // Seleciona provedor Google Gemini no modal
+    const providerSelect = screen.getByTestId('route-provider-select');
+    fireEvent.change(providerSelect, { target: { value: 'google' } });
+
+    // Modelo gemini-2.5-flash deve estar selecionável
+    const modelSelect = screen.getByTestId('route-model-select');
+    fireEvent.change(modelSelect, { target: { value: 'gemini-2.5-flash' } });
+
+    // Configura economia consciente
+    fireEvent.click(screen.getByTestId('toggle-economics-config'));
+    fireEvent.change(screen.getByTestId('route-input-rate'), { target: { value: '0.075' } });
+    fireEvent.change(screen.getByTestId('route-output-rate'), { target: { value: '0.30' } });
+    fireEvent.change(screen.getByTestId('route-estimated-input'), { target: { value: '2000' } });
+    fireEvent.change(screen.getByTestId('route-estimated-output'), { target: { value: '500' } });
+    fireEvent.change(screen.getByTestId('route-price-source'), { target: { value: 'https://ai.google.dev/pricing' } });
+
+    fireEvent.click(screen.getByTestId('decl-rates-complete'));
+    fireEvent.click(screen.getByTestId('decl-model-exact'));
+    fireEvent.click(screen.getByTestId('decl-usage-applicable'));
+
+    fireEvent.click(screen.getByRole('button', { name: /Salvar Rota/i }));
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'google',
+          model: 'gemini-2.5-flash',
+          price_reference: expect.objectContaining({
+            currency: 'USD',
+            source: 'https://ai.google.dev/pricing',
+            rates: [
+              { unit: 'input_token', rate: '0.075', base: 1000000 },
+              { unit: 'output_token', rate: '0.30', base: 1000000 },
+            ],
+          }),
+        })
+      );
+    });
+  });
 });

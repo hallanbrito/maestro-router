@@ -1,9 +1,9 @@
 # 0012. Camada administrativa local e experiência de primeiro uso do Control Center
 
-- **Status:** Proposta em revisão após auditoria de conformidade (Draft PR #27)
+- **Status:** Aprovada pelo Product Owner e publicada via PR #27
 - **Data:** 2026-10-23
 - **Autor:** Maestro Router Team
-- **Decisores:** PO Hallan (em revisão de homologação)
+- **Decisores:** PO Hallan
 
 ## Contexto
 

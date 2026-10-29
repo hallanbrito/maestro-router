@@ -5,7 +5,7 @@ regras explícitas de elegibilidade, estimativa de custo e desempate determinís
 Foi criado para tornar a decisão de roteamento controlável e explicável.
 
 - **Estado:** núcleo funcional com testes; publicação da pré-release pausada para auditoria.
-- **Integração externa atual:** adaptador OpenAI opcional. Outros provedores ainda não possuem adaptadores neste repositório.
+- **Integrações externas atuais:** adaptadores opcionais para OpenAI Responses API ([ADR 0002](docs/decisions/0002-openai-responses-adapter.md)) e Google Gemini Developer API via Interactions API sem estado ([ADR 0013](docs/decisions/0013-google-gemini-interactions-adapter.md)). Nenhum provedor é padrão.
 - **Para explorar:** execute localmente, rode os testes ou consulte o contrato e as decisões técnicas em [`docs/`](docs/).
 
 As [notas da candidata v0.1.0-rc.1](docs/releases/v0.1.0-rc.1.md) registram o escopo preparado para avaliação técnica; não há release publicada.
@@ -16,15 +16,17 @@ O estado executável atual cobre:
 - elegibilidade não econômica;
 - avaliação econômica anterior à seleção;
 - seleção determinística e validada pela estratégia `lowest-estimated-cost`;
-- fronteira neutra de execução com adaptadores associados manualmente em memória;
-- primeiro adaptador externo para a OpenAI Responses API, construído e injetado
-  explicitamente;
+- fronteira neutra de execução com adaptadores associados em memória;
+- adaptadores externos para a OpenAI Responses API ([ADR 0002](docs/decisions/0002-openai-responses-adapter.md))
+  e a Google Gemini Developer API via Interactions API sem estado ([ADR 0013](docs/decisions/0013-google-gemini-interactions-adapter.md)),
+  construídos e injetados explicitamente fora do núcleo;
 - composição operacional OpenAI opcional, explícita e separada do aplicativo
   padrão neutro, com referência de preço e previsão estática de uso opcionais
   fornecidas pelo operador;
 - primeira política operacional de estimativa pré-execução, decimalmente exata
   e limitada a uma previsão configurada de `input_token` e `output_token`;
-- normalização de `input_tokens` e `output_tokens` do adaptador OpenAI em uso
+- normalização do uso reportado pelos adaptadores (`input_tokens` e `output_tokens`
+  na OpenAI; `total_input_tokens` e `total_output_tokens` no Google Gemini) em uso
   neutro completo, parcial ou indisponível;
 - primeira política neutra e decimalmente exata de cálculo de custo posterior,
   limitada a `input_token` e `output_token` e disponível somente com referência
@@ -50,21 +52,37 @@ Ainda não estão implementados ou configurados por padrão:
 - timeout concreto, retry ou fallback;
 - tabela ou atualização automática de preços.
 
-O adaptador OpenAI recebe um cliente assíncrono oficial já construído e não é
-registrado no aplicativo padrão. A composição opcional faz explicitamente essa
-construção e a associação a uma rota. Os testes usam somente clientes
-controlados, sem chamada de rede. Em sucesso, a estimativa usada na seleção é
-preservada; o uso observado pelo adaptador OpenAI é publicado como `available`,
-`uncertain` ou `unavailable`. O núcleo calcula `calculated_cost` somente quando
-a rota selecionada possui uma referência neutra, explícita e completa para as
-unidades aprovadas `input_token` e `output_token`; informação insuficiente mantém
-o custo como `unavailable`. A composição OpenAI pode associar uma referência
-fornecida pelo operador e, quando uma previsão estática de uso também estiver
-configurada, produzir uma estimativa pré-execução `available` com a mesma moeda
-e referência. Sem essa previsão, a estimativa permanece `unavailable`. Não há
-preço padrão, tokenização, consulta ou atualização automática. Mesmo
-configurado, o custo posterior só pode ficar disponível com uso completo e não
-representa billing, cobrança ou prova de economia entre provedores.
+Os adaptadores externos recebem clientes assíncronos oficiais já construídos e
+não são registrados no aplicativo padrão neutro:
+
+- O **adaptador OpenAI** ([ADR 0002](docs/decisions/0002-openai-responses-adapter.md))
+  utiliza a Responses API para execução textual com injeção de cliente oficial.
+  A composição OpenAI opcional permite associar uma referência tarifária e previsão
+  de uso fornecidas pelo operador.
+- O **adaptador Google Gemini** ([ADR 0013](docs/decisions/0013-google-gemini-interactions-adapter.md))
+  utiliza a Interactions API em modo puramente textual e sem estado: envia
+  obrigatoriamente `store=False` e `automatic_continuation=False`, e omite
+  `previous_interaction_id`, `background`, streaming, tools, agentes e memória
+  conversacional. No Control Center ([ADR 0012](docs/decisions/0012-control-center-local-admin-layer.md)),
+  sua credencial reside exclusivamente na memória volátil do processo backend, e
+  a descoberta oficial lista somente modelos compatíveis com `generateContent`.
+  Não há preço padrão, gratuidade automática ou billing gratuito; qualquer dado
+  econômico exige configuração consciente pelo operador.
+
+Nenhum provedor é padrão ou privilegiado. Os testes usam somente clientes
+controlados, sem chamadas externas de rede. Em sucesso, a estimativa usada na
+seleção é preservada; o uso observado pelo adaptador selecionado é publicado
+como `available`, `uncertain` ou `unavailable`. O núcleo calcula
+`calculated_cost` somente quando a rota selecionada possui uma referência neutra,
+explícita e completa para as unidades aprovadas `input_token` e `output_token`;
+informação insuficiente mantém o custo como `unavailable`. A composição OpenAI
+pode associar uma referência fornecida pelo operador e, quando uma previsão
+estática de uso também estiver configurada, produzir uma estimativa pré-execução
+`available` com a mesma moeda e referência. Sem essa previsão, a estimativa
+permanece `unavailable`. Não há preço padrão, tokenização, consulta ou
+atualização automática. Mesmo configurado, o custo posterior só pode ficar
+disponível com uso completo e não representa billing, cobrança do provedor ou
+prova de economia entre provedores.
 
 Comece por [AGENTS.md](AGENTS.md) para o fluxo operacional ou por
 [docs/INDEX.md](docs/INDEX.md) para localizar a fonte normativa de cada assunto.

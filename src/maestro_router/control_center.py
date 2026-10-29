@@ -17,13 +17,15 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from google import genai
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -33,7 +35,7 @@ from openai import (
     RateLimitError,
 )
 
-from .adapters import OpenAIResponsesAdapter
+from .adapters import GoogleGeminiInteractionsAdapter, OpenAIResponsesAdapter
 from .api import (
     create_app,
     _execute_selection,
@@ -79,6 +81,45 @@ KNOWN_OPENAI_MODELS = [
     "o1-preview",
     "gpt-4-turbo",
 ]
+
+
+def _extract_google_model(m: Any, discovered_models: list[str]) -> None:
+    """Extrai e valida modelos compatíveis com execução textual aprovada.
+
+    O modelo só é classificado como compatível quando os metadados oficiais
+    demonstrarem explicitamente suporte à ação 'generateContent'. Se
+    supported_actions estiver ausente, None, inválido ou não contiver
+    'generateContent', o modelo é categoricamente excluído (B2).
+    """
+    name = getattr(m, "name", None) or getattr(m, "id", None)
+    if not isinstance(name, str) or not name.strip():
+        return
+    clean_name = name.removeprefix("models/").strip()
+    if not clean_name:
+        return
+
+    if not hasattr(m, "supported_actions"):
+        return
+    actions = getattr(m, "supported_actions")
+    if actions is None:
+        return
+    if isinstance(actions, str):
+        actions = [actions]
+    try:
+        if "generateContent" not in actions:
+            return
+    except (TypeError, ValueError):
+        return
+
+    # Exclusão conservadora de modelos de embedding, imagem, vídeo ou áudio
+    if any(
+        clean_name.startswith(prefix)
+        for prefix in ("text-embedding", "embedding", "imagen", "veo", "aqa", "lyria")
+    ):
+        return
+
+    if clean_name not in discovered_models:
+        discovered_models.append(clean_name)
 
 # Referência de preço oficial documentada para o GPT-4o-mini (ADR 0008).
 # Utilizada estritamente para a rota padrão inicial deste modelo específico.
@@ -153,7 +194,14 @@ class ControlCenterState:
                 "verified_at": None,
                 "models": list(KNOWN_OPENAI_MODELS),
                 "message": None,
-            }
+            },
+            "google": {
+                "api_key": None,
+                "status": "not_registered",
+                "verified_at": None,
+                "models": [],
+                "message": None,
+            },
         }
         # Rota inicial do modelo padrão. Observe que quality_criteria inicia vazio,
         # sem benchmarks inventados ou evidências forjadas.
@@ -181,11 +229,17 @@ class ControlCenterState:
     def _rebuild_runtime_locked(self) -> None:
         """Reconstrói os snapshots imutáveis do RouteCatalog e dos adaptadores."""
         openai_cred = self.credentials.get("openai", {})
-        api_key = openai_cred.get("api_key")
+        openai_key = openai_cred.get("api_key")
+        google_cred = self.credentials.get("google", {})
+        google_key = google_cred.get("api_key")
+
         adapters: dict[str, ExecutionAdapter] = {}
-        if api_key:
-            client = AsyncOpenAI(api_key=api_key)
+        if openai_key:
+            client = AsyncOpenAI(api_key=openai_key)
             adapters["openai-responses"] = OpenAIResponsesAdapter(client=client)
+        if google_key:
+            client = genai.Client(api_key=google_key)
+            adapters["google-gemini-interactions"] = GoogleGeminiInteractionsAdapter(client=client)
 
         valid_routes: list[Route] = []
         invalid_route_ids: list[str] = []
@@ -204,7 +258,16 @@ class ControlCenterState:
             # Se não há chave de API para o provedor externo, a rota não possui adaptador
             # funcional associado. Para preservar a taxonomia da API pública (recusa 422
             # em vez de erro interno 500), a rota permanece desabilitada na composição.
-            has_credential = bool(api_key) if provider == "openai" else False
+            if provider == "openai":
+                has_credential = bool(openai_key)
+                adapter_id = "openai-responses"
+            elif provider == "google":
+                has_credential = bool(google_key)
+                adapter_id = "google-gemini-interactions"
+            else:
+                has_credential = False
+                adapter_id = f"{provider}-adapter"
+
             effective_enabled = user_enabled if has_credential else False
 
             capabilities = frozenset(entry.get("capabilities", []))
@@ -287,7 +350,7 @@ class ControlCenterState:
                 id=route_id,
                 provider=provider,
                 model=model or "unknown",
-                adapter_id="openai-responses",
+                adapter_id=adapter_id,
                 enabled=effective_enabled,
                 capabilities=capabilities,
                 quality_criteria=frozenset(qc_set),
@@ -345,6 +408,8 @@ class ControlCenterState:
                 self.credentials[provider]["status"] = "not_registered"
                 self.credentials[provider]["verified_at"] = None
                 self.credentials[provider]["message"] = None
+                if provider == "google":
+                    self.credentials[provider]["models"] = []
             self._rebuild_runtime_locked()
 
     def update_credential_status(
@@ -385,11 +450,12 @@ class ControlCenterState:
         with self._lock:
             providers_info = []
             for p_id, cred in self.credentials.items():
+                name = "OpenAI" if p_id == "openai" else ("Google" if p_id == "google" else p_id.capitalize())
                 providers_info.append(
                     {
                         "id": p_id,
-                        "name": "OpenAI" if p_id == "openai" else p_id.capitalize(),
-                        "implemented": p_id == "openai",
+                        "name": name,
+                        "implemented": p_id in ("openai", "google"),
                         "credential": {
                             "registered": bool(cred.get("api_key")),
                             "status": cred.get("status", "not_registered"),
@@ -401,9 +467,12 @@ class ControlCenterState:
 
             routes_info = []
             has_openai_key = bool(self.credentials.get("openai", {}).get("api_key"))
+            has_google_key = bool(self.credentials.get("google", {}).get("api_key"))
             for r in self.routes_raw:
+                p = r.get("provider", "openai")
+                has_key = has_google_key if p == "google" else has_openai_key
                 blockers = []
-                if not has_openai_key:
+                if not has_key:
                     blockers.append("Chave do provedor não cadastrada no servidor.")
                 if not r.get("enabled", True):
                     blockers.append("Rota desabilitada manualmente.")
@@ -417,7 +486,7 @@ class ControlCenterState:
                 routes_info.append(
                     {
                         "route_id": r.get("route_id"),
-                        "provider": r.get("provider", "openai"),
+                        "provider": p,
                         "model": r.get("model"),
                         "enabled": r.get("enabled", True),
                         "known_unavailable": r.get("known_unavailable", False),
@@ -442,12 +511,20 @@ class ControlCenterState:
                     }
                 )
 
+            openai_models = self.credentials.get("openai", {}).get(
+                "models", KNOWN_OPENAI_MODELS
+            )
+            google_models = list(
+                self.credentials.get("google", {}).get("models", [])
+            )
             return {
                 "providers": providers_info,
                 "routes": routes_info,
-                "models": self.credentials.get("openai", {}).get(
-                    "models", KNOWN_OPENAI_MODELS
-                ),
+                "models": openai_models,
+                "models_by_provider": {
+                    "openai": openai_models,
+                    "google": google_models,
+                },
             }
 
 
@@ -558,12 +635,12 @@ def _validate_route_payload(body: Any) -> dict[str, Any]:
         )
 
     provider = body.get("provider")
-    if provider != "openai":
+    if provider not in ("openai", "google"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "UNSUPPORTED_PROVIDER",
-                "message": "Apenas o provedor 'openai' possui adaptador suportado no momento.",
+                "message": f"O provedor '{provider}' não possui adaptador suportado no momento.",
             },
         )
 
@@ -894,12 +971,12 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         api_key = body.get("api_key")
 
         # Validação estrita: rejeita provedores não implementados e chaves inválidas
-        if provider != "openai":
+        if provider not in ("openai", "google"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "UNSUPPORTED_PROVIDER",
-                    "message": "Apenas o provedor 'openai' possui adaptador implementado no MVP atual.",
+                    "message": f"O provedor '{provider}' não possui adaptador implementado no MVP atual.",
                 },
             )
 
@@ -912,9 +989,9 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 },
             )
 
-        control_state.set_credential("openai", api_key.strip())
+        control_state.set_credential(provider, api_key.strip())
         return {
-            "provider": "openai",
+            "provider": provider,
             "status": "registered",
             "message": "Credencial cadastrada na memória do servidor. Válida até o servidor ser encerrado.",
         }
@@ -927,7 +1004,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         """Remove a chave de API da memória volátil do backend."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
         provider = request.query_params.get("provider", "openai")
-        if provider != "openai":
+        if provider not in ("openai", "google"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "UNSUPPORTED_PROVIDER", "message": "Provedor não suportado."},
@@ -946,8 +1023,23 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
     ) -> dict[str, Any]:
         """Verifica a credencial via listagem neutra de modelos (zero custo de geração)."""
         await _enforce_admin_security(request, x_maestro_csrf_token)
-        openai_cred = control_state.credentials.get("openai", {})
-        api_key = openai_cred.get("api_key")
+
+        provider = "openai"
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "provider" in body:
+                provider = body["provider"]
+        except Exception:
+            pass
+
+        if provider not in ("openai", "google"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "UNSUPPORTED_PROVIDER", "message": f"Provedor '{provider}' não suportado."},
+            )
+
+        cred = control_state.credentials.get(provider, {})
+        api_key = cred.get("api_key")
 
         if not api_key:
             raise HTTPException(
@@ -958,19 +1050,188 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 },
             )
 
-        client = AsyncOpenAI(api_key=api_key, max_retries=0)
+        if provider == "openai":
+            client = AsyncOpenAI(api_key=api_key, max_retries=0)
+            try:
+                response_models = await client.models.list()
+                model_ids = [m.id for m in response_models.data if hasattr(m, "id")]
+                relevant_models = sorted(
+                    [m for m in model_ids if any(k in m for k in ("gpt-4", "o1", "gpt-3.5"))]
+                )
+                final_models = relevant_models if relevant_models else model_ids[:20]
+
+                updated = control_state.update_credential_status(
+                    "openai",
+                    "verified",
+                    message="Credencial verificada com sucesso via consulta oficial de modelos.",
+                    models=final_models,
+                    expected_key=api_key,
+                )
+                if not updated:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "openai",
+                    "status": "verified",
+                    "models": final_models,
+                    "message": "Credencial verificada com sucesso. Modelos disponíveis atualizados.",
+                }
+            except HTTPException:
+                raise
+            except AuthenticationError:
+                if not control_state.update_credential_status(
+                    "openai",
+                    "access_denied",
+                    message="Acesso recusado pelo provedor. Verifique se a chave está correta.",
+                    expected_key=api_key,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "openai",
+                    "status": "access_denied",
+                    "message": "Acesso recusado pelo provedor (chave inválida ou não autorizada).",
+                }
+            except PermissionDeniedError:
+                if not control_state.update_credential_status(
+                    "openai",
+                    "access_denied",
+                    message="Permissão negada pelo provedor para a credencial informada.",
+                    expected_key=api_key,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "openai",
+                    "status": "access_denied",
+                    "message": "Permissão negada pelo provedor.",
+                }
+            except RateLimitError as error:
+                error_str = str(error).lower()
+                if "quota" in error_str or "insufficient" in error_str:
+                    if not control_state.update_credential_status(
+                        "openai",
+                        "insufficient_quota",
+                        message="Sem saldo ou cota de uso excedida na conta do provedor.",
+                        expected_key=api_key,
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                "code": "CREDENTIAL_SUPERSEDED",
+                                "message": "A credencial foi modificada ou removida durante a verificação.",
+                            },
+                        )
+                    return {
+                        "provider": "openai",
+                        "status": "insufficient_quota",
+                        "message": "Sem saldo ou cota excedida no provedor.",
+                    }
+                if not control_state.update_credential_status(
+                    "openai",
+                    "verification_unavailable",
+                    message="Limite de taxa atingido durante a verificação.",
+                    expected_key=api_key,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "openai",
+                    "status": "verification_unavailable",
+                    "message": "Limite de taxa atingido ao verificar credencial.",
+                }
+            except (APIConnectionError, APITimeoutError):
+                if not control_state.update_credential_status(
+                    "openai",
+                    "verification_unavailable",
+                    message="Não foi possível conectar ao provedor. Verifique sua conexão.",
+                    expected_key=api_key,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "openai",
+                    "status": "verification_unavailable",
+                    "message": "Verificação indisponível (falha de rede ou timeout com o provedor).",
+                }
+            except Exception as err:
+                if not control_state.update_credential_status(
+                    "openai",
+                    "verification_unavailable",
+                    message=f"Falha inesperada na verificação: {type(err).__name__}",
+                    expected_key=api_key,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "openai",
+                    "status": "verification_unavailable",
+                    "message": "Verificação indisponível devido a erro inesperado.",
+                }
+
+        # Verificação Google Gemini via listagem oficial de modelos (zero custo de geração)
+        client = genai.Client(api_key=api_key)
         try:
-            response_models = await client.models.list()
-            model_ids = [m.id for m in response_models.data if hasattr(m, "id")]
-            relevant_models = sorted(
-                [m for m in model_ids if any(k in m for k in ("gpt-4", "o1", "gpt-3.5"))]
-            )
-            final_models = relevant_models if relevant_models else model_ids[:20]
+            models_client = getattr(client, "aio", client).models
+            pager = await models_client.list()
+            discovered_models: list[str] = []
+
+            if isinstance(pager, list):
+                for m in pager:
+                    _extract_google_model(m, discovered_models)
+            elif hasattr(pager, "__aiter__"):
+                async for m in pager:
+                    _extract_google_model(m, discovered_models)
+            elif hasattr(pager, "page") and isinstance(pager.page, list):
+                for m in pager.page:
+                    _extract_google_model(m, discovered_models)
+
+            final_models = sorted(set(discovered_models))
+
+            if final_models:
+                success_msg = "Credencial verificada com sucesso via consulta oficial de modelos."
+                resp_msg = "Credencial verificada com sucesso. Modelos disponíveis atualizados."
+            else:
+                success_msg = (
+                    "Credencial verificada com sucesso, mas nenhum modelo compatível com execução "
+                    "textual foi retornado pelo provedor."
+                )
+                resp_msg = success_msg
 
             updated = control_state.update_credential_status(
-                "openai",
+                "google",
                 "verified",
-                message="Credencial verificada com sucesso via consulta oficial de modelos.",
+                message=success_msg,
                 models=final_models,
                 expected_key=api_key,
             )
@@ -983,58 +1244,28 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     },
                 )
             return {
-                "provider": "openai",
+                "provider": "google",
                 "status": "verified",
                 "models": final_models,
-                "message": "Credencial verificada com sucesso. Modelos disponíveis atualizados.",
+                "message": resp_msg,
             }
         except HTTPException:
             raise
-        except AuthenticationError:
-            if not control_state.update_credential_status(
-                "openai",
-                "access_denied",
-                message="Acesso recusado pelo provedor. Verifique se a chave está correta.",
-                expected_key=api_key,
+        except Exception as err:
+            status_code = getattr(err, "status_code", getattr(err, "code", None))
+            error_str = str(err).lower()
+
+            if (
+                status_code in (400, 401, 403)
+                or "api key not valid" in error_str
+                or "unauthenticated" in error_str
+                or "permission_denied" in error_str
+                or "invalid api key" in error_str
             ):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "CREDENTIAL_SUPERSEDED",
-                        "message": "A credencial foi modificada ou removida durante a verificação.",
-                    },
-                )
-            return {
-                "provider": "openai",
-                "status": "access_denied",
-                "message": "Acesso recusado pelo provedor (chave inválida ou não autorizada).",
-            }
-        except PermissionDeniedError:
-            if not control_state.update_credential_status(
-                "openai",
-                "access_denied",
-                message="Permissão negada pelo provedor para a credencial informada.",
-                expected_key=api_key,
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "CREDENTIAL_SUPERSEDED",
-                        "message": "A credencial foi modificada ou removida durante a verificação.",
-                    },
-                )
-            return {
-                "provider": "openai",
-                "status": "access_denied",
-                "message": "Permissão negada pelo provedor.",
-            }
-        except RateLimitError as error:
-            error_str = str(error).lower()
-            if "quota" in error_str or "insufficient" in error_str:
                 if not control_state.update_credential_status(
-                    "openai",
-                    "insufficient_quota",
-                    message="Sem saldo ou cota de uso excedida na conta do provedor.",
+                    "google",
+                    "access_denied",
+                    message="Acesso recusado pelo provedor (chave inválida ou não autorizada).",
                     expected_key=api_key,
                 ):
                     raise HTTPException(
@@ -1045,14 +1276,39 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                         },
                     )
                 return {
-                    "provider": "openai",
+                    "provider": "google",
+                    "status": "access_denied",
+                    "message": "Acesso recusado pelo provedor (chave inválida ou não autorizada).",
+                }
+
+            if (
+                status_code == 429
+                or "resource_exhausted" in error_str
+                or "quota" in error_str
+            ):
+                if not control_state.update_credential_status(
+                    "google",
+                    "insufficient_quota",
+                    message="Sem saldo ou cota excedida no provedor.",
+                    expected_key=api_key,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
+                return {
+                    "provider": "google",
                     "status": "insufficient_quota",
                     "message": "Sem saldo ou cota excedida no provedor.",
                 }
+
             if not control_state.update_credential_status(
-                "openai",
+                "google",
                 "verification_unavailable",
-                message="Limite de taxa atingido durante a verificação.",
+                message="Verificação indisponível (falha de rede ou timeout com o provedor).",
                 expected_key=api_key,
             ):
                 raise HTTPException(
@@ -1063,59 +1319,28 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                     },
                 )
             return {
-                "provider": "openai",
-                "status": "verification_unavailable",
-                "message": "Limite de taxa atingido ao verificar credencial.",
-            }
-        except (APIConnectionError, APITimeoutError):
-            if not control_state.update_credential_status(
-                "openai",
-                "verification_unavailable",
-                message="Não foi possível conectar ao provedor. Verifique sua conexão.",
-                expected_key=api_key,
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "CREDENTIAL_SUPERSEDED",
-                        "message": "A credencial foi modificada ou removida durante a verificação.",
-                    },
-                )
-            return {
-                "provider": "openai",
+                "provider": "google",
                 "status": "verification_unavailable",
                 "message": "Verificação indisponível (falha de rede ou timeout com o provedor).",
-            }
-        except Exception as err:
-            if not control_state.update_credential_status(
-                "openai",
-                "verification_unavailable",
-                message=f"Falha inesperada na verificação: {type(err).__name__}",
-                expected_key=api_key,
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "CREDENTIAL_SUPERSEDED",
-                        "message": "A credencial foi modificada ou removida durante a verificação.",
-                    },
-                )
-            return {
-                "provider": "openai",
-                "status": "verification_unavailable",
-                "message": "Verificação indisponível devido a erro inesperado.",
             }
 
     @admin_router.get("/models")
     async def list_models(request: Request) -> dict[str, Any]:
         """Retorna os modelos reconhecidos para o adaptador operacional (R3)."""
         await _enforce_local_admin(request)
-        openai_cred = control_state.credentials.get("openai", {})
-        models = openai_cred.get("models", KNOWN_OPENAI_MODELS)
+        provider = request.query_params.get("provider", "openai")
+        if provider not in ("openai", "google"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "UNSUPPORTED_PROVIDER", "message": f"Provedor '{provider}' não suportado."},
+            )
+        default_models = KNOWN_OPENAI_MODELS if provider == "openai" else []
+        cred = control_state.credentials.get(provider, {})
+        models = cred.get("models", default_models)
         return {
-            "provider": "openai",
+            "provider": provider,
             "models": models,
-            "verified": openai_cred.get("status") == "verified",
+            "verified": cred.get("status") == "verified",
         }
 
     @admin_router.post("/routes")
@@ -1431,11 +1656,15 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         # Para as trilhas Econômica e Inteligente:
         # Se não há adaptador operacional no snapshot congelado, rotas externas não possuem execução válida.
-        locally_invalid_ids = frozenset()
-        invalid_exec_ids = frozenset()
-        if not has_adapter:
-            invalid_exec_ids = frozenset(r.id for r in catalog_snapshot if r.enabled)
-            locally_invalid_ids = invalid_exec_ids
+        catalog_invalid_ids = frozenset(
+            r.id
+            for r in catalog_snapshot
+            if r.enabled and not _is_valid_adapter(adapters_snapshot_obj.get(r.adapter_id))
+        )
+        locally_invalid_ids = catalog_invalid_ids | getattr(
+            catalog_snapshot_obj, "configuration_invalid_route_ids", frozenset()
+        )
+        invalid_exec_ids = catalog_invalid_ids
 
         routing_decision = route_request(
             exec_req,

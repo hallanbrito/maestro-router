@@ -36,10 +36,12 @@ interface ProvidersViewProps {
 
 export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated }) => {
   const [loading, setLoading] = useState(false);
+  const [activeCredProvider, setActiveCredProvider] = useState<'openai' | 'google'>('openai');
   const [config, setConfig] = useState<{
     providers: ProviderInfo[];
     routes: RouteConfig[];
     models: string[];
+    models_by_provider?: { openai: string[]; google: string[] };
   }>({
     providers: [],
     routes: [],
@@ -56,6 +58,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   // Route Form State
   const [showRouteModal, setShowRouteModal] = useState(false);
   const [isEditingRoute, setIsEditingRoute] = useState(false);
+  const [routeProvider, setRouteProvider] = useState<'openai' | 'google'>('openai');
   const [routeModel, setRouteModel] = useState('gpt-4o-mini');
   const [customModel, setCustomModel] = useState('');
   const [newRouteId, setNewRouteId] = useState('route-openai-gpt4o-mini');
@@ -100,7 +103,13 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   }, []);
 
   const openaiProvider = config.providers.find((p) => p.id === 'openai');
-  const credentialStatus = openaiProvider?.credential.status || 'not_registered';
+  const googleProvider = config.providers.find((p) => p.id === 'google');
+  const activeProviderInfo = activeCredProvider === 'google' ? googleProvider : openaiProvider;
+  const credentialStatus = activeProviderInfo?.credential.status || 'not_registered';
+
+  const openaiModels = config.models_by_provider?.openai || config.models || ['gpt-4o', 'gpt-4o-mini', 'o1-mini'];
+  const googleModels = config.models_by_provider?.google || [];
+  const activeModels = routeProvider === 'google' ? googleModels : openaiModels;
 
   const handleSaveCredential = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,8 +118,8 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     try {
       setLoading(true);
       setCredentialMessage(null);
-      const res = await saveCredential('openai', apiKeyInput.trim());
-      // Clear secret from React state immediately
+      const res = await saveCredential(activeCredProvider, apiKeyInput.trim());
+      // Limpa imediatamente o segredo do estado do React
       setApiKeyInput('');
       setCredentialMessage({
         type: 'success',
@@ -128,13 +137,14 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   };
 
   const handleRemoveCredential = async () => {
-    if (!window.confirm('Tem certeza de que deseja remover a credencial de memória do servidor?')) {
+    const providerName = activeCredProvider === 'google' ? 'Google' : 'OpenAI';
+    if (!window.confirm(`Tem certeza de que deseja remover a credencial ${providerName} de memória do servidor?`)) {
       return;
     }
     try {
       setLoading(true);
       setCredentialMessage(null);
-      const res = await removeCredential('openai');
+      const res = await removeCredential(activeCredProvider);
       setCredentialMessage({
         type: 'info',
         text: res.message || 'Credencial removida com sucesso.',
@@ -154,7 +164,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     try {
       setLoading(true);
       setCredentialMessage(null);
-      const res = await verifyCredential('openai');
+      const res = await verifyCredential(activeCredProvider);
       const isSuccess = res.status === 'verified';
       setCredentialMessage({
         type: isSuccess ? 'success' : 'error',
@@ -198,9 +208,17 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
 
   const handleOpenAddRoute = () => {
     setIsEditingRoute(false);
-    setNewRouteId(`route-openai-${Date.now().toString().slice(-4)}`);
-    setRouteModel(config.models[0] || 'gpt-4o-mini');
-    setCustomModel('');
+    const p = activeCredProvider;
+    setRouteProvider(p);
+    const available = p === 'google' ? googleModels : openaiModels;
+    setNewRouteId(`route-${p}-${Date.now().toString().slice(-4)}`);
+    if (available.length > 0) {
+      setRouteModel(available[0]);
+      setCustomModel('');
+    } else {
+      setRouteModel('custom');
+      setCustomModel('');
+    }
     setRouteCapabilities('text_generation');
     setQualityCriteriaRows([]);
     setConfigureEconomics(false);
@@ -223,7 +241,10 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   const handleOpenEditRoute = (route: RouteConfig) => {
     setIsEditingRoute(true);
     setNewRouteId(route.route_id);
-    if (config.models.includes(route.model)) {
+    const p = (route.provider === 'google' ? 'google' : 'openai') as 'openai' | 'google';
+    setRouteProvider(p);
+    const available = p === 'google' ? googleModels : openaiModels;
+    if (available.includes(route.model)) {
       setRouteModel(route.model);
       setCustomModel('');
     } else {
@@ -383,7 +404,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         .filter(Boolean);
 
       priceRefObj = {
-        id: routePriceId.trim() || `pricing-openai-${finalModel}-${newRouteId.trim()}`,
+        id: routePriceId.trim() || `pricing-${routeProvider}-${finalModel}-${newRouteId.trim()}`,
         currency: routeCurrency,
         version: routePriceVersion.trim() || '2026-10',
         source: source,
@@ -409,7 +430,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
       setLoading(true);
       await saveRoute({
         route_id: newRouteId.trim(),
-        provider: 'openai',
+        provider: routeProvider,
         model: finalModel,
         enabled: isEditingRoute
           ? (config.routes.find((r) => r.route_id === newRouteId.trim())?.enabled ?? true)
@@ -483,14 +504,45 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
           <div>
             <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
-              Provedores Integrados no MVP: OpenAI
+              Provedores Integrados no MVP: OpenAI, Google Gemini
             </h3>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0.25rem 0 0 0' }}>
-              Atualmente, apenas o adaptador <strong>OpenAI Responses</strong> está implementado no motor. Outros provedores (Google Gemini, Anthropic, etc.) serão adicionados em versões futuras.
+              Adaptadores operacionais implementados: <strong>OpenAI Responses</strong> e <strong>Google Gemini (Interactions API sem estado)</strong>. Outros provedores serão adicionados em versões futuras.
             </p>
           </div>
-          <span className="badge badge-purple">OpenAI Operacional</span>
+          <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+            <span className="badge badge-purple">OpenAI Operacional</span>
+            <span className="badge badge-blue">Google Gemini Operacional</span>
+          </div>
         </div>
+      </div>
+
+      {/* Tabs de Seleção do Provedor para Gerenciamento de Credencial */}
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        <button
+          type="button"
+          className={`btn ${activeCredProvider === 'openai' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => {
+            setActiveCredProvider('openai');
+            setApiKeyInput('');
+            setCredentialMessage(null);
+          }}
+          data-testid="tab-provider-openai"
+        >
+          OpenAI
+        </button>
+        <button
+          type="button"
+          className={`btn ${activeCredProvider === 'google' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => {
+            setActiveCredProvider('google');
+            setApiKeyInput('');
+            setCredentialMessage(null);
+          }}
+          data-testid="tab-provider-google"
+        >
+          Google Gemini
+        </button>
       </div>
 
       {/* Seção 1: Cadastro e Verificação de Credencial */}
@@ -498,7 +550,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         <div className="card-header" style={{ marginBottom: '1rem' }}>
           <h3 className="card-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <KeyRound size={20} color="var(--color-primary)" />
-            Credencial do Provedor (OpenAI)
+            Credencial do Provedor ({activeCredProvider === 'google' ? 'Google Gemini' : 'OpenAI'})
           </h3>
           {renderStatusBadge(credentialStatus)}
         </div>
@@ -530,7 +582,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         <form onSubmit={handleSaveCredential} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
           <div>
             <label htmlFor="apiKeyInput" style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.35rem', color: 'var(--text-primary)' }}>
-              OpenAI API Key (sk-...)
+              {activeCredProvider === 'google' ? 'Gemini API Key (AIza...)' : 'OpenAI API Key (sk-...)'}
             </label>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <input
@@ -538,19 +590,23 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                 type="password"
                 className="input-field"
                 placeholder={
-                  openaiProvider?.credential.registered
+                  activeProviderInfo?.credential.registered
                     ? 'Chave cadastrada na memória (digite para substituir)'
+                    : activeCredProvider === 'google'
+                    ? 'Cole sua Gemini API Key aqui'
                     : 'Cole sua OpenAI API Key aqui'
                 }
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 autoComplete="off"
                 style={{ flex: 1, minWidth: '240px' }}
+                data-testid="credential-api-key-input"
               />
               <button
                 type="submit"
                 className="btn btn-primary"
                 disabled={loading || !apiKeyInput.trim()}
+                data-testid="btn-save-credential"
               >
                 Salvar Chave
               </button>
@@ -565,19 +621,21 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
               type="button"
               className="btn btn-secondary"
               onClick={handleVerifyCredential}
-              disabled={loading || !openaiProvider?.credential.registered}
+              disabled={loading || !activeProviderInfo?.credential.registered}
+              data-testid="btn-verify-credential"
             >
               <RefreshCw size={15} className={loading ? 'spin' : ''} />
               Verificar Credencial (Sem Custos)
             </button>
 
-            {openaiProvider?.credential.registered && (
+            {activeProviderInfo?.credential.registered && (
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={handleRemoveCredential}
                 disabled={loading}
                 style={{ color: 'var(--color-danger)' }}
+                data-testid="btn-remove-credential"
               >
                 <Trash2 size={15} />
                 Remover Chave da Memória
@@ -587,32 +645,76 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         </form>
 
         {/* Modelos Descobertos */}
-        {config.models && config.models.length > 0 && (
+        {activeCredProvider === 'google' ? (
           <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
             <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', display: 'block', marginBottom: '0.35rem' }}>
-              Modelos Reconhecidos / Disponíveis no Provedor:
+              Modelos Descobertos Oficialmente (Google Gemini):
             </span>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-              {config.models.map((m) => (
-                <span
-                  key={m}
-                  className="badge badge-neutral"
-                  style={{ fontSize: '0.75rem', cursor: 'pointer' }}
-                  onClick={() => {
-                    setRouteModel(m);
-                    setNewRouteId(`route-openai-${m.replace(/[^a-zA-Z0-9]/g, '-')}`);
-                    setShowRouteModal(true);
-                  }}
-                  title="Clique para criar uma rota com este modelo"
-                >
-                  {m}
+            {activeProviderInfo?.credential.status !== 'verified' ? (
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.25rem 0' }} data-testid="google-models-unverified-msg">
+                Nenhum modelo descoberto. Realize a verificação da credencial para consultar os modelos oficialmente suportados via Developer API.
+              </p>
+            ) : googleModels.length === 0 ? (
+              <p style={{ fontSize: '0.8rem', color: 'var(--color-warning)', margin: '0.25rem 0' }} data-testid="google-models-empty-msg">
+                Credencial verificada com sucesso, mas nenhum modelo compatível com execução textual foi retornado pelo provedor.
+              </p>
+            ) : (
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                  {googleModels.map((m) => (
+                    <span
+                      key={m}
+                      className="badge badge-neutral"
+                      style={{ fontSize: '0.75rem', cursor: 'pointer' }}
+                      onClick={() => {
+                        setRouteProvider('google');
+                        setRouteModel(m);
+                        setNewRouteId(`route-google-${m.replace(/[^a-zA-Z0-9]/g, '-')}`);
+                        setShowRouteModal(true);
+                      }}
+                      title="Clique para criar uma rota com este modelo"
+                      data-testid={`model-badge-${m}`}
+                    >
+                      {m}
+                    </span>
+                  ))}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem', display: 'block' }}>
+                  * Nota explicativa: "Modelo listado" indica que o provedor oferece o modelo. Para ser utilizado em execuções, o modelo deve estar configurado em uma <strong>rota</strong> abaixo.
                 </span>
-              ))}
-            </div>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem', display: 'block' }}>
-              * Nota explicativa: "Modelo listado" indica que o provedor oferece o modelo. Para ser utilizado em execuções, o modelo deve estar configurado em uma <strong>rota</strong> abaixo.
-            </span>
+              </>
+            )}
           </div>
+        ) : (
+          openaiModels.length > 0 && (
+            <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
+              <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', display: 'block', marginBottom: '0.35rem' }}>
+                Modelos Reconhecidos / Disponíveis no Provedor (OpenAI):
+              </span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                {openaiModels.map((m) => (
+                  <span
+                    key={m}
+                    className="badge badge-neutral"
+                    style={{ fontSize: '0.75rem', cursor: 'pointer' }}
+                    onClick={() => {
+                      setRouteProvider('openai');
+                      setRouteModel(m);
+                      setNewRouteId(`route-openai-${m.replace(/[^a-zA-Z0-9]/g, '-')}`);
+                      setShowRouteModal(true);
+                    }}
+                    title="Clique para criar uma rota com este modelo"
+                    data-testid={`model-badge-${m}`}
+                  >
+                    {m}
+                  </span>
+                ))}
+              </div>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem', display: 'block' }}>
+                * Nota explicativa: "Modelo listado" indica que o provedor oferece o modelo. Para ser utilizado em execuções, o modelo deve estar configurado em uma <strong>rota</strong> abaixo.
+              </span>
+            </div>
+          )
         )}
       </div>
 
@@ -814,6 +916,35 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
             <form onSubmit={handleSaveRouteForm} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                  Provedor
+                </label>
+                <select
+                  className="input-field"
+                  value={routeProvider}
+                  data-testid="route-provider-select"
+                  disabled={isEditingRoute}
+                  onChange={(e) => {
+                    const newP = e.target.value as 'openai' | 'google';
+                    setRouteProvider(newP);
+                    const available = newP === 'google' ? googleModels : openaiModels;
+                    if (available.length > 0) {
+                      setRouteModel(available[0]);
+                      setCustomModel('');
+                    } else {
+                      setRouteModel('custom');
+                      setCustomModel('');
+                    }
+                    setDeclModelExact(false);
+                  }}
+                  style={{ marginBottom: '0.35rem' }}
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="google">Google Gemini</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.25rem' }}>
                   Identificador da Rota (route_id)
                 </label>
                 <input
@@ -846,12 +977,18 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                   }}
                   style={{ marginBottom: '0.35rem' }}
                 >
-                  {config.models.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                  <option value="custom">Outro modelo (digitar manualmente)...</option>
+                  {activeModels.length > 0 && (
+                    <optgroup label="Modelos Descobertos Oficialmente">
+                      {activeModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="Entrada Manual de Modelo">
+                    <option value="custom">Outro modelo (digitar manualmente)...</option>
+                  </optgroup>
                 </select>
 
                 {routeModel === 'custom' && (
@@ -859,11 +996,12 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                     type="text"
                     className="input-field"
                     value={customModel}
+                    data-testid="custom-model-input"
                     onChange={(e) => {
                       setCustomModel(e.target.value);
                       setDeclModelExact(false); // Troca de modelo desmarca a confirmação anterior (R1)
                     }}
-                    placeholder="Digite o identificador do modelo (ex.: gpt-4-turbo)"
+                    placeholder="Digite o identificador do modelo (ex.: gpt-4-turbo ou gemini-2.5-flash)"
                     required
                   />
                 )}

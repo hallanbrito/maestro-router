@@ -1215,3 +1215,87 @@ def test_credential_verification_superseded_on_rate_limit_error(
     # Confirma preservação da nova credencial
     assert clean_state.credentials["openai"]["api_key"] == "sk-new-key"
     assert clean_state.credentials["openai"]["status"] == "registered"
+
+
+def test_admin_executions_uses_exclusive_frozen_composition_when_credential_removed_concurrently(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Requisição em andamento em /admin/executions usa exclusivamente sua composição congelada, ignorando remoção concorrente de credencial."""
+    clean_state.set_credential("openai", "sk-active-test-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    async def concurrent_removal_execute(*args, **kwargs):
+        # 2. A credencial é removida do estado vivo enquanto a requisição 1 está em trânsito
+        clean_state.remove_credential("openai")
+        assert clean_state.credentials["openai"]["api_key"] is None
+        return TextExecutionResult(
+            content="Execução concluída com sucesso usando adaptador congelado.",
+            usage=NormalizedUsage(
+                status="available",
+                items=(
+                    NormalizedUsageItem(unit="input_token", quantity=15),
+                    NormalizedUsageItem(unit="output_token", quantity=10),
+                ),
+            ),
+        )
+
+    mock_adapter = MagicMock()
+    mock_adapter.execute = AsyncMock(side_effect=concurrent_removal_execute)
+    clean_state.current_adapters["openai-responses"] = mock_adapter
+
+    # 1 e 3. Requisição 1 inicia com composição congelada válida e completa mesmo após remoção da credencial
+    res_req_1 = client.post(
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={"task": "Tarefa da requisição 1 em andamento", "track": "economica"},
+    )
+    assert res_req_1.status_code == 200
+    assert "Execução concluída com sucesso usando adaptador congelado" in str(res_req_1.json())
+
+    # 4. Nova requisição posterior observa o novo estado (sem credencial/adaptador) e é recusada com 422
+    res_req_2 = client.post(
+        "/admin/executions",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={"task": "Nova requisição posterior à remoção", "track": "economica"},
+    )
+    assert res_req_2.status_code == 422
+    assert res_req_2.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_admin_preview_uses_exclusive_frozen_composition_when_credential_removed_concurrently(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Requisição em andamento em /admin/preview usa exclusivamente sua composição congelada, ignorando remoção concorrente de credencial."""
+    clean_state.set_credential("openai", "sk-active-test-key")
+    import maestro_router.control_center as cc_mod
+    original_route_request = cc_mod.route_request
+
+    def concurrent_removal_routing(*args, **kwargs):
+        # 2. A credencial é removida do estado vivo durante a tomada de decisão da requisição 1
+        clean_state.remove_credential("openai")
+        assert clean_state.credentials["openai"]["api_key"] is None
+        return original_route_request(*args, **kwargs)
+
+    with patch("maestro_router.control_center.route_request", side_effect=concurrent_removal_routing):
+        # 1 e 3. Requisição 1 inicia com composição congelada e retorna rota recomendada
+        res_prev_1 = client.post(
+            "/admin/preview",
+            json={"task": "Tarefa preview 1", "track": "economica"},
+        )
+        assert res_prev_1.status_code == 200
+        data_1 = res_prev_1.json()
+        assert data_1["recommended_route"] is not None
+        assert data_1["recommended_route"]["route_id"] == "route-openai-gpt4o-mini"
+
+    # 4. Nova requisição posterior observa o novo estado sem chave/adaptador e recusa recomendação
+    res_prev_2 = client.post(
+        "/admin/preview",
+        json={"task": "Tarefa preview 2 posterior à remoção", "track": "economica"},
+    )
+    assert res_prev_2.status_code == 200
+    data_2 = res_prev_2.json()
+    assert data_2["recommended_route"] is None
+    assert "A chave de API do provedor não está cadastrada" in data_2["explanation"]

@@ -1304,13 +1304,17 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
         comp = _request_composition.get()
         if comp is not None:
-            catalog_snapshot_obj, _ = comp
+            catalog_snapshot_obj, adapters_snapshot_obj = comp
         else:
-            catalog_snapshot_obj, _ = control_state.get_runtime_snapshot()
+            catalog_snapshot_obj, adapters_snapshot_obj = control_state.get_runtime_snapshot()
 
         catalog_snapshot = catalog_snapshot_obj.snapshot()
         all_routes_count = len(catalog_snapshot)
-        has_api_key = bool(control_state.credentials.get("openai", {}).get("api_key"))
+        has_adapter = any(
+            _is_valid_adapter(adapters_snapshot_obj.get(r.adapter_id))
+            for r in catalog_snapshot
+            if r.enabled
+        )
 
         # Apresentação realista e auditável das políticas de trilha
         track_policies = {
@@ -1426,10 +1430,10 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 }
 
         # Para as trilhas Econômica e Inteligente:
-        # Se não há chave de API cadastrada, as rotas externas não possuem associação válida de execução.
+        # Se não há adaptador operacional no snapshot congelado, rotas externas não possuem execução válida.
         locally_invalid_ids = frozenset()
         invalid_exec_ids = frozenset()
-        if not has_api_key:
+        if not has_adapter:
             invalid_exec_ids = frozenset(r.id for r in catalog_snapshot if r.enabled)
             locally_invalid_ids = invalid_exec_ids
 
@@ -1510,7 +1514,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
             explanation = error_info.get("message", "Nenhuma rota elegível.")
             if all_routes_count == 0:
                 explanation = "Falta configurar uma rota de IA. O catálogo de rotas está vazio."
-            elif not has_api_key:
+            elif not has_adapter:
                 explanation = "A chave de API do provedor não está cadastrada na memória do servidor."
 
             return {
@@ -1610,10 +1614,13 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
             active_catalog, active_adapters
         )
         enabled_routes = tuple(route for route in catalog_snapshot if route.enabled)
-        has_api_key = bool(control_state.credentials.get("openai", {}).get("api_key"))
+        has_executable_route = any(
+            _is_valid_adapter(adapter_snapshot.get(route.adapter_id))
+            for route in enabled_routes
+        )
 
-        # Sem chave de API cadastrada, rotas externas não possuem execução válida -> 422 NO_ELIGIBLE_ROUTE
-        if not has_api_key or not enabled_routes:
+        # Sem rota habilitada com adaptador operacional no snapshot congelado -> 422 NO_ELIGIBLE_ROUTE
+        if not has_executable_route:
             return JSONResponse(
                 status_code=422,
                 content={
@@ -1629,14 +1636,14 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                         "factors": [
                             {
                                 "category": "route",
-                                "description": "Nenhuma chave de API está cadastrada na memória do servidor.",
+                                "description": "Nenhuma chave de API ou adaptador válido está configurado para as rotas habilitadas.",
                             }
                         ],
                         "exclusions": [
                             {
                                 "route_id": r.id,
                                 "reason": "missing_credential",
-                                "description": f"{r.id} está desabilitada por ausência de credencial de API.",
+                                "description": f"{r.id} está desabilitada por ausência de credencial de API ou adaptador.",
                             }
                             for r in catalog_snapshot
                         ],

@@ -17,7 +17,7 @@ flowchart TD
     H -->|sim| I["Estratégia<br/>lowest-estimated-cost"]
     I --> J["Rota selecionada<br/>e decisão validada"]
     J --> K["Fronteira neutra de adaptador"]
-    K --> L["Adaptador injetado<br/>controlado ou OpenAI Responses"]
+    K --> L["Adaptador injetado<br/>controlado, OpenAI Responses ou Google Gemini Interactions"]
     L --> M["Resultado e uso normalizados"]
     M --> N["economics<br/>estimate preservada<br/>usage completo, parcial ou indisponível<br/>custo exato ou indisponível"]
     N --> O["Resposta à aplicação<br/>resultado + decisão + economia"]
@@ -25,7 +25,7 @@ flowchart TD
 
 ## Fluxo principal
 
-A API valida a solicitação, consulta alternativas neutras, aplica elegibilidade antes da economia e usa a estratégia configurada para selecionar exatamente uma rota. Só uma decisão válida permite acionar o adaptador associado. Existe um primeiro adaptador externo para a OpenAI Responses API, além dos adaptadores controlados dos testes; todos precisam ser construídos e injetados explicitamente.
+A API valida a solicitação, consulta alternativas neutras, aplica elegibilidade antes da economia e usa a estratégia configurada para selecionar exatamente uma rota. Só uma decisão válida permite acionar o adaptador associado. Existem adaptadores externos concretos para OpenAI Responses API e Google Gemini Developer API (Interactions API sem estado), além dos adaptadores controlados dos testes; todos precisam ser construídos e injetados explicitamente.
 
 ## Fluxo de recusa
 
@@ -44,6 +44,7 @@ Ambas encerram o fluxo sem chamar provedor e preservam uma explicação objetiva
 | ✅ Implementado | Seleção determinística | Estratégia `lowest-estimated-cost`, candidato único, comparação decimal, desempate por `route.id` e validação interna. |
 | ✅ Implementado | Fronteira neutra de execução | Contrato assíncrono, associação manual em memória, execução única da rota selecionada e normalização de sucesso ou erro, provados com adaptador controlado nos testes. |
 | ✅ Implementado | Primeiro adaptador externo | OpenAI Responses API por cliente assíncrono injetado, atuando como executor neutro de uma única rota já selecionada. |
+| ✅ Implementado | Segundo adaptador externo | Google Gemini Developer API via Interactions API sem estado (`GoogleGeminiInteractionsAdapter`), com `store=false` obrigatório e cliente assíncrono injetado. |
 | ✅ Implementado | Uso normalizado da OpenAI | `input_tokens` e `output_tokens` são traduzidos para unidades neutras e projetados como uso completo, parcial ou indisponível, sem detalhes externos. |
 | ✅ Implementado | Estimativa operacional pré-execução | A composição OpenAI suporta múltiplas rotas (via `MAESTRO_OPENAI_ROUTES_JSON`). No modo legado, aceita uma previsão estática opcional; no modo multirrota, a previsão é obrigatória para cada entrada. Produz estimativas decimais exatas no bootstrap para limites econômicos sem chamadas externas. |
 | ✅ Implementado | Custo calculado | A primeira política posterior calcula somente `input_token` e `output_token` com aritmética decimal exata. A composição OpenAI aceita uma referência opcional fornecida pelo operador, sem preço padrão, consulta ou atualização automática; o custo posterior só fica disponível com configuração válida e uso completo. O valor não representa billing nem comprova economia entre provedores. |

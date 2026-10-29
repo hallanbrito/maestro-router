@@ -174,11 +174,15 @@ def _normalize_usage(response: object) -> NormalizedUsage:
 
 
 def _normalize_observed_model(response: object) -> str | None:
-    """Extract and validate the model identifier reported by the provider.
+    """Extract, canonicalize, and validate the model identifier reported by Google.
 
-    Returns the model string if it is non-blank and free of isolated Unicode
-    surrogates; otherwise returns None so post-execution validation rejects
-    unverifiable model identities.
+    In the Google Gemini Developer API, the Interaction response may report
+    the model either as a canonical name (e.g. ``gemini-2.5-flash``) or prefixed
+    with the API namespace (e.g. ``models/gemini-2.5-flash``).
+
+    This normalizer strips the standard ``models/`` prefix if present, producing
+    the provider-neutral canonical model identity. Unexpected formats or prefixes
+    are not guessed, preserving conservative post-execution validation (B4).
     """
     model = _read_attribute(response, "model")
     if (
@@ -186,7 +190,11 @@ def _normalize_observed_model(response: object) -> str | None:
         and any(not character.isspace() for character in model)
         and not any(0xD800 <= ord(character) <= 0xDFFF for character in model)
     ):
-        return model
+        trimmed = model.strip()
+        if trimmed.startswith("models/"):
+            canonical = trimmed[len("models/") :].strip()
+            return canonical if canonical else None
+        return trimmed
     return None
 
 

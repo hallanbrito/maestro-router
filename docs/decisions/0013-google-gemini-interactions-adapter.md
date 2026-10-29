@@ -1,4 +1,18 @@
-# ADR 0013 — Adaptador Google Gemini via Interactions API sem estado
+# 0013. Adaptador Google Gemini via Interactions API sem estado
+
+- **Status:** Aprovada pelo Product Owner (Issue #28)
+- **Data:** 2026-10-29
+- **Autor:** Maestro Router Team
+- **Decisores:** PO Hallan
+
+## Contexto
+
+O Maestro Router foi concebido para oferecer uma camada neutra de roteamento entre
+múltiplos provedores de modelos de IA, sem conceder preferência comercial ou algorítmica
+a nenhum provedor. Após o estabelecimento do adaptador OpenAI Responses (ADR 0002)
+e da consolidação da camada administrativa local do Control Center (ADR 0012), a
+Issue #28 determinou a implementação do segundo provedor externo concreto: a
+Google Gemini Developer API utilizando a Interactions API em modo sem estado.
 
 ## Decisão
 

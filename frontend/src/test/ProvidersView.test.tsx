@@ -883,6 +883,8 @@ describe('ProvidersView component', () => {
 
     expect(screen.getByText(/Credencial do Provedor \(Google Gemini\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Gemini API Key \(AIza\.\.\.\)/i)).toBeInTheDocument();
+    // Antes da verificação, deve exibir mensagem explicativa de não verificado (B3)
+    expect(screen.getByTestId('google-models-unverified-msg')).toBeInTheDocument();
 
     const input = screen.getByTestId('credential-api-key-input') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'AIzaSyFakeKeyForTest123' } });
@@ -901,6 +903,48 @@ describe('ProvidersView component', () => {
     await waitFor(() => {
       expect(verifySpy).toHaveBeenCalledWith('google');
     });
+  });
+
+  it('exibe mensagem transparente quando a verificação Google não encontra modelos compatíveis (B1/B3)', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'google',
+          name: 'Google',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-29T12:00:00Z',
+            message: 'Credencial verificada com sucesso, mas nenhum modelo compatível com execução textual foi retornado pelo provedor.',
+          },
+        },
+      ],
+      routes: [],
+      models: [],
+      models_by_provider: {
+        openai: [],
+        google: [], // Zero modelos compatíveis retornados oficialmente
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tab-provider-google')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('tab-provider-google'));
+
+    // Deve exibir mensagem explícita de zero modelos, sem inventar fallback hardcoded
+    expect(screen.getByTestId('google-models-empty-msg')).toBeInTheDocument();
+    expect(screen.queryByTestId('model-badge-gemini-2.5-flash')).not.toBeInTheDocument();
+
+    // Ao abrir modal de rota, modelo deve iniciar como custom (já que não há modelos oficiais)
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+    const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('custom');
+    expect(screen.getByTestId('custom-model-input')).toBeInTheDocument();
   });
 
   it('permite criar rota Google Gemini com provider "google" e dados econômicos conscientes', async () => {

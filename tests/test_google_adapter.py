@@ -451,3 +451,112 @@ async def test_no_secret_leak_in_exceptions_or_responses() -> None:
     # O texto da exceção pública normalizada deve ser imutável e livre do segredo
     assert str(exc_info.value) == "A execução externa falhou."
     assert SENSITIVE_SECRET not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("raw_model", "expected_canonical"),
+    [
+        ("models/gemini-2.5-flash", "gemini-2.5-flash"),
+        ("gemini-2.5-flash", "gemini-2.5-flash"),
+        ("models/gemini-2.5-pro", "gemini-2.5-pro"),
+        ("models/custom-text-model", "custom-text-model"),
+        ("models/", None),
+        ("models/   ", None),
+        ("other/gemini-2.5-flash", "other/gemini-2.5-flash"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+@pytest.mark.anyio
+async def test_observed_model_canonicalization(
+    raw_model: str | None, expected_canonical: str | None
+) -> None:
+    interaction = completed_interaction("Texto de resposta", model=raw_model)
+    client = FakeGenAIClient(interaction)
+    adapter = GoogleGeminiInteractionsAdapter(client)
+
+    result = await adapter.execute(
+        TextExecutionRequest(task="Tarefa"), execution_route()
+    )
+
+    assert result.observed_model == expected_canonical
+
+
+@pytest.mark.anyio
+async def test_prefixed_google_interaction_model_matches_exact_route_identity() -> None:
+    """Verifica que o prefixo oficial 'models/' do Google não quebra model_identity_exact (B4)."""
+    from decimal import Decimal
+    from maestro_router.economics import (
+        PriceReference,
+        UnitPrice,
+        calculate_post_execution_cost,
+    )
+
+    # Rota configurada pelo operador com a identidade neutra oficial
+    route = ExecutionRoute(
+        id="route-google-flash",
+        provider="google",
+        model="gemini-2.5-flash",
+    )
+
+    # Resposta oficial do Google trazendo a identidade com namespace da API
+    interaction = completed_interaction(
+        "Resposta",
+        model="models/gemini-2.5-flash",
+        usage=SimpleNamespace(total_input_tokens=1000, total_output_tokens=500),
+    )
+    client = FakeGenAIClient(interaction)
+    adapter = GoogleGeminiInteractionsAdapter(client)
+
+    result = await adapter.execute(
+        TextExecutionRequest(task="Tarefa"), route
+    )
+
+    # Adaptador canonicaliza para o identificador neutro correspondente à rota
+    assert result.observed_model == "gemini-2.5-flash"
+    assert result.observed_model == route.model
+
+    # Prova que o cálculo econômico com model_identity_exact=True funciona estritamente
+    price_ref = PriceReference(
+        id="pricing-google-flash",
+        route_id=route.id,
+        provider=route.provider,
+        model=route.model,
+        currency="USD",
+        version="2026-10",
+        source="https://ai.google.dev/pricing",
+        rates=(
+            UnitPrice(unit="input_token", rate="0.0750", base=1_000_000),
+            UnitPrice(unit="output_token", rate="0.3000", base=1_000_000),
+        ),
+        conditions=(),
+        context_complete=True,
+        units_exhaustive=True,
+        no_double_counting=True,
+        model_identity_exact=True,
+    )
+
+    from maestro_router.routing import EconomicEstimate
+
+    estimate = EconomicEstimate(
+        status="available",
+        currency="USD",
+        amount="0.000225",
+        price_reference=price_ref.id,
+        assumptions=(),
+    )
+
+    cost = calculate_post_execution_cost(
+        route_id=route.id,
+        provider=route.provider,
+        configured_model=route.model,
+        observed_model=result.observed_model,
+        estimate=estimate,
+        usage=result.usage,
+        reference=price_ref,
+    )
+
+    assert cost.status == "available"
+    assert cost.amount == "0.000225"
+    assert Decimal(cost.amount) > Decimal("0")

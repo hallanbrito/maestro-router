@@ -108,7 +108,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   const credentialStatus = activeProviderInfo?.credential.status || 'not_registered';
 
   const openaiModels = config.models_by_provider?.openai || config.models || ['gpt-4o', 'gpt-4o-mini', 'o1-mini'];
-  const googleModels = config.models_by_provider?.google || ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro'];
+  const googleModels = config.models_by_provider?.google || [];
   const activeModels = routeProvider === 'google' ? googleModels : openaiModels;
 
   const handleSaveCredential = async (e: React.FormEvent) => {
@@ -212,8 +212,13 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     setRouteProvider(p);
     const available = p === 'google' ? googleModels : openaiModels;
     setNewRouteId(`route-${p}-${Date.now().toString().slice(-4)}`);
-    setRouteModel(available[0] || (p === 'google' ? 'gemini-2.5-flash' : 'gpt-4o-mini'));
-    setCustomModel('');
+    if (available.length > 0) {
+      setRouteModel(available[0]);
+      setCustomModel('');
+    } else {
+      setRouteModel('custom');
+      setCustomModel('');
+    }
     setRouteCapabilities('text_generation');
     setQualityCriteriaRows([]);
     setConfigureEconomics(false);
@@ -640,34 +645,76 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
         </form>
 
         {/* Modelos Descobertos */}
-        {((activeCredProvider === 'google' ? googleModels : openaiModels) || []).length > 0 && (
+        {activeCredProvider === 'google' ? (
           <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
             <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', display: 'block', marginBottom: '0.35rem' }}>
-              Modelos Reconhecidos / Disponíveis no Provedor ({activeCredProvider === 'google' ? 'Google' : 'OpenAI'}):
+              Modelos Descobertos Oficialmente (Google Gemini):
             </span>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-              {(activeCredProvider === 'google' ? googleModels : openaiModels).map((m) => (
-                <span
-                  key={m}
-                  className="badge badge-neutral"
-                  style={{ fontSize: '0.75rem', cursor: 'pointer' }}
-                  onClick={() => {
-                    setRouteProvider(activeCredProvider);
-                    setRouteModel(m);
-                    setNewRouteId(`route-${activeCredProvider}-${m.replace(/[^a-zA-Z0-9]/g, '-')}`);
-                    setShowRouteModal(true);
-                  }}
-                  title="Clique para criar uma rota com este modelo"
-                  data-testid={`model-badge-${m}`}
-                >
-                  {m}
+            {activeProviderInfo?.credential.status !== 'verified' ? (
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.25rem 0' }} data-testid="google-models-unverified-msg">
+                Nenhum modelo descoberto. Realize a verificação da credencial para consultar os modelos oficialmente suportados via Developer API.
+              </p>
+            ) : googleModels.length === 0 ? (
+              <p style={{ fontSize: '0.8rem', color: 'var(--color-warning)', margin: '0.25rem 0' }} data-testid="google-models-empty-msg">
+                Credencial verificada com sucesso, mas nenhum modelo compatível com execução textual foi retornado pelo provedor.
+              </p>
+            ) : (
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                  {googleModels.map((m) => (
+                    <span
+                      key={m}
+                      className="badge badge-neutral"
+                      style={{ fontSize: '0.75rem', cursor: 'pointer' }}
+                      onClick={() => {
+                        setRouteProvider('google');
+                        setRouteModel(m);
+                        setNewRouteId(`route-google-${m.replace(/[^a-zA-Z0-9]/g, '-')}`);
+                        setShowRouteModal(true);
+                      }}
+                      title="Clique para criar uma rota com este modelo"
+                      data-testid={`model-badge-${m}`}
+                    >
+                      {m}
+                    </span>
+                  ))}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem', display: 'block' }}>
+                  * Nota explicativa: "Modelo listado" indica que o provedor oferece o modelo. Para ser utilizado em execuções, o modelo deve estar configurado em uma <strong>rota</strong> abaixo.
                 </span>
-              ))}
-            </div>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem', display: 'block' }}>
-              * Nota explicativa: "Modelo listado" indica que o provedor oferece o modelo. Para ser utilizado em execuções, o modelo deve estar configurado em uma <strong>rota</strong> abaixo.
-            </span>
+              </>
+            )}
           </div>
+        ) : (
+          openaiModels.length > 0 && (
+            <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
+              <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', display: 'block', marginBottom: '0.35rem' }}>
+                Modelos Reconhecidos / Disponíveis no Provedor (OpenAI):
+              </span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                {openaiModels.map((m) => (
+                  <span
+                    key={m}
+                    className="badge badge-neutral"
+                    style={{ fontSize: '0.75rem', cursor: 'pointer' }}
+                    onClick={() => {
+                      setRouteProvider('openai');
+                      setRouteModel(m);
+                      setNewRouteId(`route-openai-${m.replace(/[^a-zA-Z0-9]/g, '-')}`);
+                      setShowRouteModal(true);
+                    }}
+                    title="Clique para criar uma rota com este modelo"
+                    data-testid={`model-badge-${m}`}
+                  >
+                    {m}
+                  </span>
+                ))}
+              </div>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem', display: 'block' }}>
+                * Nota explicativa: "Modelo listado" indica que o provedor oferece o modelo. Para ser utilizado em execuções, o modelo deve estar configurado em uma <strong>rota</strong> abaixo.
+              </span>
+            </div>
+          )
         )}
       </div>
 
@@ -880,7 +927,13 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                     const newP = e.target.value as 'openai' | 'google';
                     setRouteProvider(newP);
                     const available = newP === 'google' ? googleModels : openaiModels;
-                    setRouteModel(available[0] || (newP === 'google' ? 'gemini-2.5-flash' : 'gpt-4o-mini'));
+                    if (available.length > 0) {
+                      setRouteModel(available[0]);
+                      setCustomModel('');
+                    } else {
+                      setRouteModel('custom');
+                      setCustomModel('');
+                    }
                     setDeclModelExact(false);
                   }}
                   style={{ marginBottom: '0.35rem' }}
@@ -924,12 +977,18 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                   }}
                   style={{ marginBottom: '0.35rem' }}
                 >
-                  {activeModels.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                  <option value="custom">Outro modelo (digitar manualmente)...</option>
+                  {activeModels.length > 0 && (
+                    <optgroup label="Modelos Descobertos Oficialmente">
+                      {activeModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="Entrada Manual de Modelo">
+                    <option value="custom">Outro modelo (digitar manualmente)...</option>
+                  </optgroup>
                 </select>
 
                 {routeModel === 'custom' && (
@@ -937,6 +996,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                     type="text"
                     className="input-field"
                     value={customModel}
+                    data-testid="custom-model-input"
                     onChange={(e) => {
                       setCustomModel(e.target.value);
                       setDeclModelExact(false); // Troca de modelo desmarca a confirmação anterior (R1)

@@ -547,3 +547,139 @@ def test_request_snapshot_isolation_with_google(clean_state: ControlCenterState)
     resp_2 = test_client.post("/v1/executions", json={"task": "Tarefa posterior"})
     assert resp_2.status_code == 422
     assert resp_2.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_extract_google_model_conservative_compatibility_filter() -> None:
+    """Verifica estritamente as regras de filtro conservador de modelos do Google (B2)."""
+    from maestro_router.control_center import _extract_google_model
+
+    discovered: list[str] = []
+
+    # 1. supported_actions=["generateContent"] -> incluído
+    m1 = MagicMock(name="models/gemini-2.5-flash", supported_actions=["generateContent"])
+    m1.name = "models/gemini-2.5-flash"
+    _extract_google_model(m1, discovered)
+    assert discovered == ["gemini-2.5-flash"]
+
+    # 2. Duplicata -> evitada na lista final
+    _extract_google_model(m1, discovered)
+    assert discovered == ["gemini-2.5-flash"]
+
+    # 3. Somente embedContent -> excluído
+    m2 = MagicMock(name="models/text-embedding-004", supported_actions=["embedContent"])
+    m2.name = "models/text-embedding-004"
+    _extract_google_model(m2, discovered)
+    assert "text-embedding-004" not in discovered
+
+    # 4. supported_actions=None -> excluído
+    m3 = MagicMock(name="models/gemini-unknown", supported_actions=None)
+    m3.name = "models/gemini-unknown"
+    _extract_google_model(m3, discovered)
+    assert "gemini-unknown" not in discovered
+
+    # 5. Atributo supported_actions ausente -> excluído
+    class NoActionsModel:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    m4 = NoActionsModel("models/gemini-no-attr")
+    _extract_google_model(m4, discovered)
+    assert "gemini-no-attr" not in discovered
+
+    # 6. Modelos incompatíveis de imagem, vídeo, embedding -> excluídos mesmo com generateContent
+    m_imagen = MagicMock(name="models/imagen-3.0", supported_actions=["generateContent"])
+    m_imagen.name = "models/imagen-3.0"
+    _extract_google_model(m_imagen, discovered)
+    assert "imagen-3.0" not in discovered
+
+    m_veo = MagicMock(name="models/veo-2.0", supported_actions=["generateContent"])
+    m_veo.name = "models/veo-2.0"
+    _extract_google_model(m_veo, discovered)
+    assert "veo-2.0" not in discovered
+
+    m_emb = MagicMock(name="models/embedding-001", supported_actions=["generateContent"])
+    m_emb.name = "models/embedding-001"
+    _extract_google_model(m_emb, discovered)
+    assert "embedding-001" not in discovered
+
+    # Apenas o modelo válido comprovado permanece
+    assert discovered == ["gemini-2.5-flash"]
+
+
+def test_verify_gemini_credentials_zero_compatible_models_returns_empty_list(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Verifica que zero modelos compatíveis resulta em lista vazia e sem catálogo hardcoded (B1)."""
+    clean_state.set_credential("google", "ai-valid-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+    cookies = session_resp.cookies
+
+    # Provedor retorna apenas modelo não compatível (ex.: somente embedding)
+    mock_models = [
+        MagicMock(name="models/text-embedding-004", supported_actions=["embedContent"]),
+    ]
+    mock_models[0].name = "models/text-embedding-004"
+
+    class AsyncMockPager:
+        def __init__(self, items: list[Any]) -> None:
+            self.items = items
+        def __aiter__(self):
+            self._iter = iter(self.items)
+            return self
+        async def __anext__(self):
+            try:
+                return next(self._iter)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    with patch("maestro_router.control_center.genai.Client") as mock_client_cls:
+        mock_instance = MagicMock()
+        mock_instance.aio.models.list = AsyncMock(return_value=AsyncMockPager(mock_models))
+        mock_client_cls.return_value = mock_instance
+
+        verify_resp = client.post(
+            "/admin/credentials/verify",
+            headers={"X-Maestro-CSRF-Token": csrf_token},
+            cookies=cookies,
+            json={"provider": "google"},
+        )
+        assert verify_resp.status_code == 200
+        data = verify_resp.json()
+        assert data["provider"] == "google"
+        assert data["status"] == "verified"
+        # Deve ser lista vazia, NUNCA lista hardcoded
+        assert data["models"] == []
+        assert "nenhum modelo compatível" in data["message"].lower()
+
+    # Confirma em /admin/config
+    config_resp = client.get("/admin/config", cookies=cookies)
+    assert config_resp.status_code == 200
+    cfg = config_resp.json()
+    assert cfg["models_by_provider"]["google"] == []
+
+    # Confirma em /admin/models?provider=google
+    models_resp = client.get("/admin/models?provider=google", cookies=cookies)
+    assert models_resp.status_code == 200
+    assert models_resp.json()["models"] == []
+    assert models_resp.json()["verified"] is True
+
+
+def test_remove_google_credential_clears_models(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Verifica que remover a credencial Google limpa os modelos descobertos."""
+    clean_state.set_credential("google", "ai-valid-key")
+    clean_state.credentials["google"]["models"] = ["gemini-2.5-flash"]
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+    cookies = session_resp.cookies
+
+    del_resp = client.delete(
+        "/admin/credentials?provider=google",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=cookies,
+    )
+    assert del_resp.status_code == 200
+    assert clean_state.credentials["google"]["models"] == []
+    assert clean_state.credentials["google"]["status"] == "not_registered"

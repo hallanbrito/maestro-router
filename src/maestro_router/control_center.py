@@ -82,28 +82,44 @@ KNOWN_OPENAI_MODELS = [
     "gpt-4-turbo",
 ]
 
-KNOWN_GOOGLE_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
-]
-
 
 def _extract_google_model(m: Any, discovered_models: list[str]) -> None:
-    """Extrai e valida modelos compatíveis com execução textual aprovada."""
+    """Extrai e valida modelos compatíveis com execução textual aprovada.
+
+    O modelo só é classificado como compatível quando os metadados oficiais
+    demonstrarem explicitamente suporte à ação 'generateContent'. Se
+    supported_actions estiver ausente, None, inválido ou não contiver
+    'generateContent', o modelo é categoricamente excluído (B2).
+    """
     name = getattr(m, "name", None) or getattr(m, "id", None)
     if not isinstance(name, str) or not name.strip():
         return
-    clean_name = name.removeprefix("models/")
-    actions = getattr(m, "supported_actions", None)
-    if actions is not None and "generateContent" not in actions:
+    clean_name = name.removeprefix("models/").strip()
+    if not clean_name:
         return
+
+    if not hasattr(m, "supported_actions"):
+        return
+    actions = getattr(m, "supported_actions")
+    if actions is None:
+        return
+    if isinstance(actions, str):
+        actions = [actions]
+    try:
+        if "generateContent" not in actions:
+            return
+    except (TypeError, ValueError):
+        return
+
+    # Exclusão conservadora de modelos de embedding, imagem, vídeo ou áudio
     if any(
         clean_name.startswith(prefix)
         for prefix in ("text-embedding", "embedding", "imagen", "veo", "aqa", "lyria")
     ):
         return
-    discovered_models.append(clean_name)
+
+    if clean_name not in discovered_models:
+        discovered_models.append(clean_name)
 
 # Referência de preço oficial documentada para o GPT-4o-mini (ADR 0008).
 # Utilizada estritamente para a rota padrão inicial deste modelo específico.
@@ -183,7 +199,7 @@ class ControlCenterState:
                 "api_key": None,
                 "status": "not_registered",
                 "verified_at": None,
-                "models": list(KNOWN_GOOGLE_MODELS),
+                "models": [],
                 "message": None,
             },
         }
@@ -392,6 +408,8 @@ class ControlCenterState:
                 self.credentials[provider]["status"] = "not_registered"
                 self.credentials[provider]["verified_at"] = None
                 self.credentials[provider]["message"] = None
+                if provider == "google":
+                    self.credentials[provider]["models"] = []
             self._rebuild_runtime_locked()
 
     def update_credential_status(
@@ -496,8 +514,8 @@ class ControlCenterState:
             openai_models = self.credentials.get("openai", {}).get(
                 "models", KNOWN_OPENAI_MODELS
             )
-            google_models = self.credentials.get("google", {}).get(
-                "models", KNOWN_GOOGLE_MODELS
+            google_models = list(
+                self.credentials.get("google", {}).get("models", [])
             )
             return {
                 "providers": providers_info,
@@ -1198,12 +1216,22 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 for m in pager.page:
                     _extract_google_model(m, discovered_models)
 
-            final_models = sorted(discovered_models) if discovered_models else list(KNOWN_GOOGLE_MODELS)
+            final_models = sorted(set(discovered_models))
+
+            if final_models:
+                success_msg = "Credencial verificada com sucesso via consulta oficial de modelos."
+                resp_msg = "Credencial verificada com sucesso. Modelos disponíveis atualizados."
+            else:
+                success_msg = (
+                    "Credencial verificada com sucesso, mas nenhum modelo compatível com execução "
+                    "textual foi retornado pelo provedor."
+                )
+                resp_msg = success_msg
 
             updated = control_state.update_credential_status(
                 "google",
                 "verified",
-                message="Credencial verificada com sucesso via consulta oficial de modelos.",
+                message=success_msg,
                 models=final_models,
                 expected_key=api_key,
             )
@@ -1219,7 +1247,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 "provider": "google",
                 "status": "verified",
                 "models": final_models,
-                "message": "Credencial verificada com sucesso. Modelos disponíveis atualizados.",
+                "message": resp_msg,
             }
         except HTTPException:
             raise
@@ -1306,7 +1334,7 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "UNSUPPORTED_PROVIDER", "message": f"Provedor '{provider}' não suportado."},
             )
-        default_models = KNOWN_OPENAI_MODELS if provider == "openai" else KNOWN_GOOGLE_MODELS
+        default_models = KNOWN_OPENAI_MODELS if provider == "openai" else []
         cred = control_state.credentials.get(provider, {})
         models = cred.get("models", default_models)
         return {

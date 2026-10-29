@@ -388,6 +388,26 @@ describe('ProvidersView component', () => {
     expect(inputRate.value).toBe('0.00');
     expect(outputRate.value).toBe('0.00');
 
+    // Confirma que o atalho NÃO preenche fonte nem marca declarações automaticamente (R1)
+    expect((screen.getByTestId('route-price-source') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('decl-rates-complete') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId('decl-model-exact') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId('decl-usage-applicable') as HTMLInputElement).checked).toBe(false);
+
+    // Operador preenche conscientemente a fonte, estimativas e confirma as declarações
+    fireEvent.change(screen.getByTestId('route-price-source'), {
+      target: { value: 'https://openai.com/api/pricing-free-tier' },
+    });
+    fireEvent.change(screen.getByTestId('route-estimated-input'), {
+      target: { value: '1000' },
+    });
+    fireEvent.change(screen.getByTestId('route-estimated-output'), {
+      target: { value: '500' },
+    });
+    fireEvent.click(screen.getByTestId('decl-rates-complete'));
+    fireEvent.click(screen.getByTestId('decl-model-exact'));
+    fireEvent.click(screen.getByTestId('decl-usage-applicable'));
+
     // Submete a rota com tarifas zero
     const saveBtn = screen.getByRole('button', { name: /Salvar Rota/i });
     fireEvent.click(saveBtn);
@@ -400,10 +420,127 @@ describe('ProvidersView component', () => {
               { unit: 'input_token', rate: '0.00', base: 1000000 },
               { unit: 'output_token', rate: '0.00', base: 1000000 },
             ],
+            source: 'https://openai.com/api/pricing-free-tier',
+            context_complete: true,
+            model_identity_exact: true,
           }),
+          estimated_usage: {
+            input_token: 1000,
+            output_token: 500,
+            applicability_confirmed: true,
+          },
         })
       );
     });
+  });
+
+  it('atalho de tarifas zero não contorna as declarações obrigatórias nem permite salvar sem fonte e confirmações (R1)', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute');
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    const toggleEconomics = screen.getByTestId('toggle-economics-config');
+    fireEvent.click(toggleEconomics);
+
+    const zeroRatesBtn = screen.getByTestId('btn-set-zero-rates');
+    fireEvent.click(zeroRatesBtn);
+
+    // Tenta salvar imediatamente sem preencher estimativas, fonte nem declarações
+    const saveBtn = screen.getByRole('button', { name: /Salvar Rota/i });
+    fireEvent.click(saveBtn);
+
+    expect(
+      screen.getByText(/Previsão de tokens de entrada e saída deve conter números inteiros positivos/i)
+    ).toBeInTheDocument();
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it('ao trocar o modelo de uma rota, desmarca a confirmação de identidade exata do modelo anterior (R1)', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [
+        {
+          route_id: 'route-model-change-test',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          enabled: true,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [],
+          price_reference: {
+            id: 'pricing-1',
+            currency: 'USD',
+            version: '2026-10',
+            source: 'https://openai.com/api/pricing',
+            rates: [{ unit: 'input_token', rate: '0.1500', base: 1000000 }],
+            context_complete: true,
+            model_identity_exact: true,
+          },
+          estimated_usage: {
+            input_token: 1000,
+            output_token: 500,
+            applicability_confirmed: true,
+          },
+          status: 'ready',
+          blockers: [],
+        },
+      ],
+      models: ['gpt-4o-mini', 'gpt-4o'],
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-route-route-model-change-test')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('edit-route-route-model-change-test'));
+
+    const checkboxModelExact = screen.getByTestId('decl-model-exact') as HTMLInputElement;
+    expect(checkboxModelExact.checked).toBe(true);
+
+    // Troca o modelo no select
+    const selectModel = screen.getByTestId('route-model-select');
+    fireEvent.change(selectModel, { target: { value: 'gpt-4o' } });
+
+    // A confirmação de identidade exata do modelo DEVE ser desmarcada automaticamente (R1)
+    expect(checkboxModelExact.checked).toBe(false);
   });
 
   it('rejeita tarifas inválidas com mensagem de erro no modal sem enviar para o backend', async () => {
@@ -586,6 +723,97 @@ describe('ProvidersView component', () => {
             {
               criterion: 'fast_response',
               evidence_references: ['benchmarks/latency-q3.json#p95', 'docs/slo.md#fast'],
+            },
+          ],
+        })
+      );
+    });
+  });
+
+  it('preserva a associação individual entre múltiplos critérios e evidências sem achatamento em lista única (R2)', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-22',
+            message: null,
+          },
+        },
+      ],
+      routes: [
+        {
+          route_id: 'route-multi-evidence-test',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          enabled: true,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [
+            {
+              criterion: 'fast_response',
+              evidence_references: ['benchmarks/latency-q3.json#p95'],
+            },
+            {
+              criterion: 'strict_instruction_following',
+              evidence_references: ['eval-accuracy-v2.json'],
+            },
+          ],
+          status: 'ready',
+          blockers: [],
+        },
+      ],
+      models: ['gpt-4o-mini'],
+    });
+
+    const saveSpy = vi.spyOn(apiService, 'saveRoute').mockResolvedValueOnce({
+      status: 'saved',
+      route: {
+        route_id: 'route-multi-evidence-test',
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        enabled: true,
+        known_unavailable: false,
+        capabilities: ['text_generation'],
+        quality_criteria: [],
+        status: 'ready',
+        blockers: [],
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('edit-route-route-multi-evidence-test')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('edit-route-route-multi-evidence-test'));
+
+    // Verifica que cada critério está no seu próprio input sem achatamento
+    expect((screen.getByTestId('criterion-name-0') as HTMLInputElement).value).toBe('fast_response');
+    expect((screen.getByTestId('criterion-evidence-0') as HTMLInputElement).value).toBe('benchmarks/latency-q3.json#p95');
+    expect((screen.getByTestId('criterion-name-1') as HTMLInputElement).value).toBe('strict_instruction_following');
+    expect((screen.getByTestId('criterion-evidence-1') as HTMLInputElement).value).toBe('eval-accuracy-v2.json');
+
+    const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          route_id: 'route-multi-evidence-test',
+          quality_criteria: [
+            {
+              criterion: 'fast_response',
+              evidence_references: ['benchmarks/latency-q3.json#p95'],
+            },
+            {
+              criterion: 'strict_instruction_following',
+              evidence_references: ['eval-accuracy-v2.json'],
             },
           ],
         })

@@ -1063,3 +1063,155 @@ def test_defensive_validation_non_dict_and_unhashable_track(
     )
     assert res_exec_track.status_code == 400
     assert res_exec_track.json()["error"]["code"] == "INVALID_TRACK"
+
+
+def test_route_editing_preserves_multiple_criteria_with_distinct_evidence_references(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Preserva a associação estrita de evidências para cada critério sem achatamento nem reatribuição cruzada (R2)."""
+    clean_state.set_credential("openai", "sk-active-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    create_payload = {
+        "route_id": "route-multi-criteria",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "enabled": True,
+        "capabilities": ["text"],
+        "quality_criteria": [
+            {
+                "criterion": "fast_response",
+                "evidence_references": ["benchmark-latency-p95.json", "slo-spec.md#latency"],
+            },
+            {
+                "criterion": "strict_instruction_following",
+                "evidence_references": ["eval-accuracy-v2.json"],
+            },
+        ],
+    }
+    res_create = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json=create_payload,
+    )
+    assert res_create.status_code == 200
+
+    # Edita apenas as capacidades da rota
+    res_edit = client.post(
+        "/admin/routes",
+        headers={"X-Maestro-CSRF-Token": csrf_token},
+        cookies=session_resp.cookies,
+        json={"route_id": "route-multi-criteria", "capabilities": ["text", "code"]},
+    )
+    assert res_edit.status_code == 200
+    updated = res_edit.json()["route"]
+
+    # Critério A mantém exclusivamente as evidências de A; Critério B mantém exclusivamente as de B
+    qc_map = {qc["criterion"]: qc["evidence_references"] for qc in updated["quality_criteria"]}
+    assert qc_map["fast_response"] == ["benchmark-latency-p95.json", "slo-spec.md#latency"]
+    assert qc_map["strict_instruction_following"] == ["eval-accuracy-v2.json"]
+    assert "eval-accuracy-v2.json" not in qc_map["fast_response"]
+    assert "benchmark-latency-p95.json" not in qc_map["strict_instruction_following"]
+
+
+def test_security_remote_client_blocked_from_all_admin_endpoints_without_affecting_public_api(
+    clean_state: ControlCenterState,
+) -> None:
+    """Bloqueia clientes remotos em /admin/config, /admin/models e /admin/preview, sem afetar /v1/executions (R3)."""
+    app = create_control_center_app(clean_state)
+    remote_client = TestClient(app, base_url="http://192.168.1.100:8000", client=("192.168.1.50", 42100))
+
+    # 1. /admin/config rejeita cliente remoto
+    resp_cfg = remote_client.get("/admin/config")
+    assert resp_cfg.status_code == 403
+    assert resp_cfg.json()["error"]["code"] == "FORBIDDEN"
+
+    # 2. /admin/models rejeita cliente remoto
+    resp_models = remote_client.get("/admin/models")
+    assert resp_models.status_code == 403
+    assert resp_models.json()["error"]["code"] == "FORBIDDEN"
+
+    # 3. /admin/preview rejeita cliente remoto
+    resp_prev = remote_client.post("/admin/preview", json={"task": "tarefa teste", "track": "economica"})
+    assert resp_prev.status_code == 403
+    assert resp_prev.json()["error"]["code"] == "FORBIDDEN"
+
+    # 4. /v1/executions da API pública NÃO é bloqueado pela restrição de loopback (reponde 422 NO_ELIGIBLE_ROUTE)
+    resp_pub = remote_client.post("/v1/executions", json={"task": "tarefa teste"})
+    assert resp_pub.status_code == 422
+    assert resp_pub.json()["error"]["code"] == "NO_ELIGIBLE_ROUTE"
+
+
+def test_credential_verification_superseded_on_authentication_error(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Erro de autenticação de credencial defasada retorna HTTP 409 sem alterar a nova credencial ativa (R4)."""
+    from openai import AuthenticationError
+
+    clean_state.set_credential("openai", "sk-old-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    async def delayed_auth_error(*args, **kwargs):
+        # Simula que o operador substituiu a chave enquanto a chamada com a chave antiga falhava
+        clean_state.set_credential("openai", "sk-new-key")
+        raise AuthenticationError(
+            message="Incorrect API key provided.",
+            response=MagicMock(status_code=401, headers={}),
+            body={"error": {"message": "Incorrect API key provided."}},
+        )
+
+    with patch("maestro_router.control_center.AsyncOpenAI") as mock_openai_cls:
+        mock_instance = MagicMock()
+        mock_instance.models.list = AsyncMock(side_effect=delayed_auth_error)
+        mock_openai_cls.return_value = mock_instance
+
+        resp = client.post(
+            "/admin/credentials/verify",
+            headers={"X-Maestro-CSRF-Token": csrf_token},
+            cookies=session_resp.cookies,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "CREDENTIAL_SUPERSEDED"
+
+    # A nova chave 'sk-new-key' deve permanecer com status 'registered' e não ser marcada como 'access_denied'
+    assert clean_state.credentials["openai"]["api_key"] == "sk-new-key"
+    assert clean_state.credentials["openai"]["status"] == "registered"
+
+
+def test_credential_verification_superseded_on_rate_limit_error(
+    client: TestClient, clean_state: ControlCenterState
+) -> None:
+    """Erro de rate limit de credencial defasada retorna HTTP 409 sem alterar a nova credencial ativa (R4)."""
+    from openai import RateLimitError
+
+    clean_state.set_credential("openai", "sk-old-key")
+    session_resp = client.get("/admin/session")
+    csrf_token = session_resp.json()["csrf_token"]
+
+    async def delayed_rate_limit_error(*args, **kwargs):
+        clean_state.set_credential("openai", "sk-new-key")
+        raise RateLimitError(
+            message="You exceeded your current quota.",
+            response=MagicMock(status_code=429, headers={}),
+            body={"error": {"message": "You exceeded your current quota."}},
+        )
+
+    with patch("maestro_router.control_center.AsyncOpenAI") as mock_openai_cls:
+        mock_instance = MagicMock()
+        mock_instance.models.list = AsyncMock(side_effect=delayed_rate_limit_error)
+        mock_openai_cls.return_value = mock_instance
+
+        resp = client.post(
+            "/admin/credentials/verify",
+            headers={"X-Maestro-CSRF-Token": csrf_token},
+            cookies=session_resp.cookies,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "CREDENTIAL_SUPERSEDED"
+
+    # Confirma preservação da nova credencial
+    assert clean_state.credentials["openai"]["api_key"] == "sk-new-key"
+    assert clean_state.credentials["openai"]["status"] == "registered"

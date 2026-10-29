@@ -798,11 +798,8 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     admin_router = APIRouter(prefix="/admin", tags=["Control Center Admin"])
 
-    async def _enforce_admin_security(
-        request: Request,
-        x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
-    ) -> None:
-        """Valida token CSRF, Origin e Sessão para operações administrativas mutantes (B4)."""
+    async def _enforce_local_admin(request: Request) -> None:
+        """Valida que a solicitação administrativa provém estritamente do loopback local (ADR 0012 / R3)."""
         if not _is_local_client(request):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -831,6 +828,12 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 },
             )
 
+    async def _enforce_admin_security(
+        request: Request,
+        x_maestro_csrf_token: str | None = Header(None, alias="X-Maestro-CSRF-Token"),
+    ) -> None:
+        """Valida loopback local, token CSRF, Origin e Sessão para operações administrativas mutantes (B4)."""
+        await _enforce_local_admin(request)
         session_id = request.cookies.get("maestro_admin_session")
         if not control_state.validate_session_and_csrf(session_id, x_maestro_csrf_token):
             raise HTTPException(
@@ -843,33 +846,8 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.get("/session")
     async def get_session(response: Response, request: Request) -> dict[str, str]:
-        """Obtém ou atualiza a sessão administrativa local segura e token CSRF (B4)."""
-        if not _is_local_client(request):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "FORBIDDEN",
-                    "message": "Acesso administrativo restrito a conexões locais de loopback.",
-                },
-            )
-        origin = request.headers.get("origin")
-        if origin is not None and not _is_safe_origin(origin):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "FORBIDDEN",
-                    "message": "Origem da solicitação administrativa não autorizada.",
-                },
-            )
-        referer = request.headers.get("referer")
-        if referer is not None and not _is_safe_origin(referer):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "FORBIDDEN",
-                    "message": "Referência (Referer) da solicitação administrativa não autorizada.",
-                },
-            )
+        """Obtém ou atualiza a sessão administrativa local segura e token CSRF (B4 / R3)."""
+        await _enforce_local_admin(request)
         existing_session = request.cookies.get("maestro_admin_session")
         if existing_session and existing_session in control_state.sessions:
             csrf_token = control_state.sessions[existing_session]["csrf_token"]
@@ -886,8 +864,9 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         return {"csrf_token": csrf_token}
 
     @admin_router.get("/config")
-    async def get_config() -> dict[str, Any]:
-        """Retorna metadados seguros dos provedores, credenciais e rotas operacionais."""
+    async def get_config(request: Request) -> dict[str, Any]:
+        """Retorna metadados seguros dos provedores, credenciais e rotas operacionais (R3)."""
+        await _enforce_local_admin(request)
         return control_state.get_safe_config()
 
     @admin_router.post("/credentials")
@@ -1012,24 +991,38 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         except HTTPException:
             raise
         except AuthenticationError:
-            control_state.update_credential_status(
+            if not control_state.update_credential_status(
                 "openai",
                 "access_denied",
                 message="Acesso recusado pelo provedor. Verifique se a chave está correta.",
                 expected_key=api_key,
-            )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CREDENTIAL_SUPERSEDED",
+                        "message": "A credencial foi modificada ou removida durante a verificação.",
+                    },
+                )
             return {
                 "provider": "openai",
                 "status": "access_denied",
                 "message": "Acesso recusado pelo provedor (chave inválida ou não autorizada).",
             }
         except PermissionDeniedError:
-            control_state.update_credential_status(
+            if not control_state.update_credential_status(
                 "openai",
                 "access_denied",
                 message="Permissão negada pelo provedor para a credencial informada.",
                 expected_key=api_key,
-            )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CREDENTIAL_SUPERSEDED",
+                        "message": "A credencial foi modificada ou removida durante a verificação.",
+                    },
+                )
             return {
                 "provider": "openai",
                 "status": "access_denied",
@@ -1038,47 +1031,75 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
         except RateLimitError as error:
             error_str = str(error).lower()
             if "quota" in error_str or "insufficient" in error_str:
-                control_state.update_credential_status(
+                if not control_state.update_credential_status(
                     "openai",
                     "insufficient_quota",
                     message="Sem saldo ou cota de uso excedida na conta do provedor.",
                     expected_key=api_key,
-                )
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "CREDENTIAL_SUPERSEDED",
+                            "message": "A credencial foi modificada ou removida durante a verificação.",
+                        },
+                    )
                 return {
                     "provider": "openai",
                     "status": "insufficient_quota",
                     "message": "Sem saldo ou cota excedida no provedor.",
                 }
-            control_state.update_credential_status(
+            if not control_state.update_credential_status(
                 "openai",
                 "verification_unavailable",
                 message="Limite de taxa atingido durante a verificação.",
                 expected_key=api_key,
-            )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CREDENTIAL_SUPERSEDED",
+                        "message": "A credencial foi modificada ou removida durante a verificação.",
+                    },
+                )
             return {
                 "provider": "openai",
                 "status": "verification_unavailable",
                 "message": "Limite de taxa atingido ao verificar credencial.",
             }
         except (APIConnectionError, APITimeoutError):
-            control_state.update_credential_status(
+            if not control_state.update_credential_status(
                 "openai",
                 "verification_unavailable",
                 message="Não foi possível conectar ao provedor. Verifique sua conexão.",
                 expected_key=api_key,
-            )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CREDENTIAL_SUPERSEDED",
+                        "message": "A credencial foi modificada ou removida durante a verificação.",
+                    },
+                )
             return {
                 "provider": "openai",
                 "status": "verification_unavailable",
                 "message": "Verificação indisponível (falha de rede ou timeout com o provedor).",
             }
         except Exception as err:
-            control_state.update_credential_status(
+            if not control_state.update_credential_status(
                 "openai",
                 "verification_unavailable",
                 message=f"Falha inesperada na verificação: {type(err).__name__}",
                 expected_key=api_key,
-            )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "CREDENTIAL_SUPERSEDED",
+                        "message": "A credencial foi modificada ou removida durante a verificação.",
+                    },
+                )
             return {
                 "provider": "openai",
                 "status": "verification_unavailable",
@@ -1086,8 +1107,9 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
             }
 
     @admin_router.get("/models")
-    async def list_models() -> dict[str, Any]:
-        """Retorna os modelos reconhecidos para o adaptador operacional."""
+    async def list_models(request: Request) -> dict[str, Any]:
+        """Retorna os modelos reconhecidos para o adaptador operacional (R3)."""
+        await _enforce_local_admin(request)
         openai_cred = control_state.credentials.get("openai", {})
         models = openai_cred.get("models", KNOWN_OPENAI_MODELS)
         return {
@@ -1127,37 +1149,43 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
                 },
             )
 
+        # Leitura, mesclagem, validação e gravação executadas atomicamente sob um único lock (R2)
         with control_state._lock:
             existing_route = next(
                 (r for r in control_state.routes_raw if r.get("route_id") == route_id),
                 None,
             )
 
-        # Se for edição de rota existente e o operador omitir campos no payload,
-        # preserva os dados originais (qualidade com evidências, tarifas e estimativas) (B2)
-        merged_body = dict(body)
-        if existing_route is not None:
-            if "provider" not in merged_body:
-                merged_body["provider"] = existing_route.get("provider", "openai")
-            if "model" not in merged_body:
-                merged_body["model"] = existing_route.get("model")
-            if "capabilities" not in merged_body:
-                merged_body["capabilities"] = existing_route.get("capabilities", [])
-            if "quality_criteria" not in merged_body:
-                merged_body["quality_criteria"] = existing_route.get("quality_criteria", [])
-            if "price_reference" not in merged_body and existing_route.get("price_reference") is not None:
-                merged_body["price_reference"] = existing_route.get("price_reference")
-            if "estimated_usage" not in merged_body and existing_route.get("estimated_usage") is not None:
-                merged_body["estimated_usage"] = existing_route.get("estimated_usage")
-            if "enabled" not in merged_body:
-                merged_body["enabled"] = existing_route.get("enabled", True)
-            if "known_unavailable" not in merged_body:
-                merged_body["known_unavailable"] = existing_route.get("known_unavailable", False)
+            # Se for edição de rota existente e o operador omitir campos no payload,
+            # preserva os dados originais (qualidade com evidências, tarifas e estimativas) (B2)
+            merged_body = dict(body)
+            if existing_route is not None:
+                if "provider" not in merged_body:
+                    merged_body["provider"] = existing_route.get("provider", "openai")
+                if "model" not in merged_body:
+                    merged_body["model"] = existing_route.get("model")
+                if "capabilities" not in merged_body:
+                    merged_body["capabilities"] = existing_route.get("capabilities", [])
+                if "quality_criteria" not in merged_body:
+                    merged_body["quality_criteria"] = existing_route.get("quality_criteria", [])
+                if "price_reference" not in merged_body and existing_route.get("price_reference") is not None:
+                    merged_body["price_reference"] = existing_route.get("price_reference")
+                if "estimated_usage" not in merged_body and existing_route.get("estimated_usage") is not None:
+                    merged_body["estimated_usage"] = existing_route.get("estimated_usage")
+                if "enabled" not in merged_body:
+                    merged_body["enabled"] = existing_route.get("enabled", True)
+                if "known_unavailable" not in merged_body:
+                    merged_body["known_unavailable"] = existing_route.get("known_unavailable", False)
 
-        # Validação integral dos dados ANTES de qualquer modificação de estado.
-        validated_route = _validate_route_payload(merged_body)
+            # Validação integral dos dados DENTRO do lock antes de qualquer modificação (R2)
+            try:
+                validated_route = _validate_route_payload(merged_body)
+            except ValueError as err:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": "INVALID_REQUEST", "message": f"Configuração de rota inválida: {err}"},
+                )
 
-        with control_state._lock:
             existing_idx = next(
                 (i for i, r in enumerate(control_state.routes_raw) if r.get("route_id") == validated_route["route_id"]),
                 None,
@@ -1217,7 +1245,8 @@ def create_control_center_app(state: ControlCenterState | None = None) -> FastAP
 
     @admin_router.post("/preview")
     async def preview_routing(request: Request) -> dict[str, Any]:
-        """Prévia explicável de decisão sem acionamento externo (zero custo de tokens)."""
+        """Prévia explicável de decisão sem acionamento externo (zero custo de tokens) (R3)."""
+        await _enforce_local_admin(request)
         try:
             body = await request.json()
         except Exception:

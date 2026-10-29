@@ -60,8 +60,9 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
   const [customModel, setCustomModel] = useState('');
   const [newRouteId, setNewRouteId] = useState('route-openai-gpt4o-mini');
   const [routeCapabilities, setRouteCapabilities] = useState('text_generation');
-  const [routeQualityCriteria, setRouteQualityCriteria] = useState('');
-  const [routeEvidenceReferences, setRouteEvidenceReferences] = useState('');
+  const [qualityCriteriaRows, setQualityCriteriaRows] = useState<
+    Array<{ criterion: string; evidence_references: string }>
+  >([]);
 
   // Economic Configuration State (ADR 0006 e 0007 / B1)
   const [configureEconomics, setConfigureEconomics] = useState(false);
@@ -201,8 +202,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     setRouteModel(config.models[0] || 'gpt-4o-mini');
     setCustomModel('');
     setRouteCapabilities('text_generation');
-    setRouteQualityCriteria('');
-    setRouteEvidenceReferences('');
+    setQualityCriteriaRows([]);
     setConfigureEconomics(false);
     setRouteCurrency('USD');
     setRoutePriceId('');
@@ -232,15 +232,18 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     }
     setRouteCapabilities(route.capabilities.join(', '));
 
-    // Extrai critérios e suas evidências documentadas reais (B2)
-    const criteriaStrings = route.quality_criteria.map((qc) =>
-      typeof qc === 'string' ? qc : qc.criterion
+    // Extrai critérios preservando a associação exclusiva com suas respectivas evidências (R2)
+    setQualityCriteriaRows(
+      route.quality_criteria.map((qc) => {
+        if (typeof qc === 'string') {
+          return { criterion: qc, evidence_references: '' };
+        }
+        return {
+          criterion: qc.criterion,
+          evidence_references: (qc.evidence_references || []).join(', '),
+        };
+      })
     );
-    const evidenceStrings = route.quality_criteria.flatMap((qc) =>
-      typeof qc === 'string' ? [] : qc.evidence_references
-    );
-    setRouteQualityCriteria(criteriaStrings.join(', '));
-    setRouteEvidenceReferences(evidenceStrings.join(', '));
 
     if (route.price_reference && route.price_reference.rates) {
       setConfigureEconomics(true);
@@ -285,13 +288,14 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     setConfigureEconomics(true);
     setRouteInputRate('0.00');
     setRouteOutputRate('0.00');
-    setRoutePriceSource('Gratuidade declarada pelo operador (ADR 0012)');
     setRoutePriceConditions('declaracao-local-zero');
-    setRouteEstimatedInput('1000');
-    setRouteEstimatedOutput('500');
-    setDeclRatesComplete(true);
-    setDeclModelExact(true);
-    setDeclUsageApplicable(true);
+    // Não inventar fonte, não pré-preencher tokens e não marcar declarações automaticamente (R1)
+    setRoutePriceSource('');
+    setRouteEstimatedInput('');
+    setRouteEstimatedOutput('');
+    setDeclRatesComplete(false);
+    setDeclModelExact(false);
+    setDeclUsageApplicable(false);
     setEconomicError(null);
   };
 
@@ -308,27 +312,30 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
 
-    const criteriaList = routeQualityCriteria
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+    // Valida cada critério preservando estritamente suas referências individuais (R2)
+    const qcs: Array<{ criterion: string; evidence_references: string[] }> = [];
+    for (const row of qualityCriteriaRows) {
+      const c = row.criterion.trim();
+      const evs = row.evidence_references
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
 
-    const evidenceRefs = routeEvidenceReferences
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-
-    if (criteriaList.length > 0 && evidenceRefs.length === 0) {
-      alert(
-        'Para declarar critérios de qualidade, é obrigatório fornecer ao menos uma referência de evidência documentada pelo operador.'
-      );
-      return;
+      if (!c && evs.length === 0) {
+        continue;
+      }
+      if (c && evs.length === 0) {
+        alert(
+          `O critério de qualidade "${c}" exige ao menos uma referência de evidência documentada pelo operador.`
+        );
+        return;
+      }
+      if (!c && evs.length > 0) {
+        alert('Informe o identificador do critério para as evidências listadas.');
+        return;
+      }
+      qcs.push({ criterion: c, evidence_references: evs });
     }
-
-    const qcs = criteriaList.map((c) => ({
-      criterion: c,
-      evidence_references: evidenceRefs,
-    }));
 
     let priceRefObj: any = null;
     let estUsageObj: any = null;
@@ -832,7 +839,11 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                 <select
                   className="input-field"
                   value={routeModel}
-                  onChange={(e) => setRouteModel(e.target.value)}
+                  data-testid="route-model-select"
+                  onChange={(e) => {
+                    setRouteModel(e.target.value);
+                    setDeclModelExact(false); // Troca de modelo desmarca a confirmação anterior (R1)
+                  }}
                   style={{ marginBottom: '0.35rem' }}
                 >
                   {config.models.map((m) => (
@@ -848,7 +859,10 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                     type="text"
                     className="input-field"
                     value={customModel}
-                    onChange={(e) => setCustomModel(e.target.value)}
+                    onChange={(e) => {
+                      setCustomModel(e.target.value);
+                      setDeclModelExact(false); // Troca de modelo desmarca a confirmação anterior (R1)
+                    }}
                     placeholder="Digite o identificador do modelo (ex.: gpt-4-turbo)"
                     required
                   />
@@ -868,37 +882,101 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                 />
               </div>
 
-              <div>
-                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.25rem' }}>
-                  Critérios de Qualidade (opcional, separados por vírgula)
-                </label>
-                <input
-                  type="text"
-                  className="input-field"
-                  value={routeQualityCriteria}
-                  onChange={(e) => setRouteQualityCriteria(e.target.value)}
-                  placeholder="ex: summary_faithfulness_accepted"
-                />
-              </div>
-
-              {routeQualityCriteria.trim().length > 0 && (
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.25rem' }}>
-                    Referências de Evidência da Qualidade (obrigatório se houver critério)
+              <div style={{ padding: '0.75rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                  <label style={{ fontSize: '0.85rem', fontWeight: 600, margin: 0 }}>
+                    Critérios de Qualidade e Evidências Documentadas (ADR 0012 / R2)
                   </label>
-                  <input
-                    type="text"
-                    className="input-field"
-                    value={routeEvidenceReferences}
-                    onChange={(e) => setRouteEvidenceReferences(e.target.value)}
-                    placeholder="ex: avaliacao-equipe-2026, benchmark-auditado-v1"
-                    required
-                  />
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    O Maestro proíbe declarações de qualidade sem referências de evidências auditáveis fornecidas pelo operador.
-                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() =>
+                      setQualityCriteriaRows([
+                        ...qualityCriteriaRows,
+                        { criterion: '', evidence_references: '' },
+                      ])
+                    }
+                    style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                    data-testid="btn-add-criterion"
+                  >
+                    + Adicionar Critério
+                  </button>
                 </div>
-              )}
+
+                {qualityCriteriaRows.length === 0 ? (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
+                    Nenhum critério configurado. O Maestro não infere critérios ou qualidades sem referências de evidências auditáveis fornecidas pelo operador.
+                  </p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    {qualityCriteriaRows.map((row, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '1fr 1fr auto',
+                          gap: '0.5rem',
+                          alignItems: 'flex-end',
+                          padding: '0.5rem',
+                          background: 'var(--bg-tertiary, #1f2937)',
+                          borderRadius: '4px',
+                          border: '1px solid var(--border-color, #374151)',
+                        }}
+                      >
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                            Critério
+                          </label>
+                          <input
+                            type="text"
+                            className="input-field"
+                            value={row.criterion}
+                            onChange={(e) => {
+                              const updated = [...qualityCriteriaRows];
+                              updated[idx].criterion = e.target.value;
+                              setQualityCriteriaRows(updated);
+                            }}
+                            placeholder="ex: fast_response"
+                            style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                            data-testid={`criterion-name-${idx}`}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.2rem' }}>
+                            Evidências Documentadas
+                          </label>
+                          <input
+                            type="text"
+                            className="input-field"
+                            value={row.evidence_references}
+                            onChange={(e) => {
+                              const updated = [...qualityCriteriaRows];
+                              updated[idx].evidence_references = e.target.value;
+                              setQualityCriteriaRows(updated);
+                            }}
+                            placeholder="ex: benchmark-p95.json, slo.md"
+                            style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+                            data-testid={`criterion-evidence-${idx}`}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => {
+                            const updated = qualityCriteriaRows.filter((_, i) => i !== idx);
+                            setQualityCriteriaRows(updated);
+                          }}
+                          style={{ fontSize: '0.75rem', padding: '0.35rem 0.6rem', color: 'var(--color-danger)' }}
+                          title="Remover critério"
+                          data-testid={`btn-remove-criterion-${idx}`}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               <div style={{ padding: '0.75rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>

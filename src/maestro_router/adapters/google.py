@@ -42,8 +42,8 @@ class GoogleGeminiInteractionsAdapter:
 
         The adapter does not select routes, infer prices, or expose provider
         payloads. It sends one non-streaming, stateless Interactions API request
-        with store=False, without previous_interaction_id or background execution,
-        and returns only validated text and normalized usage.
+        with store=False and automatic_continuation=False, without previous_interaction_id
+        or background execution, and returns only validated text and normalized usage.
         """
 
         try:
@@ -54,6 +54,7 @@ class GoogleGeminiInteractionsAdapter:
                 model=route.model,
                 input=_interaction_input(request),
                 store=False,
+                automatic_continuation=False,
             )
         except (httpx.TimeoutException, TimeoutError) as error:
             raise ExecutionTimeoutError(_TIMEOUT_MESSAGE) from error

@@ -115,19 +115,36 @@ async def test_store_false_always_present_and_disallowed_parameters_absent() -> 
     assert len(client.interactions.calls) == 1
     call_args = client.interactions.calls[0]
 
-    # Invariante 1: store=False sempre presente
+    # Invariante 1: store=False e automatic_continuation=False sempre presentes
     assert "store" in call_args
     assert call_args["store"] is False
+    assert "automatic_continuation" in call_args
+    assert call_args["automatic_continuation"] is False
 
     # Invariante 2 e 3: ausência estrita de previous_interaction_id e background
     assert "previous_interaction_id" not in call_args
     assert "background" not in call_args
 
     # Parâmetros fora de escopo do MVP não devem ser enviados
+    assert "continuation_token" not in call_args
     assert "tools" not in call_args
     assert "stream" not in call_args
     assert "agent" not in call_args
     assert "agent_config" not in call_args
+
+
+@pytest.mark.anyio
+async def test_automatic_continuation_is_explicitly_disabled_on_all_executions() -> None:
+    client = FakeGenAIClient(completed_interaction("Texto"))
+    adapter = GoogleGeminiInteractionsAdapter(client)
+
+    await adapter.execute(
+        TextExecutionRequest(task="Tarefa sem continuação"), execution_route()
+    )
+
+    assert len(client.interactions.calls) == 1
+    call_args = client.interactions.calls[0]
+    assert call_args.get("automatic_continuation") is False
 
 
 @pytest.mark.parametrize(
@@ -415,6 +432,8 @@ async def test_empty_or_whitespace_text_raises_execution_failed(
         completed_interaction("Texto", status="failed"),
         completed_interaction("Texto", status="cancelled"),
         completed_interaction("Texto", status="budget_exceeded"),
+        completed_interaction("Texto", status="requires_continuation"),
+        completed_interaction("Texto", status="incomplete"),
         completed_interaction("Texto", errors=[SimpleNamespace(code="SAFETY", message="Blocked")]),
         completed_interaction(
             "Texto",

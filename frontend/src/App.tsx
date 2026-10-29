@@ -14,20 +14,7 @@ import {
 import { fetchAdminConfig } from './services/api';
 
 export const App: React.FC = () => {
-  const getInitialTab = (): ActiveTab => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const tabParam = params.get('tab');
-      if (tabParam === 'providers' || tabParam === 'reports' || tabParam === 'learn') {
-        return tabParam;
-      }
-      if (window.location.hash === '#providers') return 'providers';
-    } catch {
-      // Ambientes sem window/location
-    }
-    return 'execution';
-  };
-  const [activeTab, setActiveTab] = useState<ActiveTab>(getInitialTab);
+  const [activeTab, setActiveTab] = useState<ActiveTab>('execution');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
 
   // Preserved Form & Execution State in memory (without sensitive localStorage persistence)

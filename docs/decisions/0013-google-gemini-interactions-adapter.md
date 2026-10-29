@@ -38,14 +38,18 @@ de entrada textual da Interactions API:
 - `context` (quando fornecido) como bloco subsequente (`{"type": "text", "text": context}`).
 
 Toda chamada à Interactions API envia obrigatoriamente e explicitamente:
-- `store=False`.
+- `store=False`;
+- `automatic_continuation=False` (desabilita a continuação automática padrão do SDK,
+  garantindo uma única interação individual e prevenindo múltiplos hops com repreenchimento
+  e reenvio de input acumulado).
 
 O adaptador omite mandatoriamente:
 - `previous_interaction_id`;
 - `background=True`;
 - tools e function calling;
 - streaming;
-- agentes ou memória conversacional multi-turn.
+- agentes ou memória conversacional multi-turn;
+- continuação manual ou tokens de continuação.
 
 ### Normalização de Saída
 

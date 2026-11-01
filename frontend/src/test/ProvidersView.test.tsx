@@ -1032,4 +1032,45 @@ describe('ProvidersView component', () => {
       );
     });
   });
+
+  it('diagnóstico offline BUG-UI-03: pré-seleciona available[0] ao abrir modal para Google sem confirmação explícita de compatibilidade', async () => {
+    vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
+      providers: [
+        {
+          id: 'google',
+          name: 'Google Gemini',
+          implemented: true,
+          credential: {
+            registered: true,
+            status: 'verified',
+            verified_at: '2026-10-31',
+            message: null,
+          },
+        },
+      ],
+      routes: [],
+      models: [],
+      models_by_provider: {
+        google: ['antigravity-preview-05-2026', 'gemini-2.5-flash'],
+        openai: [],
+      },
+    });
+
+    render(<ProvidersView />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
+    });
+
+    // Clica na aba da credencial Google para torná-la ativa
+    const googleTab = screen.getByRole('button', { name: /Google Gemini/i });
+    fireEvent.click(googleTab);
+
+    // Abre o modal de nova rota
+    fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    // Comprova que o select adota available[0] ("antigravity-preview-05-2026") por padrão
+    const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('antigravity-preview-05-2026');
+  });
 });

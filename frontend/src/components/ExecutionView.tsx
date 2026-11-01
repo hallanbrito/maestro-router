@@ -374,11 +374,15 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
         onExecutionResult(response.kind);
       }
     } catch (err: any) {
-      setApiResponse({
+      const errorResp: ExecutionApiResponse = {
         kind: 'network_error',
         status: 0,
         message: err?.message || 'Falha inesperada durante a execução da rota.',
-      });
+      };
+      setApiResponse(errorResp);
+      if (onExecutionResult) {
+        onExecutionResult(errorResp.kind);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -396,7 +400,9 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   const openaiProvider = configInfo?.providers.find((p) => p.id === 'openai');
   const isKeyRegistered = openaiProvider?.credential.registered;
   const isKeyVerified = openaiProvider?.credential.status === 'verified';
-  const activeRoutesCount = configInfo?.routes.filter((r) => r.enabled).length ?? 1;
+  const activeRoutesCount = configInfo?.routes
+    ? configInfo.routes.filter((r) => r.enabled).length
+    : 0;
 
   // Validação de teto de custo para apresentação imediata junto ao campo
   const costLimitIssue =
@@ -467,9 +473,12 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             )}
           </div>
 
-          <div>
-            <span style={{ color: 'var(--text-muted)' }}>Rotas Habilitadas: </span>
-            <strong style={{ color: 'var(--text-primary)' }}>{activeRoutesCount}</strong>
+          <div title="Contagem de rotas administrativamente habilitadas no catálogo operacional. A habilitação administrativa não equivale à elegibilidade para uma requisição específica nem confirma preços/tarifas pré-calculadas.">
+            <span style={{ color: 'var(--text-muted)' }}>Rotas Administrativamente Habilitadas: </span>
+            <strong style={{ color: 'var(--text-primary)' }} data-testid="admin-enabled-routes-count">{activeRoutesCount}</strong>
+            <span style={{ marginLeft: '0.35rem', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+              (habilitação não garante elegibilidade ou precificação)
+            </span>
           </div>
 
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--color-warning)' }}>
@@ -705,11 +714,11 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
 
           <textarea
             id="task-input"
-            className="input-textarea task-area"
+            className="form-textarea input-textarea task-area"
             placeholder="Ex: Resuma o texto a seguir em duas frases objetivas..."
             value={task}
             onChange={(e) => setTask(e.target.value)}
-            rows={3}
+            rows={4}
             required
             aria-required="true"
           />
@@ -737,11 +746,11 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
 
           <textarea
             id="context-input"
-            className="input-textarea"
+            className="form-textarea input-textarea context-area"
             placeholder="Insira dados, trechos de código ou texto complementar aqui..."
             value={context}
             onChange={(e) => setContext(e.target.value)}
-            rows={2}
+            rows={3}
           />
         </div>
 

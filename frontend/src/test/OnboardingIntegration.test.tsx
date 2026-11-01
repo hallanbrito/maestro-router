@@ -223,4 +223,183 @@ describe('Onboarding and State Preservation Integration', () => {
       expect(screen.getByText('Sucesso retornado.')).toBeInTheDocument();
     });
   });
+
+  it('atualiza o status no cabeçalho para falha de execução após HTTP 503 sem exibir falso sucesso (BUG-UI-04)', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'execution_error',
+      status: 503,
+      error: {
+        error: {
+          code: 'EXECUTION_UNAVAILABLE',
+          message: 'O provedor externo está indisponível no momento.',
+        },
+        decision: {
+          outcome: 'selected',
+          route: { id: 'route-openai-gpt4o-mini', provider: 'openai', model: 'gpt-4o-mini' },
+          strategy: { id: 'lowest-estimated-cost', applied: true },
+          applied_constraints: [],
+          reason: 'Rota selecionada por custo.',
+          factors: [],
+        },
+      },
+    });
+
+    render(<App />);
+
+    // Inicialmente o status é "Pronto para execução"
+    expect(screen.getByText('Pronto para execução')).toBeInTheDocument();
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa que falhará no provedor' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      // Exibe erro na área de execução
+      expect(screen.getByText(/Falha na Execução do Provedor \(HTTP 503\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/EXECUTION_UNAVAILABLE/i)).toBeInTheDocument();
+
+      // No cabeçalho, NÃO deve exibir falso sucesso "API Respondendo"
+      expect(screen.queryByText('API Respondendo')).not.toBeInTheDocument();
+
+      // No cabeçalho, deve exibir status diferenciando conexão HTTP de falha de execução externa
+      expect(screen.getByText('API Conectada • Falha na Execução Externa')).toBeInTheDocument();
+    });
+  });
+
+  it('atualiza o cabeçalho para HTTP 500 como erro interno sem indicador de desconexão (A01)', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'server_error',
+      status: 500,
+      error: {
+        error: {
+          code: 'EXECUTION_FAILED',
+          message: 'Erro interno não tratado no servidor.',
+        },
+      },
+    });
+
+    const { container } = render(<App />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa que retorna 500' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      // Cabeçalho deve refletir erro interno com conexão HTTP preservada
+      expect(screen.getByText('API Conectada • Erro Interno do Servidor (500)')).toBeInTheDocument();
+      expect(screen.queryByText('API Inacessível')).not.toBeInTheDocument();
+      expect(screen.queryByText('API Respondendo')).not.toBeInTheDocument();
+
+      const dot = container.querySelector('.status-dot');
+      expect(dot).toHaveClass('server-error');
+      expect(dot).not.toHaveClass('offline');
+    });
+  });
+
+  it('preserva categoria de protocol_error no cabeçalho com mensagem própria (A02)', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'protocol_error',
+      status: 501,
+      error: {
+        code: 'UNEXPECTED_HTTP_STATUS',
+        message: 'Código de status HTTP inesperado recebido.',
+      },
+    });
+
+    const { container } = render(<App />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa que retorna protocolo inesperado' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('API Conectada • Resposta Inesperada')).toBeInTheDocument();
+      expect(screen.queryByText(/Erro Interno/i)).not.toBeInTheDocument();
+      expect(screen.queryByText('API Inacessível')).not.toBeInTheDocument();
+
+      const dot = container.querySelector('.status-dot');
+      expect(dot).toHaveClass('protocol-error');
+      expect(dot).not.toHaveClass('server-error');
+      expect(dot).not.toHaveClass('offline');
+    });
+  });
+
+  it('preserva falha externa para HTTP 502, 503 e 504 no cabeçalho', async () => {
+    for (const status of [502, 504] as const) {
+      vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+        kind: 'execution_error',
+        status,
+        error: {
+          error: {
+            code: status === 502 ? 'EXECUTION_FAILED' : 'EXECUTION_TIMEOUT',
+            message: 'Falha externa do provedor.',
+          },
+        },
+      });
+
+      const { unmount } = render(<App />);
+
+      const taskInput = screen.getByLabelText(/Tarefa/i);
+      fireEvent.change(taskInput, { target: { value: `Tarefa para HTTP ${status}` } });
+
+      const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText('API Conectada • Falha na Execução Externa')).toBeInTheDocument();
+      });
+
+      unmount();
+    }
+  });
+
+  it('apresenta API Inacessível em caso de falha de rede e rejeição inesperada (A03)', async () => {
+    // 1. Falha de rede mapeada para network_error
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'network_error',
+      status: 0,
+      message: 'Falha de conexão com a porta local.',
+    });
+
+    const { unmount, container } = render(<App />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa falha de rede' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('API Inacessível')).toBeInTheDocument();
+      const dot = container.querySelector('.status-dot');
+      expect(dot).toHaveClass('offline');
+    });
+
+    unmount();
+
+    // 2. Rejeição inesperada (ex: Promise rejection ou TypeError não mapeado)
+    vi.spyOn(apiService, 'executeAdminTask').mockRejectedValueOnce(
+      new Error('Crash inesperado no fetch')
+    );
+
+    const { container: container2 } = render(<App />);
+
+    const taskInput2 = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput2, { target: { value: 'Tarefa rejeição inesperada' } });
+
+    const submitBtn2 = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn2);
+
+    await waitFor(() => {
+      expect(screen.getByText('API Inacessível')).toBeInTheDocument();
+      const dot2 = container2.querySelector('.status-dot');
+      expect(dot2).toHaveClass('offline');
+    });
+  });
 });

@@ -222,6 +222,48 @@ select:focus-visible {
   box-shadow: 0 0 8px var(--color-warning);
 }
 
+.status-dot.warning {
+  background-color: var(--color-warning);
+  box-shadow: 0 0 8px var(--color-warning);
+}
+
+.status-dot.server-error {
+  background-color: #f97316;
+  box-shadow: 0 0 8px rgba(249, 115, 22, 0.6);
+}
+
+.status-dot.protocol-error {
+  background-color: var(--color-purple);
+  box-shadow: 0 0 8px var(--color-purple-light);
+}
+
+/* Execution View Layout & Containers */
+.execution-view {
+  display: flex;
+  flex-direction: column;
+}
+
+.execution-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.results-container {
+  margin-top: 1rem;
+}
+
+.response-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.success-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
 /* Two-column layout for Execution View */
 .execution-grid {
   display: grid;
@@ -318,7 +360,8 @@ select:focus-visible {
   margin-top: 0.35rem;
 }
 
-.form-textarea {
+.form-textarea,
+.input-textarea {
   width: 100%;
   padding: 0.75rem 1rem;
   background-color: var(--bg-input);
@@ -330,11 +373,35 @@ select:focus-visible {
   line-height: 1.5;
   resize: vertical;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  min-height: 80px;
 }
 
-.form-textarea:focus {
+.form-textarea:focus,
+.input-textarea:focus {
   border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--color-primary-light);
+  outline: none;
+}
+
+.task-area {
+  min-height: 120px;
+}
+
+.context-area {
+  min-height: 85px;
+}
+
+.required-star {
+  color: var(--color-danger);
+  margin-left: 0.2rem;
+  font-weight: 700;
+}
+
+.optional-tag {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 0.35rem;
 }
 
 .form-input {
@@ -358,6 +425,12 @@ select:focus-visible {
 }
 
 /* Constraints Accordion */
+.constraints-section {
+  margin-top: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.constraints-toggle,
 .accordion-toggle {
   width: 100%;
   display: flex;
@@ -375,11 +448,19 @@ select:focus-visible {
   margin-bottom: 0.75rem;
 }
 
+.constraints-toggle:hover,
 .accordion-toggle:hover {
   color: var(--text-primary);
   border-color: var(--border-highlight);
 }
 
+.constraints-toggle-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.constraints-fields,
 .accordion-body {
   padding: 1rem;
   background-color: rgba(14, 21, 36, 0.5);
@@ -388,7 +469,119 @@ select:focus-visible {
   margin-bottom: 1.25rem;
 }
 
-/* Quick Examples Dropdown */
+.constraints-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+.form-label-sub {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.35rem;
+}
+
+.input-text-sub {
+  width: 100%;
+  padding: 0.55rem 0.8rem;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  transition: border-color 0.2s ease;
+}
+
+.input-text-sub:focus {
+  border-color: var(--border-focus);
+  outline: none;
+}
+
+.cost-input-group {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.cost-input-group .input-text-sub {
+  flex: 1;
+}
+
+.select-sub {
+  padding: 0.55rem 0.75rem;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.select-sub:focus {
+  border-color: var(--border-focus);
+  outline: none;
+}
+
+.field-hint {
+  display: block;
+  font-size: 0.725rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+/* Quick Presets & Examples */
+.presets-container {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.presets-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.presets-scroll {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.preset-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 0.775rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.preset-pill:hover {
+  color: var(--text-primary);
+  border-color: var(--color-primary);
+  background-color: var(--bg-card-hover);
+}
+
+.preset-icon {
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+
 .examples-bar {
   display: flex;
   align-items: center;
@@ -467,6 +660,18 @@ select:focus-visible {
   margin-top: 1.5rem;
 }
 
+.keyboard-shortcut {
+  display: inline-block;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  margin-left: 0.35rem;
+}
+
 /* Spinners */
 .spinner {
   width: 18px;
@@ -475,6 +680,16 @@ select:focus-visible {
   border-top-color: white;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
 }
 
 @keyframes spin {
@@ -528,6 +743,35 @@ select:focus-visible {
   background-color: var(--bg-card);
 }
 
+.loading-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--color-primary-light);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.loading-text h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.loading-text p {
+  font-size: 0.825rem;
+  color: var(--text-secondary);
+}
+
 .loading-pulse {
   display: inline-block;
   width: 48px;
@@ -540,6 +784,7 @@ select:focus-visible {
 }
 
 /* Result Output Box */
+.result-card,
 .result-box {
   background-color: var(--bg-input);
   border: 1px solid var(--border-subtle);
@@ -547,6 +792,46 @@ select:focus-visible {
   padding: 1.25rem;
   margin-bottom: 1.25rem;
   position: relative;
+}
+
+.result-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.result-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.result-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.775rem;
+  color: var(--text-secondary);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.copy-button:hover {
+  color: var(--text-primary);
+  border-color: var(--border-highlight);
 }
 
 .result-content {
@@ -779,6 +1064,29 @@ select:focus-visible {
   margin-top: 0.5rem;
   overflow-x: auto;
   user-select: all;
+}
+
+.error-issues-list {
+  padding-left: 1.25rem;
+  font-size: 0.85rem;
+  color: var(--color-danger);
+  margin-top: 0.5rem;
+}
+
+.network-instructions {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background-color: var(--bg-input);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.network-instructions-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 0.35rem;
 }
 
 /* Factors and lists */

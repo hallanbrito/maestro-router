@@ -2,7 +2,12 @@ import React from 'react';
 import { Layers, Play, DollarSign, Compass, BookOpen } from 'lucide-react';
 
 export type ActiveTab = 'execution' | 'providers' | 'learn' | 'reports';
-export type ConnectionState = 'idle' | 'connected' | 'disconnected';
+export type ConnectionState =
+  | 'idle'
+  | 'connected'
+  | 'execution_error'
+  | 'server_error'
+  | 'disconnected';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -78,7 +83,9 @@ export const Header: React.FC<HeaderProps> = ({
             className={`status-dot ${
               connectionState === 'connected'
                 ? 'online'
-                : connectionState === 'disconnected'
+                : connectionState === 'execution_error'
+                ? 'warning'
+                : connectionState === 'server_error' || connectionState === 'disconnected'
                 ? 'offline'
                 : 'checking'
             }`}
@@ -87,6 +94,8 @@ export const Header: React.FC<HeaderProps> = ({
           <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
             {connectionState === 'idle' && 'Pronto para execução'}
             {connectionState === 'connected' && 'API Respondendo'}
+            {connectionState === 'execution_error' && 'API Conectada • Falha na Execução Externa'}
+            {connectionState === 'server_error' && 'Erro Interno da API'}
             {connectionState === 'disconnected' && 'API Inacessível'}
           </span>
         </div>

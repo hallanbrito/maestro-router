@@ -321,4 +321,74 @@ describe('ExecutionView component', () => {
       expect(screen.getByText(/Falha no handshake CSRF/i)).toBeInTheDocument();
     });
   });
+
+  it('aplica classes CSS e dimensões confortáveis aos campos de tarefa e contexto (BUG-UI-01 / BUG-UI-02)', () => {
+    render(<ExecutionView />);
+
+    const taskTextarea = screen.getByLabelText(/Tarefa Principal/i);
+    expect(taskTextarea).toHaveClass('form-textarea');
+    expect(taskTextarea).toHaveClass('input-textarea');
+    expect(taskTextarea).toHaveClass('task-area');
+    expect(taskTextarea).toHaveAttribute('rows', '4');
+    expect(taskTextarea).toHaveAttribute('required');
+
+    const contextTextarea = screen.getByLabelText(/Contexto Adicional/i);
+    expect(contextTextarea).toHaveClass('form-textarea');
+    expect(contextTextarea).toHaveClass('input-textarea');
+    expect(contextTextarea).toHaveClass('context-area');
+    expect(contextTextarea).toHaveAttribute('rows', '3');
+  });
+
+  it('indica explicitamente que a contagem refere-se a rotas administrativamente habilitadas sem inferir elegibilidade (BUG-UI-05)', () => {
+    const mockConfig = {
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: { registered: true, status: 'verified' as const, verified_at: '2026-10-31', message: null },
+          routes_count: 1,
+        },
+      ],
+      routes: [
+        {
+          route_id: 'route-openai-gpt4o-mini',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          enabled: true,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [],
+          status: 'ready' as const,
+          blockers: [],
+        },
+        {
+          route_id: 'route-google-gemini-25-flash',
+          provider: 'google',
+          model: 'gemini-2.5-flash',
+          enabled: true,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [],
+          status: 'blocked' as const,
+          blockers: ['Sem referência de preço'],
+        },
+      ],
+    };
+
+    render(<ExecutionView configInfo={mockConfig} />);
+
+    // Rótulo explícito indicando habilitação administrativa
+    expect(
+      screen.getByText(/Rotas Administrativamente Habilitadas:/i)
+    ).toBeInTheDocument();
+
+    const countEl = screen.getByTestId('admin-enabled-routes-count');
+    expect(countEl.textContent).toBe('2');
+
+    // Esclarecimento explícito de que habilitação administrativa não equivale a aptidão ou precificação
+    expect(
+      screen.getByText(/habilitação não garante elegibilidade ou precificação/i)
+    ).toBeInTheDocument();
+  });
 });

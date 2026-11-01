@@ -223,4 +223,48 @@ describe('Onboarding and State Preservation Integration', () => {
       expect(screen.getByText('Sucesso retornado.')).toBeInTheDocument();
     });
   });
+
+  it('atualiza o status no cabeçalho para falha de execução após HTTP 503 sem exibir falso sucesso (BUG-UI-04)', async () => {
+    vi.spyOn(apiService, 'executeAdminTask').mockResolvedValueOnce({
+      kind: 'execution_error',
+      status: 503,
+      error: {
+        error: {
+          code: 'EXECUTION_UNAVAILABLE',
+          message: 'O provedor externo está indisponível no momento.',
+        },
+        decision: {
+          outcome: 'selected',
+          route: { id: 'route-openai-gpt4o-mini', provider: 'openai', model: 'gpt-4o-mini' },
+          strategy: { id: 'lowest-estimated-cost', applied: true },
+          applied_constraints: [],
+          reason: 'Rota selecionada por custo.',
+          factors: [],
+        },
+      },
+    });
+
+    render(<App />);
+
+    // Inicialmente o status é "Pronto para execução"
+    expect(screen.getByText('Pronto para execução')).toBeInTheDocument();
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa que falhará no provedor' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      // Exibe erro na área de execução
+      expect(screen.getByText(/Falha na Execução do Provedor \(HTTP 503\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/EXECUTION_UNAVAILABLE/i)).toBeInTheDocument();
+
+      // No cabeçalho, NÃO deve exibir falso sucesso "API Respondendo"
+      expect(screen.queryByText('API Respondendo')).not.toBeInTheDocument();
+
+      // No cabeçalho, deve exibir status diferenciando conexão HTTP de falha de execução externa
+      expect(screen.getByText('API Conectada • Falha na Execução Externa')).toBeInTheDocument();
+    });
+  });
 });

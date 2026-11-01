@@ -108,6 +108,10 @@ export const App: React.FC = () => {
             onExecutionResult={(outcome) => {
               if (outcome === 'network_error') {
                 setConnectionState('disconnected');
+              } else if (outcome === 'execution_error') {
+                setConnectionState('execution_error');
+              } else if (outcome === 'server_error' || outcome === 'protocol_error') {
+                setConnectionState('server_error');
               } else {
                 setConnectionState('connected');
               }

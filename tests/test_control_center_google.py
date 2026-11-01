@@ -683,3 +683,32 @@ def test_remove_google_credential_clears_models(
     assert del_resp.status_code == 200
     assert clean_state.credentials["google"]["models"] == []
     assert clean_state.credentials["google"]["status"] == "not_registered"
+
+
+def test_extract_google_model_antigravity_preview_alphabetical_discovery_bug_ui_03() -> None:
+    """Diagnóstico offline do BUG-UI-03: simula a descoberta de modelos Google.
+
+    Comprova que modelos com 'generateContent' em supported_actions (como
+    'antigravity-preview-05-2026') são incluídos na descoberta e, após ordenação
+    alfabética ('final_models = sorted(set(discovered_models))'), precedem modelos
+    da família Gemini (como 'gemini-2.5-flash').
+    """
+    from maestro_router.control_center import _extract_google_model
+
+    discovered: list[str] = []
+
+    m_antigravity = MagicMock(name="models/antigravity-preview-05-2026", supported_actions=["generateContent"])
+    m_antigravity.name = "models/antigravity-preview-05-2026"
+    _extract_google_model(m_antigravity, discovered)
+
+    m_gemini = MagicMock(name="models/gemini-2.5-flash", supported_actions=["generateContent"])
+    m_gemini.name = "models/gemini-2.5-flash"
+    _extract_google_model(m_gemini, discovered)
+
+    assert "antigravity-preview-05-2026" in discovered
+    assert "gemini-2.5-flash" in discovered
+
+    # A ordenação alfabética coloca antigravity-preview no índice 0
+    final_models = sorted(set(discovered))
+    assert final_models[0] == "antigravity-preview-05-2026"
+    assert final_models[1] == "gemini-2.5-flash"

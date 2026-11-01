@@ -51,7 +51,7 @@ describe('Header component', () => {
     expect(dot).not.toHaveClass('online');
   });
 
-  it('renderiza "Erro Interno da API" e ponto offline em server_error', () => {
+  it('renderiza "API Conectada • Erro Interno do Servidor (500)" e ponto server-error sem falsa desconexão (A01)', () => {
     const { container } = render(
       <Header
         activeTab="execution"
@@ -60,9 +60,29 @@ describe('Header component', () => {
       />
     );
 
-    expect(screen.getByText('Erro Interno da API')).toBeInTheDocument();
+    expect(screen.getByText('API Conectada • Erro Interno do Servidor (500)')).toBeInTheDocument();
+    expect(screen.queryByText('API Inacessível')).not.toBeInTheDocument();
     const dot = container.querySelector('.status-dot');
-    expect(dot).toHaveClass('offline');
+    expect(dot).toHaveClass('server-error');
+    expect(dot).not.toHaveClass('offline');
+  });
+
+  it('preserva categoria de erro de protocolo com mensagem própria e ponto protocol-error (A02)', () => {
+    const { container } = render(
+      <Header
+        activeTab="execution"
+        onSelectTab={vi.fn()}
+        connectionState="protocol_error"
+      />
+    );
+
+    expect(screen.getByText('API Conectada • Resposta Inesperada')).toBeInTheDocument();
+    expect(screen.queryByText(/Erro Interno/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('API Inacessível')).not.toBeInTheDocument();
+    const dot = container.querySelector('.status-dot');
+    expect(dot).toHaveClass('protocol-error');
+    expect(dot).not.toHaveClass('server-error');
+    expect(dot).not.toHaveClass('offline');
   });
 
   it('renderiza "API Inacessível" e ponto offline quando desconectado', () => {

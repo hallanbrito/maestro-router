@@ -7,6 +7,7 @@ export type ConnectionState =
   | 'connected'
   | 'execution_error'
   | 'server_error'
+  | 'protocol_error'
   | 'disconnected';
 
 interface HeaderProps {
@@ -85,7 +86,11 @@ export const Header: React.FC<HeaderProps> = ({
                 ? 'online'
                 : connectionState === 'execution_error'
                 ? 'warning'
-                : connectionState === 'server_error' || connectionState === 'disconnected'
+                : connectionState === 'server_error'
+                ? 'server-error'
+                : connectionState === 'protocol_error'
+                ? 'protocol-error'
+                : connectionState === 'disconnected'
                 ? 'offline'
                 : 'checking'
             }`}
@@ -95,7 +100,8 @@ export const Header: React.FC<HeaderProps> = ({
             {connectionState === 'idle' && 'Pronto para execução'}
             {connectionState === 'connected' && 'API Respondendo'}
             {connectionState === 'execution_error' && 'API Conectada • Falha na Execução Externa'}
-            {connectionState === 'server_error' && 'Erro Interno da API'}
+            {connectionState === 'server_error' && 'API Conectada • Erro Interno do Servidor (500)'}
+            {connectionState === 'protocol_error' && 'API Conectada • Resposta Inesperada'}
             {connectionState === 'disconnected' && 'API Inacessível'}
           </span>
         </div>

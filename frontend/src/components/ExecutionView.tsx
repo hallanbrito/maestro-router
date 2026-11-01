@@ -374,11 +374,15 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
         onExecutionResult(response.kind);
       }
     } catch (err: any) {
-      setApiResponse({
+      const errorResp: ExecutionApiResponse = {
         kind: 'network_error',
         status: 0,
         message: err?.message || 'Falha inesperada durante a execução da rota.',
-      });
+      };
+      setApiResponse(errorResp);
+      if (onExecutionResult) {
+        onExecutionResult(errorResp.kind);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -396,7 +400,9 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   const openaiProvider = configInfo?.providers.find((p) => p.id === 'openai');
   const isKeyRegistered = openaiProvider?.credential.registered;
   const isKeyVerified = openaiProvider?.credential.status === 'verified';
-  const activeRoutesCount = configInfo?.routes.filter((r) => r.enabled).length ?? 1;
+  const activeRoutesCount = configInfo?.routes
+    ? configInfo.routes.filter((r) => r.enabled).length
+    : 0;
 
   // Validação de teto de custo para apresentação imediata junto ao campo
   const costLimitIssue =

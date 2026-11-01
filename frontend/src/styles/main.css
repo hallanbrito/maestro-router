@@ -227,6 +227,16 @@ select:focus-visible {
   box-shadow: 0 0 8px var(--color-warning);
 }
 
+.status-dot.server-error {
+  background-color: #f97316;
+  box-shadow: 0 0 8px rgba(249, 115, 22, 0.6);
+}
+
+.status-dot.protocol-error {
+  background-color: var(--color-purple);
+  box-shadow: 0 0 8px var(--color-purple-light);
+}
+
 /* Execution View Layout & Containers */
 .execution-view {
   display: flex;

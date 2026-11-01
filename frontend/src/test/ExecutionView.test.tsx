@@ -391,4 +391,31 @@ describe('ExecutionView component', () => {
       screen.getByText(/habilitação não garante elegibilidade ou precificação/i)
     ).toBeInTheDocument();
   });
+
+  it('exibe 0 rotas quando a configuração estiver ausente ou sem rotas sem contagem fictícia (A04)', () => {
+    // Sem passar configInfo
+    render(<ExecutionView />);
+    const countEl = screen.getByTestId('admin-enabled-routes-count');
+    expect(countEl.textContent).toBe('0');
+  });
+
+  it('comunica network_error ao componente pai quando ocorrer rejeição inesperada na submissão (A03)', async () => {
+    const onExecutionResultMock = vi.fn();
+    vi.spyOn(apiService, 'executeAdminTask').mockRejectedValueOnce(
+      new Error('Falha de conexão inesperada')
+    );
+
+    render(<ExecutionView onExecutionResult={onExecutionResultMock} />);
+
+    const taskInput = screen.getByLabelText(/Tarefa/i);
+    fireEvent.change(taskInput, { target: { value: 'Tarefa com rejeição inesperada' } });
+
+    const submitBtn = screen.getByRole('button', { name: /Executar Rota/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(onExecutionResultMock).toHaveBeenCalledWith('network_error');
+      expect(screen.getByText(/Falha de Conectividade com a API/i)).toBeInTheDocument();
+    });
+  });
 });

@@ -392,9 +392,68 @@ describe('ExecutionView component', () => {
     ).toBeInTheDocument();
   });
 
-  it('exibe 0 rotas quando a configuração estiver ausente ou sem rotas sem contagem fictícia (A04)', () => {
+  it('exibe 0 rotas quando a configuração estiver ausente sem contagem fictícia (A04)', () => {
     // Sem passar configInfo
     render(<ExecutionView />);
+    const countEl = screen.getByTestId('admin-enabled-routes-count');
+    expect(countEl.textContent).toBe('0');
+  });
+
+  it('exibe 0 rotas quando o catálogo de rotas estiver vazio (BUG-UI-05/A04/T01)', () => {
+    const mockEmptyConfig = {
+      providers: [],
+      routes: [],
+    };
+    render(<ExecutionView configInfo={mockEmptyConfig} />);
+    const countEl = screen.getByTestId('admin-enabled-routes-count');
+    expect(countEl.textContent).toBe('0');
+  });
+
+  it('exibe 0 rotas quando todas as rotas configuradas estiverem administrativamente desabilitadas (BUG-UI-05/A04/T01)', () => {
+    const mockDisabledConfig = {
+      providers: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          implemented: true,
+          credential: { registered: true, status: 'verified' as const, verified_at: '2026-10-31', message: null },
+          routes_count: 1,
+        },
+        {
+          id: 'google',
+          name: 'Google',
+          implemented: true,
+          credential: { registered: true, status: 'verified' as const, verified_at: '2026-10-31', message: null },
+          routes_count: 1,
+        },
+      ],
+      routes: [
+        {
+          route_id: 'route-openai-gpt4o-mini',
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          enabled: false,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [],
+          status: 'ready' as const,
+          blockers: [],
+        },
+        {
+          route_id: 'route-google-gemini-25-flash',
+          provider: 'google',
+          model: 'gemini-2.5-flash',
+          enabled: false,
+          known_unavailable: false,
+          capabilities: ['text_generation'],
+          quality_criteria: [],
+          status: 'blocked' as const,
+          blockers: ['Desabilitada administrativamente'],
+        },
+      ],
+    };
+
+    render(<ExecutionView configInfo={mockDisabledConfig} />);
     const countEl = screen.getByTestId('admin-enabled-routes-count');
     expect(countEl.textContent).toBe('0');
   });

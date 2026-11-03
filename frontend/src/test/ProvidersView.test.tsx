@@ -282,6 +282,9 @@ describe('ProvidersView component', () => {
     fireEvent.click(screen.getByTestId('edit-route-route-openai-test'));
 
     expect(screen.getByText(/Editar Rota: route-openai-test/i)).toBeInTheDocument();
+    expect(
+      (screen.getByTestId('route-model-select') as HTMLSelectElement).value
+    ).toBe('gpt-4o-mini');
 
     // Habilita a configuração econômica
     const toggleEconomics = screen.getByTestId('toggle-economics-config');
@@ -997,9 +1000,16 @@ describe('ProvidersView component', () => {
     const providerSelect = screen.getByTestId('route-provider-select');
     fireEvent.change(providerSelect, { target: { value: 'google' } });
 
-    // Modelo gemini-2.5-flash deve estar selecionável
-    const modelSelect = screen.getByTestId('route-model-select');
+    // Trocar o provedor não escolhe implicitamente o primeiro modelo descoberto.
+    const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('');
+    expect(
+      screen.getByRole('option', { name: /Selecione explicitamente um modelo/i })
+    ).toBeDisabled();
+
+    // O operador escolhe conscientemente o modelo desejado.
     fireEvent.change(modelSelect, { target: { value: 'gemini-2.5-flash' } });
+    expect(modelSelect.value).toBe('gemini-2.5-flash');
 
     // Configura economia consciente
     fireEvent.click(screen.getByTestId('toggle-economics-config'));
@@ -1033,7 +1043,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('diagnóstico offline BUG-UI-03: pré-seleciona available[0] ao abrir modal para Google sem confirmação explícita de compatibilidade', async () => {
+  it('BUG-UI-03: exige escolha explícita e não pré-seleciona available[0] ao abrir modal para Google', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -1069,8 +1079,15 @@ describe('ProvidersView component', () => {
     // Abre o modal de nova rota
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
 
-    // Comprova que o select adota available[0] ("antigravity-preview-05-2026") por padrão
+    // Nenhum modelo descoberto deve ser escolhido sem decisão explícita do operador.
     const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
-    expect(modelSelect.value).toBe('antigravity-preview-05-2026');
+    expect(modelSelect.value).toBe('');
+    expect(
+      screen.getByRole('option', { name: /Selecione explicitamente um modelo/i })
+    ).toBeDisabled();
+
+    // Os dois modelos continuam disponíveis para escolha consciente.
+    expect(screen.getByRole('option', { name: 'antigravity-preview-05-2026' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'gemini-2.5-flash' })).toBeInTheDocument();
   });
 });

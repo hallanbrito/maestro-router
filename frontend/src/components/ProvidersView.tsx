@@ -213,7 +213,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
     const available = p === 'google' ? googleModels : openaiModels;
     setNewRouteId(`route-${p}-${Date.now().toString().slice(-4)}`);
     if (available.length > 0) {
-      setRouteModel(available[0]);
+      setRouteModel('');
       setCustomModel('');
     } else {
       setRouteModel('custom');
@@ -928,7 +928,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                     setRouteProvider(newP);
                     const available = newP === 'google' ? googleModels : openaiModels;
                     if (available.length > 0) {
-                      setRouteModel(available[0]);
+                      setRouteModel('');
                       setCustomModel('');
                     } else {
                       setRouteModel('custom');
@@ -977,6 +977,9 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({ onConfigUpdated })
                   }}
                   style={{ marginBottom: '0.35rem' }}
                 >
+                  <option value="" disabled>
+                    Selecione explicitamente um modelo...
+                  </option>
                   {activeModels.length > 0 && (
                     <optgroup label="Modelos Descobertos Oficialmente">
                       {activeModels.map((m) => (

@@ -50,7 +50,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('salva a credencial em memória e limpa o campo de senha imediatamente', async () => {
+  it('salva a credencial em mem�ria e limpa o campo de senha imediatamente', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -72,13 +72,13 @@ describe('ProvidersView component', () => {
     const saveSpy = vi.spyOn(apiService, 'saveCredential').mockResolvedValueOnce({
       provider: 'openai',
       status: 'registered',
-      message: 'Credencial cadastrada na memória do servidor.',
+      message: 'Credencial cadastrada na mem�ria do servidor.',
     });
 
     render(<ProvidersView />);
 
     await waitFor(() => {
-      expect(screen.getByText('Não Cadastrada')).toBeInTheDocument();
+      expect(screen.getByText('N�o Cadastrada')).toBeInTheDocument();
     });
 
     const input = screen.getByLabelText(/OpenAI API Key/i) as HTMLInputElement;
@@ -90,15 +90,15 @@ describe('ProvidersView component', () => {
 
     await waitFor(() => {
       expect(saveSpy).toHaveBeenCalledWith('openai', 'sk-test-secret-key-123');
-      // Campo deve ser limpo imediatamente após envio
+      // Campo deve ser limpo imediatamente ap�s envio
       expect(input.value).toBe('');
       expect(
-        screen.getByText(/Credencial cadastrada na memória do servidor/i)
+        screen.getByText(/Credencial cadastrada na mem�ria do servidor/i)
       ).toBeInTheDocument();
     });
   });
 
-  it('aciona a verificação neutra de credencial sem gerar texto pago', async () => {
+  it('aciona a verifica��o neutra de credencial sem gerar texto pago', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -141,7 +141,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('alterna o estado da rota ao clicar no botão de habilitação', async () => {
+  it('alterna o estado da rota ao clicar no bot�o de habilita��o', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -191,7 +191,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('exibe aviso no modal informando que novas rotas não possuem dados econômicos preenchidos automaticamente', async () => {
+  it('exibe aviso no modal informando que novas rotas n�o possuem dados econ�micos preenchidos automaticamente', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -219,14 +219,14 @@ describe('ProvidersView component', () => {
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
 
     expect(
-      screen.getByText(/Novas rotas cadastradas \(incluindo gpt-4o-mini\) não possuem tarifas nem previsão de tokens pré-preenchidas automaticamente/i)
+      screen.getByText(/Novas rotas cadastradas \(incluindo gpt-4o-mini\) n�o possuem tarifas nem previs�o de tokens pr�-preenchidas automaticamente/i)
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Dados econômicos ausentes permanecem explicitamente indisponíveis até que sejam configurados pelo operador\./i)
+      screen.getByText(/Dados econ�micos ausentes permanecem explicitamente indispon�veis at� que sejam configurados pelo operador\./i)
     ).toBeInTheDocument();
   });
 
-  it('permite editar uma rota existente, configurar tarifas econômicas e salvar no backend', async () => {
+  it('permite editar uma rota existente, configurar tarifas econ�micas e salvar no backend', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -278,7 +278,7 @@ describe('ProvidersView component', () => {
       expect(screen.getByTestId('edit-route-route-openai-test')).toBeInTheDocument();
     });
 
-    // Clica no botão Editar da rota
+    // Clica no bot�o Editar da rota
     fireEvent.click(screen.getByTestId('edit-route-route-openai-test'));
 
     expect(screen.getByText(/Editar Rota: route-openai-test/i)).toBeInTheDocument();
@@ -286,7 +286,7 @@ describe('ProvidersView component', () => {
       (screen.getByTestId('route-model-select') as HTMLSelectElement).value
     ).toBe('gpt-4o-mini');
 
-    // Habilita a configuração econômica
+    // Habilita a configura��o econ�mica
     const toggleEconomics = screen.getByTestId('toggle-economics-config');
     fireEvent.click(toggleEconomics);
 
@@ -303,13 +303,13 @@ describe('ProvidersView component', () => {
     fireEvent.change(estOutput, { target: { value: '800' } });
     fireEvent.change(priceSource, { target: { value: 'https://openai.com/api/pricing' } });
 
-    // Confirma conscientemente as declarações do operador (B1 / ADR 0006 e ADR 0007)
+    // Confirma conscientemente as declara��es do operador (B1 / ADR 0006 e ADR 0007)
     fireEvent.click(screen.getByTestId('decl-rates-complete'));
     fireEvent.click(screen.getByTestId('decl-model-exact'));
     fireEvent.click(screen.getByTestId('decl-usage-applicable'));
 
-    // Salva o formulário
-    const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
+    // Salva o formul�rio
+    const saveBtn = screen.getByRole('button', { name: /Salvar Altera��es/i });
     fireEvent.click(saveBtn);
 
     await waitFor(() => {
@@ -377,7 +377,11 @@ describe('ProvidersView component', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
 
-    // Habilita seção econômica
+    fireEvent.change(screen.getByTestId('route-model-select'), {
+      target: { value: 'gpt-4o-mini' },
+    });
+
+    // Habilita se��o econ�mica
     const toggleEconomics = screen.getByTestId('toggle-economics-config');
     fireEvent.click(toggleEconomics);
 
@@ -391,13 +395,13 @@ describe('ProvidersView component', () => {
     expect(inputRate.value).toBe('0.00');
     expect(outputRate.value).toBe('0.00');
 
-    // Confirma que o atalho NÃO preenche fonte nem marca declarações automaticamente (R1)
+    // Confirma que o atalho N�O preenche fonte nem marca declara��es automaticamente (R1)
     expect((screen.getByTestId('route-price-source') as HTMLInputElement).value).toBe('');
     expect((screen.getByTestId('decl-rates-complete') as HTMLInputElement).checked).toBe(false);
     expect((screen.getByTestId('decl-model-exact') as HTMLInputElement).checked).toBe(false);
     expect((screen.getByTestId('decl-usage-applicable') as HTMLInputElement).checked).toBe(false);
 
-    // Operador preenche conscientemente a fonte, estimativas e confirma as declarações
+    // Operador preenche conscientemente a fonte, estimativas e confirma as declara��es
     fireEvent.change(screen.getByTestId('route-price-source'), {
       target: { value: 'https://openai.com/api/pricing-free-tier' },
     });
@@ -437,7 +441,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('atalho de tarifas zero não contorna as declarações obrigatórias nem permite salvar sem fonte e confirmações (R1)', async () => {
+  it('atalho de tarifas zero n�o contorna as declara��es obrigat�rias nem permite salvar sem fonte e confirma��es (R1)', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -466,23 +470,27 @@ describe('ProvidersView component', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
 
+    fireEvent.change(screen.getByTestId('route-model-select'), {
+      target: { value: 'gpt-4o-mini' },
+    });
+
     const toggleEconomics = screen.getByTestId('toggle-economics-config');
     fireEvent.click(toggleEconomics);
 
     const zeroRatesBtn = screen.getByTestId('btn-set-zero-rates');
     fireEvent.click(zeroRatesBtn);
 
-    // Tenta salvar imediatamente sem preencher estimativas, fonte nem declarações
+    // Tenta salvar imediatamente sem preencher estimativas, fonte nem declara��es
     const saveBtn = screen.getByRole('button', { name: /Salvar Rota/i });
     fireEvent.click(saveBtn);
 
     expect(
-      screen.getByText(/Previsão de tokens de entrada e saída deve conter números inteiros positivos/i)
+      screen.getByText(/Previs�o de tokens de entrada e sa�da deve conter n�meros inteiros positivos/i)
     ).toBeInTheDocument();
     expect(saveSpy).not.toHaveBeenCalled();
   });
 
-  it('ao trocar o modelo de uma rota, desmarca a confirmação de identidade exata do modelo anterior (R1)', async () => {
+  it('ao trocar o modelo de uma rota, desmarca a confirma��o de identidade exata do modelo anterior (R1)', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -542,11 +550,11 @@ describe('ProvidersView component', () => {
     const selectModel = screen.getByTestId('route-model-select');
     fireEvent.change(selectModel, { target: { value: 'gpt-4o' } });
 
-    // A confirmação de identidade exata do modelo DEVE ser desmarcada automaticamente (R1)
+    // A confirma��o de identidade exata do modelo DEVE ser desmarcada automaticamente (R1)
     expect(checkboxModelExact.checked).toBe(false);
   });
 
-  it('rejeita tarifas inválidas com mensagem de erro no modal sem enviar para o backend', async () => {
+  it('rejeita tarifas inv�lidas com mensagem de erro no modal sem enviar para o backend', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -574,6 +582,10 @@ describe('ProvidersView component', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    fireEvent.change(screen.getByTestId('route-model-select'), {
+      target: { value: 'gpt-4o-mini' },
+    });
 
     const toggleEconomics = screen.getByTestId('toggle-economics-config');
     fireEvent.click(toggleEconomics);
@@ -585,12 +597,12 @@ describe('ProvidersView component', () => {
     fireEvent.click(saveBtn);
 
     expect(
-      screen.getByText(/Tarifas de entrada e saída devem ser valores numéricos decimais não negativos/i)
+      screen.getByText(/Tarifas de entrada e sa�da devem ser valores num�ricos decimais n�o negativos/i)
     ).toBeInTheDocument();
     expect(saveSpy).not.toHaveBeenCalled();
   });
 
-  it('exige preenchimento de fonte e declarações conscientes do operador para salvar dados econômicos', async () => {
+  it('exige preenchimento de fonte e declara��es conscientes do operador para salvar dados econ�micos', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -618,6 +630,10 @@ describe('ProvidersView component', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
+
+    fireEvent.change(screen.getByTestId('route-model-select'), {
+      target: { value: 'gpt-4o-mini' },
+    });
 
     const toggleEconomics = screen.getByTestId('toggle-economics-config');
     fireEvent.click(toggleEconomics);
@@ -637,22 +653,22 @@ describe('ProvidersView component', () => {
     fireEvent.click(saveBtn);
 
     expect(
-      screen.getByText(/A fonte das tarifas \(ex: documentação de preços do provedor\) é obrigatória/i)
+      screen.getByText(/A fonte das tarifas \(ex: documenta��o de pre�os do provedor\) � obrigat�ria/i)
     ).toBeInTheDocument();
     expect(saveSpy).not.toHaveBeenCalled();
 
-    // Preenche fonte mas não confirma declarações
+    // Preenche fonte mas n�o confirma declara��es
     const priceSource = screen.getByTestId('route-price-source');
     fireEvent.change(priceSource, { target: { value: 'https://openai.com/api/pricing' } });
     fireEvent.click(saveBtn);
 
     expect(
-      screen.getByText(/É obrigatório que o operador confirme conscientemente todas as declarações/i)
+      screen.getByText(/� obrigat�rio que o operador confirme conscientemente todas as declara��es/i)
     ).toBeInTheDocument();
     expect(saveSpy).not.toHaveBeenCalled();
   });
 
-  it('preserva evidências documentadas e dados de qualidade ao editar uma rota (B2)', async () => {
+  it('preserva evid�ncias documentadas e dados de qualidade ao editar uma rota (B2)', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -709,13 +725,13 @@ describe('ProvidersView component', () => {
       expect(screen.getByTestId('edit-route-route-evidence-test')).toBeInTheDocument();
     });
 
-    // Clica no botão Editar da rota
+    // Clica no bot�o Editar da rota
     fireEvent.click(screen.getByTestId('edit-route-route-evidence-test'));
 
     expect(screen.getByText(/Editar Rota: route-evidence-test/i)).toBeInTheDocument();
 
-    // Salva o formulário diretamente
-    const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
+    // Salva o formul�rio diretamente
+    const saveBtn = screen.getByRole('button', { name: /Salvar Altera��es/i });
     fireEvent.click(saveBtn);
 
     await waitFor(() => {
@@ -733,7 +749,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('preserva a associação individual entre múltiplos critérios e evidências sem achatamento em lista única (R2)', async () => {
+  it('preserva a associa��o individual entre m�ltiplos crit�rios e evid�ncias sem achatamento em lista �nica (R2)', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -796,13 +812,13 @@ describe('ProvidersView component', () => {
 
     fireEvent.click(screen.getByTestId('edit-route-route-multi-evidence-test'));
 
-    // Verifica que cada critério está no seu próprio input sem achatamento
+    // Verifica que cada crit�rio est� no seu pr�prio input sem achatamento
     expect((screen.getByTestId('criterion-name-0') as HTMLInputElement).value).toBe('fast_response');
     expect((screen.getByTestId('criterion-evidence-0') as HTMLInputElement).value).toBe('benchmarks/latency-q3.json#p95');
     expect((screen.getByTestId('criterion-name-1') as HTMLInputElement).value).toBe('strict_instruction_following');
     expect((screen.getByTestId('criterion-evidence-1') as HTMLInputElement).value).toBe('eval-accuracy-v2.json');
 
-    const saveBtn = screen.getByRole('button', { name: /Salvar Alterações/i });
+    const saveBtn = screen.getByRole('button', { name: /Salvar Altera��es/i });
     fireEvent.click(saveBtn);
 
     await waitFor(() => {
@@ -824,7 +840,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('permite alternar para Google Gemini, cadastrar chave na memória e verificar sem custos', async () => {
+  it('permite alternar para Google Gemini, cadastrar chave na mem�ria e verificar sem custos', async () => {
     let googleRegistered = false;
     vi.spyOn(apiService, 'fetchAdminConfig').mockImplementation(async () => ({
       providers: [
@@ -864,7 +880,7 @@ describe('ProvidersView component', () => {
       return {
         provider: 'google',
         status: 'registered',
-        message: 'Credencial Google cadastrada na memória do servidor.',
+        message: 'Credencial Google cadastrada na mem�ria do servidor.',
       };
     });
 
@@ -886,7 +902,7 @@ describe('ProvidersView component', () => {
 
     expect(screen.getByText(/Credencial do Provedor \(Google Gemini\)/i)).toBeInTheDocument();
     expect(screen.getByText(/Gemini API Key \(AIza\.\.\.\)/i)).toBeInTheDocument();
-    // Antes da verificação, deve exibir mensagem explicativa de não verificado (B3)
+    // Antes da verifica��o, deve exibir mensagem explicativa de n�o verificado (B3)
     expect(screen.getByTestId('google-models-unverified-msg')).toBeInTheDocument();
 
     const input = screen.getByTestId('credential-api-key-input') as HTMLInputElement;
@@ -908,7 +924,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('exibe mensagem transparente quando a verificação Google não encontra modelos compatíveis (B1/B3)', async () => {
+  it('exibe mensagem transparente quando a verifica��o Google n�o encontra modelos compat�veis (B1/B3)', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -919,7 +935,7 @@ describe('ProvidersView component', () => {
             registered: true,
             status: 'verified',
             verified_at: '2026-10-29T12:00:00Z',
-            message: 'Credencial verificada com sucesso, mas nenhum modelo compatível com execução textual foi retornado pelo provedor.',
+            message: 'Credencial verificada com sucesso, mas nenhum modelo compat�vel com execu��o textual foi retornado pelo provedor.',
           },
         },
       ],
@@ -927,7 +943,7 @@ describe('ProvidersView component', () => {
       models: [],
       models_by_provider: {
         openai: [],
-        google: [], // Zero modelos compatíveis retornados oficialmente
+        google: [], // Zero modelos compat�veis retornados oficialmente
       },
     });
 
@@ -939,18 +955,18 @@ describe('ProvidersView component', () => {
 
     fireEvent.click(screen.getByTestId('tab-provider-google'));
 
-    // Deve exibir mensagem explícita de zero modelos, sem inventar fallback hardcoded
+    // Deve exibir mensagem expl�cita de zero modelos, sem inventar fallback hardcoded
     expect(screen.getByTestId('google-models-empty-msg')).toBeInTheDocument();
     expect(screen.queryByTestId('model-badge-gemini-2.5-flash')).not.toBeInTheDocument();
 
-    // Ao abrir modal de rota, modelo deve iniciar como custom (já que não há modelos oficiais)
+    // Ao abrir modal de rota, modelo deve iniciar como custom (j� que n�o h� modelos oficiais)
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
     const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
     expect(modelSelect.value).toBe('custom');
     expect(screen.getByTestId('custom-model-input')).toBeInTheDocument();
   });
 
-  it('permite criar rota Google Gemini com provider "google" e dados econômicos conscientes', async () => {
+  it('permite criar rota Google Gemini com provider "google" e dados econ�micos conscientes', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -1000,7 +1016,7 @@ describe('ProvidersView component', () => {
     const providerSelect = screen.getByTestId('route-provider-select');
     fireEvent.change(providerSelect, { target: { value: 'google' } });
 
-    // Trocar o provedor não escolhe implicitamente o primeiro modelo descoberto.
+    // Trocar o provedor n�o escolhe implicitamente o primeiro modelo descoberto.
     const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
     expect(modelSelect.value).toBe('');
     expect(
@@ -1043,7 +1059,7 @@ describe('ProvidersView component', () => {
     });
   });
 
-  it('BUG-UI-03: exige escolha explícita e não pré-seleciona available[0] ao abrir modal para Google', async () => {
+  it('BUG-UI-03: exige escolha expl�cita e n�o pr�-seleciona available[0] ao abrir modal para Google', async () => {
     vi.spyOn(apiService, 'fetchAdminConfig').mockResolvedValue({
       providers: [
         {
@@ -1072,22 +1088,23 @@ describe('ProvidersView component', () => {
       expect(screen.getByRole('button', { name: /Nova Rota/i })).toBeInTheDocument();
     });
 
-    // Clica na aba da credencial Google para torná-la ativa
+    // Clica na aba da credencial Google para torn�-la ativa
     const googleTab = screen.getByRole('button', { name: /Google Gemini/i });
     fireEvent.click(googleTab);
 
     // Abre o modal de nova rota
     fireEvent.click(screen.getByRole('button', { name: /Nova Rota/i }));
 
-    // Nenhum modelo descoberto deve ser escolhido sem decisão explícita do operador.
+    // Nenhum modelo descoberto deve ser escolhido sem decis�o expl�cita do operador.
     const modelSelect = screen.getByTestId('route-model-select') as HTMLSelectElement;
     expect(modelSelect.value).toBe('');
     expect(
       screen.getByRole('option', { name: /Selecione explicitamente um modelo/i })
     ).toBeDisabled();
 
-    // Os dois modelos continuam disponíveis para escolha consciente.
+    // Os dois modelos continuam dispon�veis para escolha consciente.
     expect(screen.getByRole('option', { name: 'antigravity-preview-05-2026' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'gemini-2.5-flash' })).toBeInTheDocument();
   });
 });
+

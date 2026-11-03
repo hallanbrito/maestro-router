@@ -40,7 +40,9 @@ Esta proposta especifica **um gate futuro**, não cria uma nova estratégia de r
 
 **Limite explícito:** não foi comprovada aqui a existência de uma API oficial que exponha, de modo atômico e confiável, todos esses dados para cada provedor. Se alguma condição não puder ser observada/verificada em uma futura implementação, o resultado deve ser recusa; jamais simular comprovação.
 
-## 4. Estados normativos propostos para a futura fatia
+## 4. Estados de avaliação propostos (não normativos)
+
+Os nomes abaixo são candidatos para testes futuros, não estados existentes no runtime nem contrato aprovado para implementação.
 
 | Estado de avaliação | Gatilho | Resultado permitido |
 | --- | --- | --- |

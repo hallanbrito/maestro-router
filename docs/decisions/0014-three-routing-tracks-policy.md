@@ -1,6 +1,6 @@
 # 0014. Política de produto para as três trilhas de roteamento
 
-- **Status do registro:** Proposta documental em revisão (Issue #32; ainda não integrada à `master`).
+- **Status do registro:** Política de produto aprovada pelo PO em 30/10/2026; implementação das capacidades futuras condicionada a gates específicos.
 - **Status da direção de produto:** Aprovada pelo Product Owner em 30/10/2026.
 - **Data:** 2026-10-31
 - **Decisor:** PO Hallan

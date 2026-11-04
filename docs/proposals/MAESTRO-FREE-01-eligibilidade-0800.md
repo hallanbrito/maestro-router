@@ -2,13 +2,13 @@
 
 - **Estado:** PROPOSTA CH-1 DOCUMENTAL — **não implementada e não normativa** até aprovação e integração por gate específico.
 - **Emissão:** 03/11/2026.
-- **Origem:** [Issue #39](https://github.com/hallanbrito/maestro-router/issues/39); direção de produto na [Issue #32](https://github.com/hallanbrito/maestro-router/issues/32) e [Draft PR #34 — ADR 0014](https://github.com/hallanbrito/maestro-router/pull/34).
-- **Baseline para esta proposta:** `master@f7f900a0d5104fc6fdf5622226b5c6bb5c7c6fce`; a ADR 0014 está em Draft separado e **não** é considerada integrada.
+- **Origem:** [Issue #39](https://github.com/hallanbrito/maestro-router/issues/39); direção de produto na [Issue #32](https://github.com/hallanbrito/maestro-router/issues/32) e [PR #34 — ADR 0014 integrada à master](https://github.com/hallanbrito/maestro-router/pull/34).
+- **Baseline histórica de elaboração:** `master@f7f900a0d5104fc6fdf5622226b5c6bb5c7c6fce`. A ADR 0014 foi integrada separadamente à `master` em 04/11/2026 pelo PR #34 (merge `9d20727e34d37c71ccd56e6587f49d5525999e74`); este contrato CH-1 permanece em proposta, não implementado e sujeito a gate próprio.
 - **Autonomia:** CH-1, documento somente. Nenhuma chamada externa de modelo, alteração de runtime, credencial real, merge, release ou gasto adicional autorizado.
 
 ## 1. Problema e limite de compatibilidade
 
-A trilha Free atual no Control Center (ADR 0012) usa **tarifa zero declarada pelo operador**, com avisos de que não comprova condições de faturamento. A proposta da ADR 0014 busca uma política mais forte: **permitir envio somente quando houver evidência válida e suficiente de ausência de cobrança adicional para a operação concreta**, na origem de credenciais correta. A compatibilidade com o contrato público `POST /v1/executions` (docs/05-API.md) e com a única estratégia atual `lowest-estimated-cost` (docs/06-DECISAO-DE-ROTEAMENTO.md) deve ser preservada.
+A trilha Free atual no Control Center (ADR 0012) usa **tarifa zero declarada pelo operador**, com avisos de que não comprova condições de faturamento. A ADR 0014, já integrada como direção de produto, estabelece uma política futura mais forte: **permitir envio somente quando houver evidência válida e suficiente de ausência de cobrança adicional para a operação concreta**, na origem de credenciais correta. A compatibilidade com o contrato público `POST /v1/executions` (docs/05-API.md) e com a única estratégia atual `lowest-estimated-cost` (docs/06-DECISAO-DE-ROTEAMENTO.md) deve ser preservada.
 
 Esta proposta especifica **um gate futuro**, não cria uma nova estratégia de roteamento, nem modifica os comportamentos atuais. Não introduzir `track`, `proof`, `tier` ou `quota` como campos da API pública v1 por inferência deste texto.
 
@@ -146,7 +146,7 @@ Todos os cenários são **projetados**, não executados. Usar mocks/fixtures de 
 
 - [ADR 0012 — camada administrativa](../decisions/0012-control-center-local-admin-layer.md): implementação atual de Free declarada.
 - [ADR 0013 — adaptador Google Interactions](../decisions/0013-google-gemini-interactions-adapter.md): integrações sem garantia automática de quota/preço.
-- [Issue #32 / PR #34 — ADR 0014](https://github.com/hallanbrito/maestro-router/pull/34): política de produto aprovada, documento de decisão ainda em revisão.
+- [Issue #32 / PR #34 — ADR 0014](https://github.com/hallanbrito/maestro-router/pull/34): política de produto aprovada e integrada à `master` em 04/11/2026; capacidades futuras ainda não implementadas.
 - [OpenAI — cobrança ChatGPT versus API](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform): produtos têm sistemas de cobrança separados.
 - [Google — Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing): condições oficiais variam por modalidade/modelo e por ferramenta.
 - [Google — Gemini API rate limits](https://ai.google.dev/gemini-api/docs/rate-limits): limites variam por projeto/tier e janela; rate limit não é prova de preço.
@@ -155,7 +155,7 @@ As fontes oficiais são referências mutáveis e **não** atestam nenhuma conta,
 
 ## 10. RUC simplificado e próxima decisão
 
-- **Mudança:** uma especificação Markdown nova, independente do Draft PR #34.
+- **Mudança:** uma especificação Markdown nova em branch própria; a ADR 0014 foi integrada separadamente pelo PR #34.
 - **Código, UI, SDK, endpoints, testes, workflows:** nenhum alterado.
 - **Validação desta fatia:** inspeção do diff e referências documentais; **nenhum teste automatizado de runtime executado**.
 - **Risco dominante:** falsa sensação de gratuidade. Mitigação proposta: prova completa, atual e vinculada à chamada ou recusa preventiva.

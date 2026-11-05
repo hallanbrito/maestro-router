@@ -139,3 +139,30 @@ Somente `experiments/free02_offline_poc.py`, `tests/test_free02_offline_poc.py` 
 ### 9. Decisão necessária do PO
 
 **PENDENTE:** avaliar a auditoria independente e decidir o destino da PR #45. Estado de entrega: `AGUARDANDO_AUDITORIA_CHATGPT / AGUARDANDO_PO / SEM_MERGE`.
+
+## RUC/1.0 — Reconciliação R2 após integração da PR #43 (05/11/2026)
+
+**Missão:** [Issue #47](https://github.com/hallanbrito/maestro-router/issues/47), autorizada pelo PO somente para reconciliação/revalidação da [Draft PR #45](https://github.com/hallanbrito/maestro-router/pull/45). **Estado:** RECONCILIADO_PARA_REVALIDACAO / AGUARDANDO_CI_DO_NOVO_HEAD / AGUARDANDO_NOVA_AUDITORIA_E_HOMOLOGACAO_PO / SEM_MERGE_DA_PR45.
+
+### 1. Baselines e motivo
+- Base antiga comum: `master@18668ebc32b2520bf69c17852e28743617e97703`.
+- HEAD da POC homologada anteriormente: `760a646ea0136dc69583147d6580d17514100702`.
+- Nova base de referência: `master@9ee4156ac24882e29b368d495f00b452ad3e08fa` (integração documental da PR #43).
+- Pré-reconciliação: branch `diverged`, 5 commits à frente / 2 atrás. **Sem conflitos de caminhos:** a única diferença nova da master é `docs/proposals/MAESTRO-FREE-02-R1-roteamento-preferencial-fallback.md`; a POC mantém apenas três arquivos próprios.
+
+### 2. Método e arquivos
+- Merge commit de reconciliação na própria branch `ch/maestro-free02-poc01`, com **dois pais**: (1) HEAD anterior da POC e (2) `master@9ee4156ac24882e29b368d495f00b452ad3e08fa`.
+- A árvore resultante preserva o conteúdo existente da POC e incorpora o documento da master sem reescrevê-lo; somente este RUC recebeu uma nova seção R2.
+- Atualização da referência Git por **fast-forward com HEAD esperado**, `force=false`. Sem push forçado, rebase destrutivo, alteração da master nem integração da PR #45.
+- Arquivos da PR em relação à master: `experiments/free02_offline_poc.py`, `tests/test_free02_offline_poc.py` e `docs/experiments/MAESTRO-FREE-02-POC-01-RUC.md`.
+- Simulador e testes não foram editados nesta R2. Documento da PR #43 preservado integralmente.
+
+### 3. Testes e rastreio
+- Evidência do HEAD anterior: `765 passed` backend, `72 passed` frontend e build OK na CI GitHub `42087774124`. **Não são provas de CI do HEAD reconciliado**.
+- **CI após atualização:** consultar execução da PR no GitHub, registrar ID e contagens efetivas em comentário da PR #45 e Issue #47. **Não presume aprovação**.
+- SHA final auto-referencial não pode constar deste próprio commit: registrar HEAD final e read-back nos comentários vinculados.
+
+### 4. Limites e gate
+- Sem mudanças no runtime, dependências, provedores reais, credenciais, chamadas de modelo, gastos, API pública, release, deploy, force-push ou merge da PR #45.
+- Homologação anterior vinculada a `760a646ea0136dc69583147d6580d17514100702` **não é transferida automaticamente ao novo HEAD**.
+- Próximo gate: revalidar diff, mergeabilidade, CI do novo HEAD, realizar auditoria e obter homologação explícita do PO antes de integrar.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from math import isfinite
 from time import monotonic
 from typing import Callable, Literal
 
@@ -30,7 +31,7 @@ class Route:
     enabled: bool = True
 
     def __post_init__(self) -> None:
-        if not self.id or not self.estimate_brl.is_finite() or self.estimate_brl < 0:
+        if not isinstance(self.id, str) or not self.id.strip() or not self.estimate_brl.is_finite() or self.estimate_brl < 0:
             raise ValueError("invalid route")
         if self.offer not in ("free_declared", "paid_known"):
             raise ValueError("invalid offer")
@@ -112,7 +113,9 @@ def simulate(
     acknowledgement enables experimentation; known paid routes additionally need
     separate payment permission and an estimated ceiling. Neither guarantees bill.
     """
-    if not 1 <= max_attempts <= 2 or timeout_seconds <= 0:
+    if (not 1 <= max_attempts <= 2 or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not isfinite(timeout_seconds) or timeout_seconds <= 0):
         raise ValueError("invalid global limits")
     if len({r.id for r in routes}) != len(routes):
         raise ValueError("duplicate route id")
@@ -153,6 +156,9 @@ def simulate(
         estimated_total += route.estimate_brl
         try:
             answer = adapter.execute(history)
+            if clock() - start >= timeout_seconds:
+                evidence.append(Attempt(route.id, "deadline_exceeded"))
+                return finish("indeterminate")
             evidence.append(Attempt(route.id, "success"))
             return finish("completed", route.id, answer)
         except FakeFailure as failure:
@@ -161,4 +167,7 @@ def simulate(
                 return finish("indeterminate")
             if failure.code not in ("rate_limit", "unavailable"):
                 return finish("blocked")
+        except Exception:
+            evidence.append(Attempt(route.id, "unexpected_error"))
+            return finish("indeterminate")
     return finish("blocked")

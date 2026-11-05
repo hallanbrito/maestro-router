@@ -1,6 +1,8 @@
 """F02-01..18: offline-only contract checks; never contact a provider."""
 from decimal import Decimal
 
+import pytest
+
 from experiments.free02_offline_poc import Consent, FakeAdapter, FakeFailure, Message, Route, simulate
 
 
@@ -155,3 +157,50 @@ def test_invalid_infinite_ceiling_rejected():
     import pytest
     with pytest.raises(ValueError, match="invalid estimated ceiling"):
         policy(budget="Infinity")
+
+
+def test_response_after_global_deadline_is_not_completed():
+    now = [0.0]
+
+    class SlowAdapter(FakeAdapter):
+        def execute(self, history):
+            answer = super().execute(history)
+            now[0] = 60.0
+            return answer
+
+    first = SlowAdapter("late answer")
+    second = FakeAdapter("fallback answer")
+    result = simulate((A, B), {"a": first, "b": second}, HISTORY,
+                      lambda: policy(), timeout_seconds=10.0, clock=lambda: now[0])
+    assert result.state == "indeterminate"
+    assert result.answer is None and result.route_id is None
+    assert [(item.route_id, item.outcome) for item in result.attempts] == [("a", "deadline_exceeded")]
+    assert first.calls == [HISTORY] and not second.calls
+
+
+def test_unexpected_adapter_exception_is_sanitized_and_stops_fallback():
+    class UnexpectedAdapter(FakeAdapter):
+        def execute(self, history):
+            self.calls.append(history)
+            raise RuntimeError("opaque failure")
+
+    first = UnexpectedAdapter("unused")
+    second = FakeAdapter("fallback answer")
+    result = simulate((A, B), {"a": first, "b": second}, HISTORY, lambda: policy())
+    assert result.state == "indeterminate"
+    assert result.answer is None and result.route_id is None
+    assert [(item.route_id, item.outcome) for item in result.attempts] == [("a", "unexpected_error")]
+    assert "opaque failure" not in repr(result)
+    assert first.calls == [HISTORY] and not second.calls
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
+def test_nonpositive_or_nonfinite_timeout_rejected(timeout):
+    with pytest.raises(ValueError, match="invalid global limits"):
+        attempt(a="success", timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("route_id", [3, "", "  \t"])
+def test_invalid_route_id_rejected(route_id):
+    with pytest.raises(ValueError, match="invalid route"):
+        Route(route_id, "free_declared", Decimal("0"))

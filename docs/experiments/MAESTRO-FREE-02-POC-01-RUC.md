@@ -1,0 +1,86 @@
+# MAESTRO-FREE-02-POC-01 — Experimento offline de fallback (RUC/1.0)
+
+**Estado:** PROVA DE CONCEITO ISOLADA / CH-2 / SEM INTEGRAÇÃO DE RUNTIME / AGUARDANDO_AUDITORIA_CHATGPT E PO  
+**Data:** 05/11/2026 · **Issue:** [#44](https://github.com/hallanbrito/maestro-router/issues/44) · **Proposta documental de origem:** [#43](https://github.com/hallanbrito/maestro-router/pull/43)  
+**Branch:** `ch/maestro-free02-poc01` · **Baseline `master`:** `18668ebc32b2520bf69c17852e28743617e97703`  
+**Executor:** ChatGPT, em tarefa separada da esteira AGY/CHDevFlow #54.
+
+## 1. Objetivo
+
+Demonstrar, sem APIs externas, que uma rota simulada **A** pode falhar por limite (sinal abstrato equivalente a HTTP 429) e a rota **B** continuar a operação com as mesmas mensagens observáveis, **somente** se permanecer dentro das permissões, orçamento estimado, requisitos técnicos, tempo total e quantidade de tentativas.
+
+A POC **não implementa** o Maestro Free em produção, não modifica `POST /v1/executions` e não afirma prova de gratuidade real. A trilha 0800 preferencial deve informar que a cobrança depende do provedor; ciência de risco e autorização financeira são decisões distintas.
+
+## 2. Arquivos e isolamento
+
+| Caminho | Finalidade |
+| --- | --- |
+| `experiments/free02_offline_poc.py` | Orquestrador simples e inteiramente local com `FakeAdapter`, rotas sintéticas, consentimento reavaliado a cada tentativa e RUC/ledger em memória |
+| `tests/test_free02_offline_poc.py` | Testes com resultados sintéticos; cenários F02-01 a F02-18 + seis limites complementares |
+| `docs/experiments/MAESTRO-FREE-02-POC-01-RUC.md` | Este registro, documentação de comportamento e limitações |
+
+**Restrições técnicas:** só biblioteca-padrão Python no código de POC; `pytest` já é dependência de desenvolvimento do repositório. Os adaptadores não fazem rede, não recebem chaves, não escrevem dados nem importam as integrações reais.
+
+## 3. Executar localmente
+
+Na raiz do repositório:
+
+```bash
+python -m pytest -q tests/test_free02_offline_poc.py
+```
+
+O código de produção não importa `experiments/` nem é alterado por esta PR. O `pytest` padrão do CI inclui os testes adicionados por residirem em `tests/`.
+
+## 4. Contratos sintéticos
+
+- `Message`: mensagem observável com `role` e `content`; histórico imutável transferido à outra rota sem conversão nem geração de memória oculta.
+- `Route`: id, oferta `free_declared` ou `paid_known`, custo *estimado* decimal, capacidades e habilitação. A oferta declarada **não comprova a fatura**.
+- `Consent`: ciência do risco, lista de rotas permitidas, opt-in financeiro separado, teto **estimado** e cancelamento.
+- `FakeAdapter`: apenas captura mensagens sintéticas em memória e devolve sucesso ou `FakeFailure` predefinido.
+- `Attempt`/`Result`: registro de rota e resultado de cada tentativa, teto estimado acumulado, `billing_actual="UNKNOWN"`.
+
+**Invariantes testadas:** `max_attempts` de até 2, rota nunca repetida, no máximo uma resposta final, rechecagem de consentimento antes do fallback, orçamento estimado acumulado, allowlist e capacidades preservadas. Falha após conteúdo parcial, resultado incerto ou possível efeito externo encerra em `indeterminate` sem retry. Erros de autenticação não iniciam fallback. Limite temporal é checado **antes** de cada tentativa, não há instrumentação de cancelamento preemptivo de chamada em curso nesta POC.
+
+## 5. Resultados dos testes
+
+**Teste local isolado executado em 05/11/2026:** `python -m pytest -q tests/test_free02_offline_poc.py` → **24 passed**. Também executado `python -m compileall -q experiments tests` → **PASS**. Estes resultados aplicam-se aos arquivos da POC preparados para esta PR e não à suíte integral do repositório.
+
+| Casos | Resultado esperado, verificado localmente |
+| --- | --- |
+| F02-01 e F02-02 | A completa em uma tentativa; ou falha rate-limit e B completa em duas |
+| F02-03..F02-06 | Allowlist, consentimento financeiro e teto impedem fallback indevido |
+| F02-07..F02-08 | Conteúdo parcial ou resposta indeterminada não dispara replay |
+| F02-09..F02-10 | B recebe exatamente o mesmo histórico explícito de A, sem memória oculta |
+| F02-11..F02-15 | Cancelamento, exaustão, autenticação, revogação e possíveis efeitos externos interrompem fluxo |
+| F02-16..F02-18 | Fatura real permanece `UNKNOWN`; capacidade inadequada bloqueia; opt-in financeiro com teto permite simulação paga |
+| Complementares (6) | Falta de ciência do risco, uma única tentativa, timeout antes de chamada, ID repetido, estimativa positiva declarada gratuita e teto infinito são recusados |
+
+**CI do novo HEAD:** consultar e registrar no comentário da Draft PR após publicação. Este arquivo **não presume PASS antecipado**.
+
+## 6. Limites e riscos
+
+- Não há chamadas de rede, API, geração de tokens reais, sessão persistida, HTTP/stream real ou ferramenta com efeito externo.
+- O experimento **não reutiliza automaticamente** o router canônico, nem comprova compatibilidade de request/response com a API pública v1. A integração real exigiria contrato e auditoria próprios.
+- `FakeFailure("rate_limit")` representa o efeito de um 429, **não** um cliente HTTP.
+- Custos são valores **fictícios e estimados**. Nem `0` estimado nem sucesso da POC garantem cobrança real zero.
+- O orçamento da POC calcula apenas a soma de estimativas das tentativas iniciadas; a cobrança externa de tentativas incompletas pode ser desconhecida.
+- O timeout só impede o início de novas chamadas após o prazo, não interrompe um adapter já rodando. Retries com efeito externo são proibidos; proteção real demanda protocolo de idempotência verificável.
+- Não existe consentimento persistido, política de retenção ou controles de dados pessoais de produção nesta etapa.
+- O RUC de código e testes foi elaborado pelo mesmo executor da POC: **exige revisão independente** antes de qualquer autorização de integração.
+
+## 7. RUC/1.0 — Evidências e deliberação
+
+| Campo | Registro |
+| --- | --- |
+| Identificação | MAESTRO-FREE-02-POC-01, Issue #44, CH-2 |
+| Missão autorizada | POC local com dois provedores mockados, fallback em limite, histórico, permissão e testes offline |
+| Baseline | `master@18668ebc32b2520bf69c17852e28743617e97703` |
+| Teste executado | `python -m pytest -q tests/test_free02_offline_poc.py`: 24 PASS; `compileall`: PASS |
+| Verificação remota | CI e SHA final a registrar no comentário da PR após leitura real |
+| Custo adicional de modelos | R$ 0: nenhuma chamada externa de modelo |
+| Arquivos | Dois arquivos Python isolados e este Markdown |
+| Exclusões | Sem modificações de runtime/API v1/ADR 0014/FREE-01/PR #43/AGY/Project |
+| Limitações | Apenas mocks, sem prova de faturamento, quotas reais ou continuidade do pensamento interno |
+| Estado | `AGUARDANDO_AUDITORIA_CHATGPT / AGUARDANDO_PO / SEM_MERGE` |
+
+**Próximo gate:** revisão independente dos arquivos e da CI no HEAD exato; PO decide se a POC pode ser integrada como experimento. Não autoriza provedor real, fallback produtivo, merge, deploy nem nova missão automaticamente.

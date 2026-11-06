@@ -2005,7 +2005,7 @@ def test_route_catalog_carries_exclusion_to_explanation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ADR 0009: Operational Routing Constraints & Extended Route Bootstrap Tests
+# ADR 0009: testes do bootstrap estendido e das restrições operacionais de roteamento
 # ---------------------------------------------------------------------------
 
 ROUTING_CONSTRAINTS_VARIABLE = "MAESTRO_ROUTING_CONSTRAINTS_JSON"
@@ -2401,7 +2401,7 @@ def test_snapshot_immutability_against_environment_mutation(monkeypatch: pytest.
 
     create_openai_app_from_env()
 
-    # Mutate environment
+    # Altera o ambiente depois que a configuração já foi capturada.
     monkeypatch.setenv(ROUTING_CONSTRAINTS_VARIABLE, json.dumps({"required_capabilities": ["mutated"]}))
 
     cat = captured_catalog[0]
@@ -2434,7 +2434,7 @@ def test_snapshot_immutability_against_input_mutation() -> None:
     finally:
         bm.create_app = orig_create_app
 
-    # Mutate input dict
+    # Altera o dicionário de entrada depois da construção.
     config[ROUTING_CONSTRAINTS_VARIABLE] = json.dumps({"required_capabilities": ["mutated"]})
 
     cat = captured_catalog[0]
@@ -2450,12 +2450,12 @@ def test_route_quality_evidence_references_empty_map_defense() -> None:
         adapter_id="openai-responses",
         quality_evidence_references=refs,
     )
-    # Mutate source dict
+    # Altera o dicionário usado como fonte dos dados.
     refs["injected"] = ("bad-evidence",)
     assert route.quality_evidence_references == {}
     assert len(route.quality_evidence_references) == 0
 
-    # Attempt modification via route attribute
+    # Tenta modificar os dados pelo atributo da rota.
     with pytest.raises(TypeError):
         route.quality_evidence_references["injected"] = ("bad-evidence",)  # type: ignore[index]
 
@@ -2470,7 +2470,7 @@ def test_route_quality_evidence_references_filled_map_defense() -> None:
         adapter_id="openai-responses",
         quality_evidence_references=refs,
     )
-    # Mutate source structures
+    # Altera as estruturas usadas como fonte dos dados.
     source_list.append("ref-injected")
     refs["new-crit"] = ["ref-other"]
 
@@ -2478,7 +2478,7 @@ def test_route_quality_evidence_references_filled_map_defense() -> None:
     assert isinstance(route.quality_evidence_references["quality-crit"], tuple)
     assert "new-crit" not in route.quality_evidence_references
 
-    # Attempt modification via route attribute
+    # Tenta modificar os dados pelo atributo da rota.
     with pytest.raises(TypeError):
         route.quality_evidence_references["quality-crit"] = ("mutated",)  # type: ignore[index]
     with pytest.raises(TypeError):
@@ -2775,7 +2775,7 @@ def test_multiroute_known_unavailable_absence_and_boolean_values() -> None:
     app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
     client = TestClient(app)
 
-    # Calling with allowed_route_ids=["route-c"]: route-c is excluded due to known_unavailability
+    # Com allowed_route_ids=["route-c"], a rota é excluída por indisponibilidade conhecida.
     resp = client.post(
         "/v1/executions",
         json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-c"]}},
@@ -2793,7 +2793,7 @@ def test_multiroute_known_unavailable_absence_and_boolean_values() -> None:
         for c in data["decision"]["applied_constraints"]
     )
 
-    # Calling with allowed_route_ids=["route-b"]: route-b is selected and executed
+    # Com allowed_route_ids=["route-b"], a rota B é selecionada e executada.
     resp_b = client.post(
         "/v1/executions",
         json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-b"]}},
@@ -2801,7 +2801,7 @@ def test_multiroute_known_unavailable_absence_and_boolean_values() -> None:
     assert resp_b.status_code == 200
     assert resp_b.json()["decision"]["route"]["id"] == "route-b"
 
-    # Calling with allowed_route_ids=["route-a"]: route-a (absent known_unavailable) is selected and executed
+    # Com allowed_route_ids=["route-a"], a rota A, sem indisponibilidade, é executada.
     resp_a = client.post(
         "/v1/executions",
         json={"task": "Execute.", "constraints": {"allowed_route_ids": ["route-a"]}},
@@ -3257,7 +3257,7 @@ def test_multiroute_known_unavailable_deterministic_ordering() -> None:
 
 
 # ==============================================================================
-# W22: Operational Route Enablement (ADR 0011) Tests
+# W22: testes de habilitação operacional de rotas (ADR 0011)
 # ==============================================================================
 
 
@@ -3676,7 +3676,7 @@ def test_multiroute_disabled_with_local_failures_alongside_valid_enabled(
         "MAESTRO_OPENAI_ROUTES_JSON": routes_json,
     }
 
-    # Verify bootstrap outputs: preserves invalid ID + disabled metadata, does NOT fabricate Route
+    # Confirma que o bootstrap preserva o ID inválido e a desabilitação sem inventar Route.
     _, routes, invalid_ids, disabled_invalid_ids = (
         bootstrap_module._validated_multiroute_configuration(config)
     )
@@ -3689,7 +3689,7 @@ def test_multiroute_disabled_with_local_failures_alongside_valid_enabled(
     factory = ControlledClientFactory()
     app = create_openai_app(config, client_factory=factory)  # type: ignore[arg-type]
 
-    # Query execution: reason is disabled (motivo disabled), never invalid_route
+    # Na execução, o motivo é rota desabilitada, nunca configuração inválida.
     client = TestClient(app)
     resp = client.post(
         "/v1/executions",
@@ -4159,7 +4159,7 @@ def test_route_catalog_disabled_invalid_invariants() -> None:
     assert cat.configuration_disabled_invalid_route_ids == frozenset({"route-b"})
     assert cat.configuration_invalid_route_ids == frozenset({"route-b", "route-c"})
 
-    # Test mutation of source lists passed to RouteCatalog does not change frozensets
+    # Confirma que alterar listas fornecidas ao RouteCatalog não muda os frozensets.
     invalid_ids.append("route-d")
     invalid_ids.clear()
     disabled_invalid_ids.append("route-e")

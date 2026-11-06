@@ -44,6 +44,12 @@ Não inclua segredos, credenciais, preços reais, payloads externos brutos ou
 dados pessoais. Testes automatizados não podem realizar chamadas reais a
 provedores externos.
 
+Comentários e docstrings do código próprio do Maestro devem ser escritos em
+português do Brasil e explicar decisões ou invariantes relevantes de forma
+didática. Identificadores, termos da linguagem, nomes de bibliotecas e valores
+de contratos externos permanecem em inglês quando essa forma é tecnicamente
+necessária. Evite comentários redundantes que apenas repitam a linha seguinte.
+
 ## Validação
 
 Com o ambiente virtual ativo:

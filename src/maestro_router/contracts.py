@@ -1,8 +1,8 @@
-"""Strict Pydantic models for the public ``POST /v1/executions`` contract.
+"""Modelos Pydantic estritos do contrato público ``POST /v1/executions``.
 
-The models in this module describe only API-facing JSON.  Internal routing and
-execution dataclasses live in their own modules and are projected into these
-closed schemas at the HTTP boundary.
+Os modelos deste módulo descrevem somente o JSON exposto pela API. As classes
+internas de roteamento e execução ficam em seus próprios módulos e são
+projetadas nestes esquemas fechados apenas na fronteira HTTP.
 """
 
 from __future__ import annotations
@@ -18,19 +18,19 @@ CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
 
 
 def _is_non_blank(value: str) -> bool:
-    """Return whether a validated string contains a non-whitespace character."""
+    """Informa se a string validada contém algum caractere não branco."""
 
     return any(not character.isspace() for character in value)
 
 
 class ClosedModel(BaseModel):
-    """Base model that rejects coercion and undeclared JSON members."""
+    """Modelo-base que rejeita coerção e membros JSON não declarados."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class MoneyLimit(ClosedModel):
-    """Exact non-negative amount and ISO-like uppercase currency constraint."""
+    """Limite com valor exato não negativo e moeda maiúscula semelhante à ISO."""
 
     amount: str
     currency: str
@@ -38,7 +38,7 @@ class MoneyLimit(ClosedModel):
     @field_validator("amount")
     @classmethod
     def validate_amount(cls, value: str) -> str:
-        """Require the normative non-negative decimal string grammar."""
+        """Exige a gramática normativa de string decimal não negativa."""
 
         if not DECIMAL_PATTERN.fullmatch(value):
             raise ValueError("O valor deve ser uma string decimal não negativa.")
@@ -47,7 +47,7 @@ class MoneyLimit(ClosedModel):
     @field_validator("currency")
     @classmethod
     def validate_currency(cls, value: str) -> str:
-        """Require exactly three uppercase ASCII letters for a currency."""
+        """Exige exatamente três letras ASCII maiúsculas para a moeda."""
 
         if not CURRENCY_PATTERN.fullmatch(value):
             raise ValueError("A moeda deve usar exatamente três letras ASCII maiúsculas.")
@@ -55,7 +55,7 @@ class MoneyLimit(ClosedModel):
 
 
 class RequestConstraints(ClosedModel):
-    """Optional route, capability, quality, and economic request constraints."""
+    """Restrições opcionais de rota, capacidade, qualidade e economia."""
 
     required_capabilities: list[str] | None = None
     required_quality_criteria: list[str] | None = None
@@ -71,7 +71,7 @@ class RequestConstraints(ClosedModel):
     def validate_identifier_list(
         cls, value: list[str] | None
     ) -> list[str]:
-        """Reject null, empty, blank, or duplicate identifier arrays."""
+        """Rejeita arrays nulos, vazios ou com identificadores brancos ou repetidos."""
 
         if value is None:
             raise ValueError("O campo não aceita null; omita-o quando não houver valor.")
@@ -86,7 +86,7 @@ class RequestConstraints(ClosedModel):
     @field_validator("max_estimated_cost", mode="before")
     @classmethod
     def reject_null_money(cls, value: object) -> object:
-        """Distinguish an omitted cost limit from an explicitly null one."""
+        """Distingue limite de custo omitido de um limite explicitamente nulo."""
 
         if value is None:
             raise ValueError("O campo não aceita null; omita-o quando não houver valor.")
@@ -94,7 +94,7 @@ class RequestConstraints(ClosedModel):
 
 
 class ExecutionRequest(ClosedModel):
-    """Validated public request accepted by the synchronous MVP endpoint."""
+    """Solicitação pública validada aceita pelo endpoint síncrono do MVP."""
 
     task: str
     context: str | None = None
@@ -103,7 +103,7 @@ class ExecutionRequest(ClosedModel):
     @field_validator("task")
     @classmethod
     def validate_task(cls, value: str) -> str:
-        """Require a task containing at least one non-whitespace character."""
+        """Exige uma tarefa com pelo menos um caractere não branco."""
 
         if not _is_non_blank(value):
             raise ValueError("O campo deve conter ao menos um caractere não branco.")
@@ -112,7 +112,7 @@ class ExecutionRequest(ClosedModel):
     @field_validator("context")
     @classmethod
     def validate_context(cls, value: str | None) -> str:
-        """Allow omitted context while rejecting null or blank context."""
+        """Permite contexto omitido, mas rejeita contexto nulo ou em branco."""
 
         if value is None:
             raise ValueError("O campo não aceita null; omita-o quando não houver valor.")
@@ -123,7 +123,7 @@ class ExecutionRequest(ClosedModel):
     @field_validator("constraints", mode="before")
     @classmethod
     def reject_null_constraints(cls, value: object) -> object:
-        """Allow omitted constraints while rejecting an explicit null object."""
+        """Permite restrições omitidas, mas rejeita um objeto explicitamente nulo."""
 
         if value is None:
             raise ValueError("O campo não aceita null; omita-o quando não houver valor.")
@@ -148,7 +148,7 @@ FactorCategory = Literal[
 
 
 class AppliedConstraint(ClosedModel):
-    """Public explanation of one request or configuration constraint."""
+    """Explicação pública de uma restrição da requisição ou configuração."""
 
     source: ConstraintSource
     category: ConstraintCategory
@@ -156,7 +156,7 @@ class AppliedConstraint(ClosedModel):
 
 
 class DecisionFactor(ClosedModel):
-    """Public explanation of one fact that influenced routing."""
+    """Explicação pública de um fato que influenciou o roteamento."""
 
     category: FactorCategory
     description: str
@@ -164,14 +164,14 @@ class DecisionFactor(ClosedModel):
 
 
 class Strategy(ClosedModel):
-    """Routing strategy metadata used when no route was selected."""
+    """Metadados da estratégia usados quando nenhuma rota foi selecionada."""
 
     id: Literal["lowest-estimated-cost"] = "lowest-estimated-cost"
     applied: Literal[False] = False
 
 
 class RefusedDecision(ClosedModel):
-    """Public decision trace for a routing refusal."""
+    """Rastro público da decisão que recusou o roteamento."""
 
     outcome: Literal["refused"] = "refused"
     strategy: Strategy
@@ -181,7 +181,7 @@ class RefusedDecision(ClosedModel):
 
 
 class PublicError(ClosedModel):
-    """Public error returned when the router cannot select a route."""
+    """Erro público retornado quando o roteador não consegue selecionar uma rota."""
 
     code: Literal[
         "NO_ELIGIBLE_ROUTE", "INSUFFICIENT_ECONOMIC_INFORMATION"
@@ -190,21 +190,21 @@ class PublicError(ClosedModel):
 
 
 class RefusalResponse(ClosedModel):
-    """Complete response shape for a routing refusal."""
+    """Formato completo da resposta de recusa do roteamento."""
 
     error: PublicError
     decision: RefusedDecision
 
 
 class ErrorIssue(ClosedModel):
-    """Sanitized validation or configuration issue exposed to the caller."""
+    """Problema sanitizado de validação ou configuração exposto ao cliente."""
 
     path: str | None = None
     message: str
 
 
 class SelectedRoute(ClosedModel):
-    """Public identity of the route chosen for execution."""
+    """Identidade pública da rota escolhida para execução."""
 
     id: str
     provider: str
@@ -212,14 +212,14 @@ class SelectedRoute(ClosedModel):
 
 
 class SelectedStrategy(ClosedModel):
-    """Routing strategy metadata for a successful selection."""
+    """Metadados da estratégia de uma seleção bem-sucedida."""
 
     id: Literal["lowest-estimated-cost"] = "lowest-estimated-cost"
     applied: Literal[True] = True
 
 
 class SelectedPublicDecision(ClosedModel):
-    """Public, explainable record of one selected route."""
+    """Registro público e explicável de uma rota selecionada."""
 
     outcome: Literal["selected"] = "selected"
     route: SelectedRoute
@@ -230,13 +230,13 @@ class SelectedPublicDecision(ClosedModel):
 
 
 class ExecutionResult(ClosedModel):
-    """Provider-neutral result returned by a successful execution."""
+    """Resultado neutro de provedor retornado após uma execução bem-sucedida."""
 
     content: str
 
 
 class AvailableEconomicValue(ClosedModel):
-    """Complete monetary fact represented with exact decimal text."""
+    """Fato monetário completo representado por texto decimal exato."""
 
     status: Literal["available"] = "available"
     amount: str
@@ -246,21 +246,21 @@ class AvailableEconomicValue(ClosedModel):
 
 
 class UncertainEconomicValue(AvailableEconomicValue):
-    """Monetary estimate that is numeric but carries explicit uncertainty."""
+    """Estimativa monetária numérica que carrega incerteza explícita."""
 
     status: Literal["uncertain"] = "uncertain"
     reason: str
 
 
 class UnavailableEconomicValue(ClosedModel):
-    """Economic value that cannot safely expose a numeric amount."""
+    """Valor econômico que não pode expor uma quantia numérica com segurança."""
 
     status: Literal["unavailable"] = "unavailable"
     reason: str
 
 
 class UsageItem(ClosedModel):
-    """One provider-neutral usage unit projected into public JSON."""
+    """Uma unidade de uso neutra de provedor projetada no JSON público."""
 
     unit: str
     quantity: str
@@ -268,7 +268,7 @@ class UsageItem(ClosedModel):
     @field_validator("unit")
     @classmethod
     def validate_unit(cls, value: str) -> str:
-        """Require a non-blank provider-neutral unit name."""
+        """Exige um nome não branco para a unidade neutra de provedor."""
 
         if not _is_non_blank(value):
             raise ValueError("A unidade deve ser uma string não branca.")
@@ -277,7 +277,7 @@ class UsageItem(ClosedModel):
     @field_validator("quantity")
     @classmethod
     def validate_quantity(cls, value: str) -> str:
-        """Serialize usage through the same exact decimal grammar as money."""
+        """Serializa uso com a mesma gramática decimal exata usada para dinheiro."""
 
         if not DECIMAL_PATTERN.fullmatch(value):
             raise ValueError("A quantidade deve ser uma string decimal não negativa.")
@@ -285,14 +285,14 @@ class UsageItem(ClosedModel):
 
 
 class AvailableUsage(ClosedModel):
-    """Complete normalized usage containing one or more unique units."""
+    """Uso normalizado completo com uma ou mais unidades únicas."""
 
     status: Literal["available"] = "available"
     items: list[UsageItem]
 
     @model_validator(mode="after")
     def validate_items(self) -> AvailableUsage:
-        """Require known usage items and prevent duplicate units."""
+        """Exige itens de uso conhecidos e impede unidades repetidas."""
 
         if not self.items:
             raise ValueError("O uso conhecido deve conter ao menos um item.")
@@ -303,7 +303,7 @@ class AvailableUsage(ClosedModel):
 
 
 class UncertainUsage(AvailableUsage):
-    """Partial normalized usage with a public explanation."""
+    """Uso normalizado parcial acompanhado de explicação pública."""
 
     status: Literal["uncertain"] = "uncertain"
     reason: str
@@ -311,7 +311,7 @@ class UncertainUsage(AvailableUsage):
     @field_validator("reason")
     @classmethod
     def validate_reason(cls, value: str) -> str:
-        """Require an explanation for partial usage."""
+        """Exige uma explicação para o uso parcial."""
 
         if not _is_non_blank(value):
             raise ValueError("A razão deve ser uma string não branca.")
@@ -319,7 +319,7 @@ class UncertainUsage(AvailableUsage):
 
 
 class UnavailableUsage(ClosedModel):
-    """Usage state used when no supported quantity is trustworthy."""
+    """Estado usado quando nenhuma quantidade suportada é confiável."""
 
     status: Literal["unavailable"] = "unavailable"
     reason: str
@@ -327,7 +327,7 @@ class UnavailableUsage(ClosedModel):
     @field_validator("reason")
     @classmethod
     def validate_reason(cls, value: str) -> str:
-        """Require an explanation for unavailable usage."""
+        """Exige uma explicação para o uso indisponível."""
 
         if not _is_non_blank(value):
             raise ValueError("A razão deve ser uma string não branca.")
@@ -335,7 +335,7 @@ class UnavailableUsage(ClosedModel):
 
 
 class ExecutionEconomics(ClosedModel):
-    """Estimate, observed usage, and calculated-cost views for one execution."""
+    """Visões de estimativa, uso observado e custo calculado de uma execução."""
 
     estimate: (
         AvailableEconomicValue
@@ -351,7 +351,7 @@ class ExecutionEconomics(ClosedModel):
 
 
 class ExecutionSuccessResponse(ClosedModel):
-    """Public response returned after a successful provider execution."""
+    """Resposta pública retornada após uma execução bem-sucedida no provedor."""
 
     result: ExecutionResult
     decision: SelectedPublicDecision
@@ -359,7 +359,7 @@ class ExecutionSuccessResponse(ClosedModel):
 
 
 class ExecutionPublicError(ClosedModel):
-    """Sanitized provider-neutral execution failure."""
+    """Falha de execução sanitizada e neutra de provedor."""
 
     code: Literal[
         "EXECUTION_FAILED", "EXECUTION_UNAVAILABLE", "EXECUTION_TIMEOUT"
@@ -368,7 +368,7 @@ class ExecutionPublicError(ClosedModel):
 
 
 class ExecutionErrorResponse(ClosedModel):
-    """Execution failure plus the selection and economic facts already known."""
+    """Falha de execução acompanhada da seleção e dos fatos econômicos conhecidos."""
 
     error: ExecutionPublicError
     decision: SelectedPublicDecision
@@ -376,7 +376,7 @@ class ExecutionErrorResponse(ClosedModel):
 
 
 class InternalPublicError(ClosedModel):
-    """Sanitized server-side configuration or decision error."""
+    """Erro sanitizado de configuração ou decisão ocorrido no servidor."""
 
     code: Literal["INVALID_CONFIGURATION", "INVALID_DECISION"]
     message: str
@@ -384,13 +384,13 @@ class InternalPublicError(ClosedModel):
 
 
 class InternalErrorResponse(ClosedModel):
-    """Public envelope for an internal Maestro error."""
+    """Envelope público de um erro interno do Maestro."""
 
     error: InternalPublicError
 
 
 class InvalidRequestError(ClosedModel):
-    """Stable public error for malformed or contract-invalid requests."""
+    """Erro público estável para requisições malformadas ou fora do contrato."""
 
     code: Literal["INVALID_REQUEST"] = "INVALID_REQUEST"
     message: str = "A solicitação é inválida."
@@ -398,6 +398,6 @@ class InvalidRequestError(ClosedModel):
 
 
 class InvalidRequestResponse(ClosedModel):
-    """Public envelope for request-validation issues."""
+    """Envelope público dos problemas de validação da requisição."""
 
     error: InvalidRequestError

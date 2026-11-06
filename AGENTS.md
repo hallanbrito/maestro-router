@@ -36,6 +36,19 @@ Para a execução de fatias de trabalho incrementais (Ws), consulte o protocolo 
 
 As Ws incrementais devem seguir o protocolo econômico: adotar a menor capacidade suficiente para cada etapa, praticar leitura seletiva de contexto, manter o AGY como executor via terminal, condicionar escaladas a justificativa técnica objetiva, submeter a entrega à revisão independente e submeter ambiguidades relevantes à decisão humana do Product Owner.
 
+## Código didático em português
+
+- Escreva comentários e docstrings do código próprio do Maestro em português do
+  Brasil, com linguagem clara e voltada também a quem ainda está aprendendo.
+- Explique decisões, invariantes, fronteiras e motivos não evidentes; não comente
+  mecanicamente cada linha nem repita em prosa o que o comando já diz sozinho.
+- Preserve em inglês identificadores de código, palavras reservadas, nomes de
+  bibliotecas, campos e valores definidos por contratos públicos ou provedores.
+- Não traduza mensagens públicas, nomes ou contratos existentes como parte de
+  uma tarefa meramente documental, pois isso pode alterar comportamento.
+- Ao criar ou modificar uma lógica relevante, atualize a explicação didática no
+  mesmo diff e mantenha os comentários coerentes com o comportamento testado.
+
 ## Antes de trabalhar
 
 1. Leia este `AGENTS.md`.
@@ -43,8 +56,10 @@ As Ws incrementais devem seguir o protocolo econômico: adotar a menor capacidad
 3. Leia somente os documentos normativos necessários para a mudança.
 4. Verifique `docs/decisions/` por decisões adicionais aplicáveis.
 5. Se houver código, localize e analise apenas o código e os testes relevantes.
-6. Distinga fatos documentados de suposições; declare qualquer suposição necessária.
-7. Implemente a menor alteração capaz de atender à tarefa.
+6. Confirme que comentários e docstrings tocados seguem a política didática em
+   português.
+7. Distinga fatos documentados de suposições; declare qualquer suposição necessária.
+8. Implemente a menor alteração capaz de atender à tarefa.
 
 Não trate uma decisão deliberadamente aberta como autorização para inventá-la.
 Se uma ambiguidade relevante de produto ou arquitetura puder mudar o resultado,

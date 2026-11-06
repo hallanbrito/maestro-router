@@ -1,4 +1,4 @@
-"""Maestro Router MVP."""
+"""Ponto de entrada público do MVP do Maestro Router."""
 
 from .api import create_app
 

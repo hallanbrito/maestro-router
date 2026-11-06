@@ -1,4 +1,4 @@
-"""Concrete provider adapters."""
+"""Adaptadores concretos dos provedores externos suportados."""
 
 from .google import GoogleGeminiInteractionsAdapter
 from .openai import OpenAIResponsesAdapter

@@ -62,9 +62,11 @@ Cliente/controlador autorizado
 - `NeutralAttemptOutcome`: `complete`, `safe_to_reselect`, `indeterminate`, `blocked`, acompanhado de evidência sobre entrega parcial/efeito; não confundir 429 genérico com prova suficiente de replay seguro.
 - `AttemptOrchestrator`: conduz uma **sequência** de escolhas canônicas; não possui SDK, credenciais nem formato HTTP.
 - `ExecutionPresenter`: produz **uma** resposta ao cliente; sem modificar `ExecutionSuccessResponse` ou `ExecutionErrorResponse` públicos sem revisão de contrato.
-- `ContextEnvelope`: mensagens efetivamente observáveis e autorizadas, checkpoint completo e referências de efeitos; nunca pensamento oculto, estado proprietário ou memória indisponível.
+- `ContextEnvelope`: **DTO inteiramente interno e sintético à POC**, não campo público nem contrato implementado. Deve representar mensagens completas em ordem, seus papéis e proveniência, checkpoint completo verificável, escopo/versão de consentimento, referências a efeitos pendentes e requisitos de compatibilidade da rota B. Nunca transportar pensamento oculto, estado proprietário ou memória indisponível.
 
 **Seam recomendado:** o novo orquestrador chamaria uma função neutra de despacho que retorna dado tipado, **não** a função atual `_execute_selection` que já materializa HTTP. A refatoração desse ponto precisa de testes reproduzindo integralmente as respostas v1 antes de qualquer ativação de fallback.
+
+**Fronteira atual do histórico:** `ExecutionRequest` e `TextExecutionRequest` carregam somente `task` e `context: str | None`; não carregam mensagens com papéis, proveniência ou checkpoint. Na POC, fakes A e B devem receber um envelope sintético construído **fora** da v1. O teste deve registrar a entrada de A, o último checkpoint completo e a tradução recebida por B, comparando ordem, papéis, conteúdo e proveniência sem concatenar tudo em `context` e perder semântica. Cada adapter fake declara se representa esses elementos e a janela necessária; se não puder representar integralmente dados autorizados, se houver perda, janela incompatível, efeito pendente ou conteúdo sem consentimento para B, bloquear o despacho. Nenhum teste pode inferir transferência de memória oculta, estado proprietário ou sessão remota. O DTO real, seu formato e sua integração aos adapters exigem gate de implementação separado.
 
 ### 3.2 Reeleição sem falsear motivos
 
@@ -77,11 +79,13 @@ A API interna atual `route_request` não oferece um parâmetro semântico própr
 3. **Consentimento revogável**: ciência de cobrança possível é distinta de autorização explícita de executar rota conhecida como paga; esta exige allowlist, teto estimado positivo, moeda coerente e escopo de conta/projeto. Se faltar qualquer elemento: fail-closed.
 4. **Free estrita vs preferencial**: na Free governada pela ADR 0014, ausência de prova de gratuidade para conta/projeto/endpoint/quota implica **sem chamada**. A modalidade “preferencialmente gratuita” não pode se apropriar da mesma garantia nem ser habilitada sem decisão do PO para riscos/cobrança.
 5. **Orçamento de tentativas**: estimativa `Decimal` acumulada **antes** de cada despacho, incluindo tentativas fracassadas iniciadas; dados indisponíveis, moedas distintas sem mecanismo aprovado ou uso desconhecido **não** devem ser tratados como zero nem permitidos por conversão monetária inventada. Teto estimado não é trava de fatura real.
-6. **Snapshot consistente**: catálogo, associações `adapter_id`, qualidade, política, restrições e versão de consentimento formam um conjunto auditável. Revalidar permissão antes da segunda tentativa sem permitir ampliar o escopo originalmente aprovado.
+6. **Snapshot consistente**: catálogo, associações `adapter_id`, qualidade, política, restrições e versão de consentimento formam um conjunto auditável. Revalidar permissão antes da segunda tentativa sem permitir ampliar o escopo originalmente aprovado. Revogação impede **tentativas futuras**; não desfaz despacho já iniciado. Um protocolo candidato de versão/lease de consentimento deve coordenar, de modo serializável, a revogação com a transição `AUTHORIZED -> DISPATCH_STARTED` no **limite exato do despacho** de B: uma pré-verificação isolada não basta. Se a revogação vencer antes dessa transição, B não inicia; se o despacho vencer, a tentativa já está iniciada e a revogação só impede novos despachos. Sem garantia dessa coordenação, falhar fechado e não iniciar B. Durante chamada *in-flight*, não alegar cancelamento remoto; se o resultado/efeito for indeterminado, registrar `indeterminate` e não repetir. O mecanismo concreto de sincronização exige gate próprio.
 7. **Credenciais e privacidade**: apenas o adaptador vê segredos, por origem autorizada; histórico não é log persistente implícito; telemetria limita-se a IDs opacos, status, estimativas e códigos sanitizados, sem conteúdo, chaves, prompt ou tokens secretos.
 8. **Idempotência e efeitos**: nenhum fallback após resposta parcial, ferramenta de escrita, outcome ambíguo ou timeout cuja ausência de efeito não seja comprovada. Uma chave idempotente só é útil se o provedor ou a aplicação **realmente** garantirem deduplicação no escopo correto.
 9. **Continuidade realista**: transferir exclusivamente mensagens textuais completas fornecidas/observadas e consentidas; verificar capacidade, limites de janela, formato de ferramentas e checkpoint. Sem resumo/truncamento automático, memória oculta ou `previous_interaction_id` implícito.
 10. **Separação de camadas**: código normativo/v1 continua single-attempt até gate; o projeto não ganha acesso à API nem autorização de cobrança ao integrar esta documentação.
+
+**Custo e revogação:** uma tentativa já despachada pode consumir recursos mesmo se a autorização for revogada logo depois. Não há garantia de cancelamento remoto, de reversão de efeitos ou de faturamento zero. O ledger deve distinguir pré-verificação, `DISPATCH_STARTED`, chamada *in-flight* e resultado completo/indeterminado, sem expor payload.
 
 ## 5. Matriz de falhas — comportamento futuro a validar
 
@@ -124,20 +128,35 @@ A API interna atual `route_request` não oferece um parâmetro semântico própr
 
 ### 7.1 Cenários mínimos de teste de uma futura F03-A/F03-B
 
-- **T01:** modo legado off mantém `POST /v1/executions` com exatamente o mesmo schema, status e apenas um `ExecutionAdapter.execute`.
-- **T02:** erro conhecido de A antes de conteúdo e com evidência de segurança permite reeleição de B elegível; histórico explícito preservado.
+- **T01:** com o orquestrador desabilitado, comparar antes/depois do seam o `POST /v1/executions` pela matriz abaixo, usando catálogo/adapters fake determinísticos, sem rede. Comparar status, `Content-Type: application/json`, envelope, códigos, campos condicionais e ausência de campos extras/`null`; preservar precedência mídia → JSON/schema → configuração → decisão → execução. Em cada caso contar despachos: zero para validação, configuração e recusa; exatamente um para sucesso ou erro após seleção. Não aceitar campos `attempts`, `session_id`, `consent` ou `track` na v1.
+- **T02:** erro conhecido de A antes de conteúdo e com prova de não-efeito permite reeleição de B elegível; comparar em adapters fake o envelope sintético autorizado antes/depois da tradução, com papéis, ordem, proveniência e checkpoint completos. Perda ou incompatibilidade bloqueia B; nenhuma ampliação da v1.
 - **T03:** custo de A + B contabilizado no limite **estimado**, sem status de cobrança real fabricado.
 - **T04:** sem prova de gratuidade na Free estrita → nenhum adaptador chamado.
 - **T05:** falta de consentimento financeiro / B fora da allowlist → não chama B.
 - **T06:** resultado parcial, possível escrita, timeout, indisponibilidade ambígua e exceção inesperada → sem fallback.
-- **T07:** cancelar/revogar entre A e B → no máximo uma tentativa já iniciada; novo despacho vedado.
+- **T07:** corrida adversarial determinística: pausar B entre pré-verificação e transição `AUTHORIZED -> DISPATCH_STARTED`, revogar consentimento e liberar a barreira; provar zero chamadas a B. Inverter a ordem para provar que revogação após `DISPATCH_STARTED` não cancela nem desfaz a tentativa já enviada, mas impede a próxima; sem sincronização verificável, bloquear B.
 - **T08:** requisito/capacidade, moeda não comparável, indisponibilidade conhecida e motivo de rota previamente tentada geram exclusões distintas e explicáveis.
-- **T09:** dois modelos não recebem memória interna/segredo; apenas mensagens observáveis autorizadas; janela incompatível bloqueia.
-- **T10:** nenhuma alteração de configuração global, de ordenação canônica e de cálculo de `usage`/custo posterior.
+- **T09:** dois adapters fake recebem somente mensagens sintéticas observáveis e autorizadas; nenhum recebe memória interna/segredo. Conferir papéis, ordem, proveniência, checkpoint e consentimento; janela incompatível, efeitos pendentes, conteúdo não autorizado ou tradução com perda bloqueiam B.
+- **T10:** nenhuma alteração de configuração global, de ordenação canônica e de cálculo de `usage`/custo posterior. `sticky route` desabilitada na F03-A; eventual afinidade futura requer gate e testes que preservem `lowest-estimated-cost` e todas as restrições.
 - **T11:** ID, metadados e razões sanitizadas em ledger; não persistir payloads nem credenciais.
 - **T12:** budget, deadline e máximo de tentativas aplicam-se globalmente, incluindo tentativas falhas.
 
 **Testes automáticos atuais** (FREE-02) não comprovam T01–T12 na integração real; estes são **critérios propostos**, não resultados executados.
+
+#### Matriz proposta de compatibilidade v1 para T01 (antes/depois, não executada)
+
+| Caso fake determinístico | HTTP e envelope idênticos antes/depois | Invariantes observáveis |
+| --- | --- | --- |
+| Sucesso | `200`; exatamente `result`, `decision`, `economics` | `result.content`; `decision.outcome=selected`, `decision.route` com `id/provider/model`, estratégia e razões; `economics.estimate/usage/calculated_cost` com estados e projeção de valores conforme dados fake; exatamente uma execução |
+| JSON/schema inválidos | `400 INVALID_REQUEST`; somente `error` com `issues` | JSON malformado, UTF-8 inválido, nome de membro JSON duplicado, `null`, campo extra em qualquer nível, array duplicado e valor monetário inválido; Unicode válido preservado e comparado exatamente, sem normalização implícita, surrogate isolado recusado; zero execução |
+| Mídia inválida | `415 INVALID_REQUEST`; somente `error` com `issues` | Tipo diferente de `application/json` ou charset incompatível; precede análise do corpo; zero execução |
+| Sem rota / economia insuficiente | `422 NO_ELIGIBLE_ROUTE` ou `422 INSUFFICIENT_ECONOMIC_INFORMATION`; exatamente `error`, `decision` | `decision.outcome=refused`, sem `decision.route`, `result` ou `economics`; fatores distinguem inelegibilidade de falta de base econômica; zero execução |
+| Configuração ou decisão inválida | `500 INVALID_CONFIGURATION` ou `500 INVALID_DECISION`; somente `error` com `issues` | Nenhuma seleção inválida publicada; zero execução |
+| Falha de execução | `502 EXECUTION_FAILED`; exatamente `error`, `decision`, `economics` | Sem `result`; decisão da rota selecionada e `estimate` mantidas; `usage`/`calculated_cost` indisponíveis quando não há dados defensáveis; exatamente uma execução |
+| Indisponibilidade na execução | `503 EXECUTION_UNAVAILABLE`; exatamente `error`, `decision`, `economics` | Mesmo contrato pós-seleção, código distinto; exatamente uma execução |
+| Timeout na execução | `504 EXECUTION_TIMEOUT`; exatamente `error`, `decision`, `economics` | Mesmo contrato pós-seleção, código distinto; exatamente uma execução |
+
+Em todas as linhas, validar schemas fechados da [API v1](../05-API.md), omissão de opcionais ausentes (sem `null`), strings decimais/moeda, ausência de payload externo e distinção entre estimativa, custo calculado e cobrança. A matriz é **plano de regressão para gate futuro**, não evidência de testes executados nesta PR.
 
 ## 8. Riscos, dependências e decisões reservadas ao PO
 
@@ -147,11 +166,11 @@ A API interna atual `route_request` não oferece um parâmetro semântico própr
 | D02 | Semântica de compatibilidade da API v1 | Fechada, uma resposta de uma rota | Preservar v1 ou especificar nova API; não alterar por inferência |
 | D03 | Tipo seguro de erro e evidência de não-efeito | Ausente em `ExecutionAdapter` | Definir sinalização e provas, sem tratar qualquer 429 como automaticamente seguro |
 | D04 | Origem de elegibilidade gratuita e quota | Não verificada pelo Maestro | Fail-closed sem atestado aplicável a conta/projeto/método/janela |
-| D05 | Fonte e escopo de consentimento financeiro | Não existe no `ExecutionRequest` v1 | Aprovar opt-in específico e revogação, sem aceitar por padrão |
+| D05 | Fonte e escopo de consentimento financeiro | Não existe no `ExecutionRequest` v1; sincronização de revogação/dispatch inexistente | Aprovar opt-in, revogação e mecanismo serializável no limite do despacho; sem garantia, não iniciar B |
 | D06 | Limites persistentes, ledger e dados pessoais | POC somente em memória | Decidir retenção/eliminação, segurança e observabilidade |
-| D07 | Continuidade em sistemas de contexto diferentes | Somente mensagens explícitas na POC | Aprovar envelope/formatos, tamanho, truncamento e validação |
+| D07 | Continuidade em sistemas de contexto diferentes | `ExecutionRequest`/`TextExecutionRequest` só têm `task` e `context: str | None`; envelope da POC é sintético | Decidir DTO interno real, tradução fiel, tamanho, compatibilidade e validação em gate separado; não ampliar v1 |
 | D08 | Cancelamento e idempotência reais | Não há garantia pública | Aprovar modelos de erro sem replay inseguro |
-| D09 | Ranking “prefer_free” e exclusões de tentativas | `lowest-estimated-cost` atual seleciona uma rota | Não alterar estratégia nem falsear exclusão como `invalid_route` |
+| D09 | Ranking “prefer_free”, `sticky route` e exclusões de tentativas | `lowest-estimated-cost` atual seleciona uma rota; [FREE-02-R1, seção 5](MAESTRO-FREE-02-R1-roteamento-preferencial-fallback.md) propõe afinidade com rota bem-sucedida | `sticky route` é decisão futura pendente, desabilitada/não assumida na F03-A; eventual preferência requer gate e testes, nunca sobrepõe elegibilidade, autorização, custo, critérios ou `lowest-estimated-cost`; não falsear exclusão como `invalid_route` |
 | D10 | Custos agregados em erro | `economics` pública descreve uma rota | Aprovar apresentação e contabilidade conservadora sem violar v1 |
 
 **Risco transversal:** uma POC limpa com fakes **não** prova compatibilidade com comportamento de provider, quota, billing, streaming, cancelamento ou idempotência. Sem demonstração técnica e gate explícito, não habilitar.
@@ -174,6 +193,54 @@ A API interna atual `route_request` não oferece um parâmetro semântico própr
 | Estado | `ARQUITETURA_CH1_DOCUMENTADA / AGUARDANDO_CI_E_AUDITORIA / AGUARDANDO_PO / SEM_MERGE` |
 
 **Critério de saída:** aprovação documental em gate de revisão não é autorização de implementar, integrar ao runtime ou aceitar riscos financeiros. Nenhuma missão CH-2 é criada automaticamente por este texto.
+
+### 9.1 RUC/1.0 — Correção documental FREE-03-R1 / Issue #50
+
+#### 1. Identificação
+
+**Missão:** MAESTRO-FREE-03-R1 · [Issue #50](https://github.com/hallanbrito/maestro-router/issues/50) · executor Codex · CH-2 documental autorizado pelo PO na Issue e retomada autorizada no [comentário de desbloqueio](https://github.com/hallanbrito/maestro-router/issues/50#issuecomment-6668272643). **Ambiente:** worktree local isolado; `LIVE_GITHUB` + `LOCAL_REPO` · 06/11/2026, America/Fortaleza · `run_id` local: não aplicável. **Baseline:** Draft PR #49, `master@31a2f1c0db505a70359fac6a9ccf80804f5f7dd3`, HEAD inicial `f9092ece90b37c374fd513d5b5808ae71db5f29b`. **Parecer nesta etapa:** `PARCIAL`, até CI do novo HEAD e auditoria externa.
+
+#### 2. Resumo executivo
+
+Correção proposta dos 3 P2 e 1 P3 em um único Markdown. Nenhuma implementação de fallback ou teste futuro foi executado por este documento. A PR deve permanecer Draft, sem merge.
+
+#### 3. Consultas e atividades realizadas
+
+Conferidos Issue #50, auditoria da PR #49, `docs/05-API.md`, ADR 0014, FREE-02-R1 e contratos/fluxos pertinentes em `api.py`, `contracts.py`, `execution.py` e `control_center.py`. Editado somente este documento. Verificações locais e CI do novo HEAD são registradas abaixo segundo sua efetiva execução; o resultado remoto final também deve constar na Issue e PR.
+
+#### 4. Evidências verificáveis
+
+| ID | Classe e fonte | Fato e limite |
+| --- | --- | --- |
+| R1-E01 | `OBSERVADO` · Git local e [PR #49](https://github.com/hallanbrito/maestro-router/pull/49) | Baseline/HEAD iniciais acima; PR aberta em Draft antes da edição R1. |
+| R1-E02 | `OBSERVADO` · [auditoria #6667770454](https://github.com/hallanbrito/maestro-router/pull/49#issuecomment-6667770454) e diff R1 | 3 P2 + 1 P3 descritos; a correção cobre matriz v1, envelope sintético, corrida de revogação e `sticky route`. A auditoria citada não homologa esta revisão. |
+| R1-E03 | `OBSERVADO` · [CI anterior #42097374471](https://github.com/hallanbrito/maestro-router/actions/runs/42097374471) | `completed/success` no HEAD **inicial** `f9092ec`; não valida o diff R1. |
+| R1-E04 | `DECLARADO` · [relato da tentativa anterior](https://github.com/hallanbrito/maestro-router/issues/50#issuecomment-6668236480) | `pytest` local inconclusivo por ausência de módulo em `/usr/bin/python3` e timeout em ambiente virtual; não é PASS nem falha comprovada da suíte. |
+
+#### 5. Verificações e resultados
+
+| Critério | Estado nesta revisão do Markdown | Evidência/limite |
+| --- | --- | --- |
+| Quatro achados documentais | `PASSOU` na conferência do executor, sujeito a auditoria | Seções 3.1, 4, 7.1 e D05/D07/D09; critérios futuros explicitamente não executados. |
+| Integridade do diff e links relativos | `PASSOU` nesta revisão local | `git diff --check` sem erro; `git diff --name-only origin/master` aponta só este Markdown; 19 links locais resolvem para arquivos existentes. Conferir novamente após commit. |
+| `pytest` local | `NÃO_EXECUTADO` nesta retomada | Tentativa anterior inconclusiva; o desbloqueio da Issue dispensa repetição para esta edição apenas documental. |
+| CI no novo HEAD | `NÃO_EXECUTADO` neste registro pré-publicação | Gate obrigatório após push; resultado e SHA final devem constar na Issue/PR. |
+
+#### 6. Riscos e bloqueios
+
+Sem prova de não-efeito remoto, sem sincronização de consentimento ou com contexto incompatível, B permanece bloqueado. O conflito ADR 0014 × FREE-02 e a decisão de implementar DTO/afinidade continuam abertos. CI do novo HEAD pendente neste registro pré-publicação.
+
+#### 7. Alterações realizadas
+
+Apenas `docs/proposals/MAESTRO-FREE-03-arquitetura-integracao-runtime.md`: quatro correções e este RUC. Nenhum arquivo de código, teste, norma, dependência ou workflow alterado; nenhum provedor real acionado.
+
+#### 8. Recomendação técnica
+
+`PARCIAL` antes da CI e da auditoria. Após CI verde, encaminhar o mesmo HEAD à revisão técnica externa; esta autoverificação do executor não equivale a auditoria independente nem homologação.
+
+#### 9. Decisão necessária do PO
+
+**PENDENTE:** decidir aceite documental após nova auditoria e, em gates futuros separados, política Free estrita/preferencial, DTO real, protocolo de revogação e eventual `sticky route`. Sem autorização de merge ou implementação por este RUC.
 
 ---
 *Documento de arquitetura proposta — descrição do sistema atual e direção futura claramente separadas; sujeito a auditoria e decisão do PO.*

@@ -62,12 +62,17 @@ class GeminiTextAdapter:
 
     async def execute(self, route: FreeRoute, prompt: str, max_output_tokens: int) -> str:
         # No retries and no fallback after ambiguous Gemini errors.
-        response = await self.client.aio.interactions.create(
-            model=route.model,
-            input=[{"type": "text", "text": prompt}],
-            store=False, automatic_continuation=False,
-            generation_config={"max_output_tokens": max_output_tokens},
-        )
+        try:
+            response = await self.client.aio.interactions.create(
+                model=route.model,
+                input=[{"type": "text", "text": prompt}],
+                store=False, automatic_continuation=False,
+                generation_config={"max_output_tokens": max_output_tokens},
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 429:
+                raise RejectedBeforeGeneration from exc
+            raise
         if getattr(response, "status", None) != "completed":
             raise ValueError("Incomplete or blocked response")
         answer = getattr(response, "output_text", None)
@@ -119,6 +124,8 @@ def _build() -> FreeOrchestrator:
             "cerebras-org", cerebras_limits, True,
         ))
 
+    # Try one route per provider before a second Groq model, where possible.
+    routes.sort(key=lambda route: route.id == "groq-120b")
     return FreeOrchestrator(tuple(routes), adapters, SlidingQuota())
 
 

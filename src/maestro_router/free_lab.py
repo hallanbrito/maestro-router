@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import re
+from datetime import date, datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI
@@ -81,6 +83,43 @@ class GeminiTextAdapter:
         return answer
 
 
+
+def _alibaba_free_route() -> FreeRoute | None:
+    """Fail closed unless all free-tier operator confirmations are present.
+
+    Local assertions are not proof of official quota or actual billing state.
+    """
+    flags = (
+        "MAESTRO_ALIBABA_FREE_CONFIRMED",
+        "MAESTRO_ALIBABA_FREE_QUOTA_ONLY_CONFIRMED",
+        "MAESTRO_ALIBABA_SCOPE_INTERNATIONAL_CONFIRMED",
+    )
+    if not all(_enabled(flag) for flag in flags):
+        return None
+    workspace = os.environ.get("MAESTRO_ALIBABA_WORKSPACE_ID", "")
+    model = os.environ.get("MAESTRO_ALIBABA_MODEL", "")
+    expiry = os.environ.get("MAESTRO_ALIBABA_FREE_EXPIRES_UTC", "")
+    limits = _limits("ALIBABA")
+    if not os.environ.get("ALIBABA_API_KEY") or limits is None:
+        return None
+    # Construct only the documented Singapore workspace endpoint.
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", workspace):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", model):
+        return None
+    try:
+        expires_on = date.fromisoformat(expiry)
+    except ValueError:
+        return None
+    if expires_on <= datetime.now(timezone.utc).date():
+        return None
+    return FreeRoute(
+        id="alibaba-free", provider="alibaba", model=model,
+        scope=f"alibaba:{workspace}:{model}", limits=limits,
+        verified_free_by_operator=True,
+    )
+
+
 def _build() -> FreeOrchestrator:
     routes: list[FreeRoute] = []
     adapters: dict[str, Any] = {}
@@ -99,6 +138,19 @@ def _build() -> FreeOrchestrator:
                 scope="groq-org-" + suffix, limits=Limits(30, 1000, 8000, 200000),
                 verified_free_by_operator=True,
             ))
+
+
+    # Local opt-in only; the operator must verify Free Quota Only in console.
+    alibaba_route = _alibaba_free_route()
+    if alibaba_route is not None:
+        workspace = os.environ["MAESTRO_ALIBABA_WORKSPACE_ID"]
+        endpoint = (
+            f"https://{workspace}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        )
+        adapters["alibaba"] = OpenAIChatAdapter(
+            os.environ["ALIBABA_API_KEY"], endpoint
+        )
+        routes.append(alibaba_route)
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
     gemini_limits = _limits("GEMINI")
@@ -124,8 +176,10 @@ def _build() -> FreeOrchestrator:
             "cerebras-org", cerebras_limits, True,
         ))
 
-    # Try one route per provider before a second Groq model, where possible.
-    routes.sort(key=lambda route: route.id == "groq-120b")
+    # Try Groq -> Alibaba -> Gemini, then other/second model (3 dispatches max).
+    order = {"groq-20b": 0, "alibaba-free": 1, "gemini-free": 2,
+             "cerebras-free": 3, "groq-120b": 4}
+    routes.sort(key=lambda route: order.get(route.id, 99))
     return FreeOrchestrator(tuple(routes), adapters, SlidingQuota())
 
 

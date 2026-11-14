@@ -9,7 +9,7 @@ import json
 import os
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 GITHUB_API = "https://api.github.com/repos/hallanbrito"
 _ALLOWED_REPOS = {"CHDevFlow", "maestro-router"}
@@ -32,6 +32,13 @@ def _maestro_admin_url(base: str) -> str:
     return f"{base.rstrip('/')}/admin/config"
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Bloqueia redirecionamentos, inclusive para destinos fora da allowlist."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def _get_json(url: str, *, github: bool = False) -> object:
     headers = {"Accept": "application/vnd.github+json" if github else "application/json"}
     if github:
@@ -39,7 +46,7 @@ def _get_json(url: str, *, github: bool = False) -> object:
         if token:
             headers["Authorization"] = f"Bearer {token}"
     request = Request(url, headers=headers, method="GET")
-    with urlopen(request, timeout=4) as response:
+    with build_opener(_NoRedirect).open(request, timeout=4) as response:
         data = response.read(_MAX_RESPONSE_BYTES + 1)
     if len(data) > _MAX_RESPONSE_BYTES:
         raise ValueError("Resposta excede limite")

@@ -100,12 +100,15 @@ def _alibaba_free_route() -> FreeRoute | None:
     model = os.environ.get("MAESTRO_ALIBABA_MODEL", "")
     expiry = os.environ.get("MAESTRO_ALIBABA_FREE_EXPIRES_UTC", "")
     limits = _limits("ALIBABA")
-    if not os.environ.get("ALIBABA_API_KEY") or limits is None:
+    if not os.environ.get("ALIBABA_API_KEY", "").strip() or limits is None:
         return None
     # Construct only the documented Singapore workspace endpoint.
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", workspace):
         return None
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", model):
+        return None
+    # fromisoformat also accepts compact/week-date forms: require calendar ISO.
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", expiry):
         return None
     try:
         expires_on = date.fromisoformat(expiry)

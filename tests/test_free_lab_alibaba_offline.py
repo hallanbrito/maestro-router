@@ -141,3 +141,16 @@ def test_alibaba_explicit_no_never_prepares_route():
     cfg["MAESTRO_ALIBABA_FREE_QUOTA_ONLY_CONFIRMED"] = "no"
     with patch.dict(os.environ, cfg, clear=True):
         assert free_lab._alibaba_free_route() is None
+
+
+def test_alibaba_rejects_compact_week_date_and_blank_key():
+    cfg = settings()
+    for bad_date in ("20261231", "2026-W48-3", "2026-12-1", "2026-13-01"):
+        cfg["MAESTRO_ALIBABA_FREE_EXPIRES_UTC"] = bad_date
+        with patch.dict(os.environ, cfg, clear=True):
+            assert free_lab._alibaba_free_route() is None
+
+    cfg = settings()
+    cfg["ALIBABA_API_KEY"] = "   "
+    with patch.dict(os.environ, cfg, clear=True):
+        assert free_lab._alibaba_free_route() is None

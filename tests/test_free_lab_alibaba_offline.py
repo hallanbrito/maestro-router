@@ -134,3 +134,10 @@ def test_live_disabled_never_dispatches():
         engine = free_lab._build()
         result = asyncio.run(engine.run("tarefa", live_allowed=False))
     assert result.status == "disabled" and not fake.calls
+
+
+def test_alibaba_explicit_no_never_prepares_route():
+    cfg = settings()
+    cfg["MAESTRO_ALIBABA_FREE_QUOTA_ONLY_CONFIRMED"] = "no"
+    with patch.dict(os.environ, cfg, clear=True):
+        assert free_lab._alibaba_free_route() is None
